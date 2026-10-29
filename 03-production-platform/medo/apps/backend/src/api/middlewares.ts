@@ -1,0 +1,8053 @@
+import { randomUUID } from "node:crypto";
+import {
+  defineMiddlewares,
+  MedusaErrorHandlerFunction,
+  validateAndTransformBody,
+  validateAndTransformQuery,
+  authenticate,
+  applyLocale,
+  MedusaRequest,
+  MedusaResponse,
+  MedusaNextFunction,
+  allowFields,
+} from "@medusajs/framework/http";
+import multer from "multer";
+import os from "os";
+import path from "path";
+import { ConfigModule } from "@medusajs/framework/types";
+import { parseCorsOrigins, ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import cors from "cors";
+import { z } from "@medusajs/framework/zod";
+import { personSchema, listPersonsQuerySchema, UpdatePersonSchema, ReadPersonQuerySchema } from "./admin/persons/validators";
+import { listEmailEditorProductsQuerySchema } from "./admin/email-editor/products/validators";
+import { OpsMaintenanceRunSchema, OpsMaintenanceRunsQuerySchema, OpsMaintenanceBatchSchema, OpsMaintenanceBatchesQuerySchema } from "./admin/ops/maintenance-jobs/validators";
+import { AdminPostLocationOwnershipReq } from "./admin/location-ownership/validators";
+import { AdminUpdateTextileAnalysisSchema } from "./admin/textile-analyses/validators";
+import { getPersonResourceDefinition } from "./admin/persons/resources/registry";
+import { AdminGetOrdersOrderParams } from "@medusajs/medusa/api/admin/orders/validators";
+import { retrieveTransformQueryConfig as retrieveOrderTransformQueryConfig } from "@medusajs/medusa/api/admin/orders/query-config";
+import {
+  CreateUcpCheckoutSessionSchema,
+  UpdateUcpCheckoutSessionSchema,
+  CompleteUcpCheckoutSessionSchema,
+  CatalogSearchSchema,
+  CatalogLookupSchema,
+} from "./ucp/validators";
+import { resolveStorefrontUrl } from "./ucp/lib/context";
+import {
+  isMcpMachinePrincipal,
+  loadMcpScopeLevel,
+  mcpPrincipalFromRequest,
+  mcpScopeAllows,
+  MCP_SCOPE_EXEMPT_ADMIN_PATHS,
+} from "../lib/mcp-scope";
+import { adminRouteTier } from "./admin/mcp/lib/route-tier";
+import { mcpOauthTokenIdFromRequest } from "../lib/mcp-oauth";
+import { MCP_OAUTH_MODULE } from "../modules/mcp_oauth";
+import type McpOauthService from "../modules/mcp_oauth/service";
+import { GET as oauthProtectedResourceDoc } from "./well-known/oauth-protected-resource/route";
+import { GET as oauthAuthorizationServerDoc } from "./well-known/oauth-authorization-server/route";
+
+// Helper function to wrap Zod schemas for compatibility with validateAndTransformBody.
+// Historically this wrapped with z.preprocess((obj) => obj, schema) — under Zod v3
+// that returned a ZodEffects that still allowed Medusa's API loader to call
+// .partial() through. Zod v4 returns a ZodPipe instead, which has no .partial(),
+// so the wrap broke route registration ("Cannot read properties of undefined
+// (reading 'partial')"). The preprocess was a no-op anyway — passing the schema
+// through verbatim keeps every call site working and lets Medusa's loader
+// access .partial / .extend / etc. on the underlying ZodObject.
+const wrapSchema = <T extends z.ZodType>(schema: T) => schema as any;
+
+/**
+ * A store route that re-declares its query config must also declare `allowed`:
+ * since Medusa 2.21 a store route strips every field not on the list, and no
+ * list means nothing is allowed. Core's list plus our own defaults, so a
+ * default can never be the thing that gets stripped.
+ */
+const storeAllowed = (core: string[] | undefined, defaults: string[]): string[] =>
+  [...new Set([...(core ?? []), ...defaults])];
+
+/**
+ * Like `wrapSchema`, but for a body whose top level is deliberately open.
+ *
+ * `zodValidator` calls `.strict()` on any schema that exposes it, which
+ * overrides `.passthrough()` and rejects every unlisted key. Wrapping in
+ * `z.preprocess` produces a schema with no `.strict` method, so the schema's own
+ * looseness survives. Use ONLY where the payload is genuinely open-ended — a
+ * closed payload should stay strict and reject typos.
+ */
+const wrapLooseSchema = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((obj) => obj, schema) as any;
+
+/**
+ * HTTP status for a MedusaError `type`, mirroring the framework's own handler
+ * (`@medusajs/framework/dist/http/middlewares/error-handler.js`).
+ *
+ * This map exists because the custom `errorHandler` at the bottom of this file
+ * has to re-implement the mapping: it returns a `{ message }`-only body that
+ * clients already depend on, so it cannot simply delegate to the framework
+ * handler (which returns `{ code, type, message }`).
+ *
+ * It previously had exactly two branches — `not_found` → 404, EVERYTHING else
+ * → 400 — which meant no partner or admin endpoint could ever answer 401, 403,
+ * 409, 422 or 500. An expired session was indistinguishable from a malformed
+ * body, so client interceptors that key off 401 were dead code, and database
+ * faults were reported as client errors and never tripped 5xx alerting (#1202).
+ *
+ * DELIBERATE DIVERGENCE — unmapped types keep today's 400 rather than the
+ * framework's 500. The unmapped set is `unexpected_state`, `invalid_argument`
+ * and `unknown_modules`, and there are ~157 throw sites across src (99 under
+ * api/ alone). The framework calls those server faults and 500s them; that is
+ * defensible, but flipping 157 endpoints to 5xx in the same change that fixes
+ * auth statuses would bury the real fix under an alerting flood, and some of
+ * those sites are genuinely client-caused. Keeping 400 makes this change
+ * strictly "wrong statuses become right", with nothing else moving.
+ *
+ * Re-classifying `unexpected_state` / `invalid_argument` is worth doing on its
+ * own, site by site, and is tracked separately — do NOT do it by changing this
+ * default.
+ *
+ * One more divergence: `payment_requires_more_error` → 422. The framework has
+ * no case for it and would 500; 422 is the semantically right answer and there
+ * are currently zero throw sites, so this is a no-op that avoids a future trap.
+ */
+const MEDUSA_ERROR_STATUS: Record<string, number> = {
+  not_found: 404,
+  invalid_data: 400,
+  not_allowed: 400,
+  unauthorized: 401,
+  forbidden: 403,
+  conflict: 409,
+  duplicate_error: 422,
+  payment_authorization_error: 422,
+  payment_requires_more_error: 422,
+  database_error: 500,
+};
+
+const medusaErrorStatus = (type: string | undefined): number =>
+  (type && MEDUSA_ERROR_STATUS[type]) || 400;
+
+const buildPersonResourceValidator =
+  (type: "create" | "update") =>
+    (req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) => {
+      const resourceKey = req.params?.resource;
+
+      if (!resourceKey) {
+        return next();
+      }
+
+      const definition = getPersonResourceDefinition(resourceKey);
+
+      if (!definition) {
+        return next();
+      }
+
+      const schema = definition.validators?.[type];
+
+      if (!schema) {
+        return next();
+      }
+
+      return validateAndTransformBody(wrapSchema(schema))(req, res, next);
+    };
+
+const validatePersonResourceCreate = buildPersonResourceValidator("create");
+const validatePersonResourceUpdate = buildPersonResourceValidator("update");
+
+import { personTypeSchema, updatePersonTypeSchema } from "./admin/persontypes/validators";
+import { addressSchema } from "./admin/persons/[id]/addresses/validators";
+import { contactSchema } from "./admin/persons/[id]/contacts/validators";
+import { tagSchema, deleteTagSchema } from "./admin/persons/[id]/tags/validators";
+import { rawMaterialSchema, UpdateRawMaterialSchema } from "./admin/inventory-items/[id]/rawmaterials/validators";
+import { splitInventorySchema } from "./admin/inventory-items/[id]/split/validators";
+import { CreateMaterialTypeSchema, ReadRawMaterialCategoriesSchema } from "./admin/categories/rawmaterials/validators";
+import { AttachDesignCustomerSchema, AttachDesignInventoryOrderSchema, CreateDesignLLMSchema, designSchema, LinkDesignPartnerSchema, ReadDesignsQuerySchema, UpdateDesignSchema } from "./admin/designs/validators";
+import { DesignBriefSchema, UpdateDesignBriefSchema } from "./admin/designs/[id]/brief/validators";
+import { SegmentImageSchema } from "./admin/designs/[id]/segment/validators";
+import { DepthImageSchema } from "./partners/designs/[designId]/segment/depth/validators";
+import { ReviseDesignSchema as PartnerReviseDesignSchema } from "./partners/designs/[designId]/revise/validators";
+import { taskTemplateSchema, updateTaskTemplateSchema } from "./admin/task-templates/validators";
+import { AdminPostDesignTasksReq } from "./admin/designs/[id]/tasks/validators";
+import { AdminPutDesignTaskReq } from "./admin/designs/[id]/tasks/[taskId]/validators";
+import {
+  AdminApproveProductionRunReq,
+  AdminAssignProductionRunPartnerReq,
+  AdminRedispatchParkedRunsReq,
+  AdminRunApprovalsReq,
+  AdminCreateProductionRunReq,
+  AdminCancelProductionRunReq,
+  AdminResumeDispatchProductionRunReq,
+  AdminSendProductionRunToProductionReq,
+  AdminStartDispatchProductionRunReq,
+  AdminFinishProductionRunReq,
+} from "./admin/production-runs/validators";
+import { AdminUpdateProductionRunPolicySchema } from "./admin/production-run-policy/validators";
+import {
+  websiteSchema,
+  updateWebsiteSchema,
+} from "./admin/websites/validators";
+import {
+  updatePageSchema,
+  postPagesSchema,
+} from "./admin/websites/[id]/pages/validators";
+import { createBlocksSchema, ReadBlocksQuerySchema, updateBlockSchema } from "./admin/websites/[id]/pages/[pageId]/blocks/validators";
+import { AdminPostDesignInventoryReq, AdminDeleteDesignInventoryReq, AdminPatchDesignInventoryLinkReq } from "./admin/designs/[id]/inventory/validators";
+import { AdminPostConsumptionLogReq, AdminPostCommitConsumptionReq, AdminPatchConsumptionLogReq } from "./admin/designs/[id]/consumption-logs/validators";
+import { AdminPostRunConsumptionLogReq, AdminPostRunCommitConsumptionReq } from "./admin/production-runs/[id]/consumption-logs/validators";
+import { SetProfitShareSchema, RecordSaleSchema, RecordSettlementSchema } from "../workflows/production-runs/lib/profit-share-store";
+import { AdminAttachSubmissionDocumentsReq } from "./admin/payment-submissions/[id]/documents/validators";
+import { AdminPostDesignInquiryReq, AdminPostDesignInquiryPreviewReq, AdminPostCloseDesignInquiryReq } from "./admin/designs/[id]/inquiries/validators";
+import { AdminCreateEnergyRateReq, AdminUpdateEnergyRateReq } from "./admin/energy-rates/validators";
+import { partnerSchema, partnerUpdateSchema } from "./partners/validators";
+import { investorSchema, investorUpdateSchema, capTableSchema, capTableUpdateSchema, shareClassSchema, stakeSchema, fundingRoundSchema, pipelineSchema, callForSharesSchema, paymentSchema, documentSchema, companySchema, companyUpdateSchema, investorAdminSchema } from "./investors/validators";
+import { partnerPeopleSchema } from "./partners/[id]/validators";
+import { setPartnerMePinSchema, updatePartnerMeSchema } from "./partners/me/validators";
+import { onboardingProfileUpdateSchema } from "./partners/onboarding-profile/validators";
+import { partnerUpdateOrderLinesSchema, partnerAddOrderChargeSchema } from "./partners/inventory-orders/change-schemas";
+import { registerDeviceTokenSchema, unregisterDeviceTokenSchema } from "./partners/device-tokens/validators";
+import { partnerReceiveIncomingSchema } from "./partners/incoming-deliveries/validators";
+import { setLayoutConfigurationSchema } from "./partners/layouts/validators";
+import { AdminGetPartnersParamsSchema } from "./admin/persons/partner/validators";
+import { createInventoryOrdersSchema, listInventoryOrdersQuerySchema, ReadSingleInventoryOrderQuerySchema, updateInventoryOrdersSchema, updateInventoryOrderLinesSchema, createInventoryOrderChargeSchema, updateInventoryOrderChargeSchema, assignInventoryOrderPartnerSchema, rejectInventoryOrderChangeSchema } from "./admin/inventory-orders/validators";
+import { createRawMaterialGroupSchema, updateRawMaterialGroupSchema, listRawMaterialGroupsQuerySchema, addGroupColorSchema, addGroupColorFullSchema, linkGroupColorsSchema, createGroupOrderSchema, readGroupQuerySchema } from "./admin/raw-material-groups/validators";
+import { pinDesignGroupSchema, updateDesignGroupSchema } from "./admin/designs/[id]/material-groups/validators";
+// Import already defined above
+import { SendBlogSubscriptionSchema } from "./admin/websites/[id]/pages/[pageId]/subs/route";
+import { subscriptionSchema } from "./web/website/[domain]/validators";
+import { websiteThemeSchema } from "./partners/storefront/website/theme/validators";
+import { ThemeChatSchema } from "./partners/storefront/website/theme/chat/validators";
+import { PartnerAssistantChatSchema } from "./partners/assistant/chat/validators";
+import { PartnerAssistantSummarizeSchema } from "./partners/assistant/summarize/validators";
+import { CreateConversationSchema as PartnerCreateConversationSchema, UpdateConversationSchema as PartnerUpdateConversationSchema } from "./partners/assistant/conversations/validators";
+import { CreateConversationSchema as AdminAssistantCreateConversationSchema, UpdateConversationSchema as AdminAssistantUpdateConversationSchema } from "./admin/assistant/conversations/validators";
+import { CreateDesignConversationSchema, UpdateDesignConversationSchema, DeleteDesignConversationSchema } from "./store/custom/design-assistant/conversations/validators";
+import { BulkHsCodesSchema } from "./admin/customs/hs-codes/validators";
+import { BulkUpdateProductsSchema } from "./admin/products/bulk-update/validators";
+import { BulkProductSpecReq } from "./admin/products/spec-bulk/validators";
+import {
+  CreateExportLutSchema,
+  UpdateExportLutSchema,
+} from "./admin/platform-tax-identities/validators";
+import { CreatePlatformCostConfigSchema } from "./admin/platform-cost-config/validators";
+import { ChangeOrderItemDesignSchema } from "./admin/designs/orders/[lineItemId]/design/validators";
+import { ChangeOrderDesignsSchema } from "./admin/orders/[id]/design-changes/validators"
+import { createPlanSchema, updatePlanSchema, createSubscriptionSchema } from "./admin/partner-plans/validators";
+import { subscribeSchema as partnerSubscribeSchema } from "./partners/subscription/validators";
+import { AdminPostInventoryOrderTasksReq } from "./admin/inventory-orders/[id]/tasks/validators";
+import { createStoreSchema } from "./admin/stores/validators";
+import { UpdateInventoryOrderTask } from "./admin/inventory-orders/[id]/tasks/[taskId]/validators";
+import { TestBlogEmailSchema } from "./admin/websites/[id]/pages/[pageId]/subs/test/route";
+import { listSocialPlatformsQuerySchema, SocialPlatformSchema, UpdateSocialPlatformSchema, ConnectWhatsAppSchema } from "./admin/social-platforms/validators";
+import { CreateDeploymentAccountSchema, UpdateDeploymentAccountSchema, ListDeploymentAccountsQuerySchema } from "./admin/deployment-accounts/validators";
+import { StoreAiSearchSchema } from "./store/ai/search/validators";
+import { StoreShippingEstimateSchema } from "./store/shipping-estimate/validators";
+import { StoreAiChatSchema } from "./store/ai/chat/validators";
+import { StoreGenerateAiImageReqSchema } from "./store/ai/imagegen/validators";
+import { StoreTryOnReqSchema } from "./store/ai/tryon/validators";
+import { AccessFeeConfirmSchema } from "./store/ai/accessfee/validators";
+import { listSocialPostsQuerySchema, SocialPostSchema, UpdateSocialPostSchema } from "./admin/social-posts/validators";
+import { ConfirmBody } from "./admin/persons/geocode-addresses/[transaction_id]/confirm/validators";
+import { listPublicPersonsQuerySchema } from "./web/persons/validators";
+import { personContactRequestSchema } from "./web/persons/[id]/contact/validators";
+import { LinkDesignValidator, UnlinkDesignValidator } from "./admin/products/[id]/linkDesign/validators";
+import { sendToPartnerSchema } from "./admin/inventory-orders/[id]/send-to-partner/validators";
+import { receiveInventoryOrderSchema } from "./admin/inventory-orders/[id]/receive/validators";
+import { resolveShortfallSchema } from "./admin/inventory-orders/[id]/shortfalls/[shortfallId]/resolve/validators";
+import { createMaterialTransferSchema, receiveMaterialTransferSchema } from "./admin/inventory-transfers/validators";
+import { EmailTemplateQueryParams, EmailTemplateSchema, UpdateEmailTemplateSchema } from "./admin/email-templates/validators";
+import { CreateAgreementSchema, UpdateAgreementSchema } from "./admin/agreements/validators";
+import { AdminImageExtractionReq } from "./admin/ai/image-extraction/validators";
+import { AdminIdExtractionReq } from "./admin/people/id-extraction/validators";
+import { PartnerIdExtractionReq } from "./partners/people/id-extraction/validators";
+import {
+  PartnerIdExtractionBatchReq,
+  PartnerIdExtractionBatchApproveReq,
+} from "./partners/people/id-extraction/batch/validators";
+import { AdminSendPersonAgreementReq } from "./admin/persons/[id]/agreements/validators";
+import { folderSchema, uploadMediaSchema } from "./admin/medias/validator";
+import { ExtractFeaturesRequestSchema } from "./admin/medias/extract-features/validators";
+import { ExtractFolderFeaturesRequestSchema } from "./admin/medias/folder/[id]/extract-features/validators";
+import {
+  AdminCreateFormSchema,
+  AdminListFormResponsesQuerySchema,
+  AdminListFormsQuerySchema,
+  AdminSetFormFieldsSchema,
+  AdminUpdateFormSchema,
+} from "./admin/forms/validators";
+// Payments: schemas
+import { PaymentSchema, ListPaymentsQuerySchema, UpdatePaymentSchema, PaymentSettlesSchema, PaymentRecordsAgainstSchema } from "./admin/payments/validators";
+import { CreatePaymentAndLinkSchema } from "./admin/payments/link/validators";
+import { CreatePartnerCreditSchema } from "./admin/partners/[id]/credits/validators";
+import { ApplyPartnerCreditSchema } from "./admin/partners/[id]/credits/[creditId]/apply/validators";
+import { ListPaymentsByPersonQuerySchema } from "./admin/payments/persons/[id]/validators";
+import { ListPaymentsByPartnerQuerySchema } from "./admin/payments/partners/[id]/validators";
+import { ListPaymentMethodsByPersonQuerySchema, CreatePaymentMethodForPersonSchema } from "./admin/payments/persons/[id]/methods/validators";
+import { ListPaymentMethodsByPartnerQuerySchema, CreatePaymentMethodForPartnerSchema } from "./admin/payments/partners/[id]/methods/validators";
+import {
+  ReportingQuerySchema,
+  CreatePaymentReportSchema,
+  ListPaymentReportsQuerySchema,
+  UpdatePaymentReportSchema,
+} from "./admin/payment_reports/validators";
+import {
+  CreatePaymentSubmissionSchema,
+  ListPaymentSubmissionsQuerySchema,
+  SubmitPaymentSubmissionSchema as PartnerSubmitPaymentSubmissionSchema,
+} from "./partners/payment-submissions/validators";
+import {
+  AdminListPaymentSubmissionsQuerySchema,
+  AdminPayableRunsQuerySchema,
+  AdminReviewPaymentSubmissionSchema,
+  CreateAdminPaymentSubmissionSchema,
+  SubmitPaymentSubmissionSchema as AdminSubmitPaymentSubmissionSchema,
+  UpdatePaymentSubmissionItemSchema,
+  UpdatePaymentSubmissionSchema,
+} from "./admin/payment-submissions/validators";
+import {
+  ListReconciliationsQuerySchema,
+  CreateReconciliationSchema,
+  UpdateReconciliationSchema,
+  SettleReconciliationSchema,
+} from "./admin/payment_reports/reconciliation/validators";
+import { AdminRagSearchQuery } from "./admin/ai/rag/search/validators";
+import { AdminAiChatResolveReq, AdminAiChatResolveQuery } from "./admin/ai/chat/resolve/validators";
+import { ListConversationsQuerySchema, ListMessagesQuerySchema, SendMessageSchema, CreateConversationSchema, RequestPartnerPhotosSchema } from "./admin/messaging/validators";
+import { AdminAiChatReq } from "./admin/ai/chat/chat/validators";
+import { AdminAssistantChatSchema } from "./admin/assistant/chat/validators";
+import { AdminAssistantSummarizeSchema } from "./admin/assistant/summarize/validators";
+import { AdminAssistantVisionSchema } from "./admin/assistant/vision/validators";
+import { AdminPostDesignTaskAssignReq } from "./admin/designs/[id]/tasks/[taskId]/assign/validators";
+import { AdminPostPartnerTaskAssignReq } from "./admin/partners/[id]/tasks/[taskId]/assign/validators";
+import { AdminCreatePartnerTaskReq, AdminUpdatePartnerTaskReq } from "./admin/partners/[id]/tasks/validators";
+import {
+  AdminListPartnerCapabilitiesQuery,
+  AdminCreatePartnerCapabilityReq,
+  AdminScanPartnerWebsiteReq,
+  AdminCommitPartnerCapabilityScanReq,
+  AdminAddPartnerCapabilityKnowledgeReq,
+} from "./admin/partners/[id]/capabilities/validators";
+import {
+  ListPaymentsByPartnerQuerySchema as PartnerListPaymentsByPartnerQuerySchema,
+  ListPaymentMethodsByPartnerQuerySchema as PartnerListPaymentMethodsByPartnerQuerySchema,
+  CreatePaymentMethodForPartnerSchema as PartnerCreatePaymentMethodForPartnerSchema,
+  UpdatePaymentMethodForPartnerSchema as PartnerUpdatePaymentMethodForPartnerSchema,
+} from "./partners/[id]/payments/validators";
+import { ReviseDesignSchema } from "./admin/designs/[id]/revise/validators";
+import { CancelPartnerAssignmentSchema } from "./admin/designs/[id]/cancel-partner-assignment/validators";
+import { AdminCreateDesignProductionRunSchema } from "./admin/designs/[id]/production-runs/validators";
+import { AdminRecreateProductionRunSchema } from "./admin/designs/recreate-production-run/validators";
+import { listDesignsQuerySchema, PartnerCreateDesignReq, PartnerUpdateDesignReq } from "./partners/designs/validators";
+import { listProductionRunsQuerySchema } from "./partners/production-runs/validators";
+import { PartnerPostDesignInventoryReq, PartnerPatchDesignInventoryLinkReq, PartnerDeleteDesignInventoryReq } from "./partners/designs/[designId]/inventory/validators";
+import { PartnerCreateProductionRunReq } from "./partners/designs/[designId]/production-runs/validators";
+import { PartnerPostConsumptionLogReq } from "./partners/designs/[designId]/consumption-logs/validators";
+import { PartnerPostDesignTasksReq } from "./partners/designs/[designId]/tasks/validators";
+import { DesignBriefSchema as PartnerDesignBriefSchema, UpdateDesignBriefSchema as PartnerUpdateDesignBriefSchema } from "./partners/designs/[designId]/brief/validators";
+import { SavePartnerMoodboardSchema } from "./partners/designs/[designId]/moodboard/validators";
+import { AdminCreateDesignerInviteSchema } from "./admin/designs/[id]/designer-invites/validators";
+import { AcceptDesignerInviteSchema } from "./partners/designer-invites/[token]/accept/validators";
+import { PartnerPostProductionRunConsumptionLogReq } from "./partners/production-runs/[id]/consumption-logs/validators";
+import { listPartnersQuerySchema, PostPartnerSchema } from "./admin/partners/validators";
+import { AdminBroadcastNotificationSchema } from "./admin/partners/notifications/broadcast/validators";
+import { ListIdentitiesQuerySchema } from "./admin/users/identities/validators";
+import { ListInventoryItemRawMaterialsQuerySchema } from "./admin/inventory-items/raw-materials/validators";
+import { ListInventoryCatalogQuerySchema } from "./admin/inventory-items/catalog/validators";
+import { BulkImportSchema } from "./admin/inventory-items/bulk-import/validators";
+import { PartnerCreateStoreReq } from "./partners/stores/validators";
+import { CreatePartnerWarehouseReq } from "./partners/warehouses/validators";
+import { PartnerCreateProductReq, PartnerArtisanProductDetailReq, PartnerProductSpecReq, PartnerStoreCreateProductReq, PartnerQuickCreateProductReq } from "./partners/products/validators";
+import { PartnerCreatePriceListReq, PartnerUpdatePriceListReq } from "./partners/price-lists/validators";
+import { AdjustQuoteReq, MintDesignVariantReq, PartnerMintQuoteReq, QuoteReadinessReq } from "./partners/quotes/validators";
+import { PartnerPostInquiryAnswersReq, PartnerPostInquirySubmitReq, PartnerListInquiriesQuery, PartnerPostCapabilitySampleReq, PartnerListCapabilitySamplesQuery } from "./partners/inquiries/validators";
+import {
+  AdminCreateQuoteDraftReq,
+  AdminMintQuoteReq,
+  AdminQuoteReadinessReq,
+  AdminUpdateQuoteDraftReq,
+} from "./admin/quotes/validators";
+import { BATCH_VARIANT_FIELDS } from "../workflows/partner/batch-partner-variants";
+import { StoreMadeToSpecReq } from "./store/carts/[id]/made-to-spec/validators";
+import {
+  PartnerCreateRegionReq,
+  PartnerUpdateRegionReq,
+  PartnerUpdateLocationReq,
+  PartnerCreateFulfillmentSetReq,
+  PartnerUpdateFulfillmentProvidersReq,
+  PartnerCreateShippingOptionReq,
+  PartnerUpdateShippingOptionReq,
+  PartnerUpdateStoreReq,
+  PartnerCreateSalesChannelReq,
+  PartnerUpdateSalesChannelReq,
+  PartnerCreateTaxRegionReq,
+  PartnerUpdateTaxRegionReq,
+} from "./partners/stores/[id]/validators";
+// Reuse admin's region list + retrieve validators and query-config so
+// partner inherits admin's full filter / pagination semantics (no
+// max-limit cap, operator-map filters, $and/$or) without copy+drift.
+// PR #271 (FX bug sweep) accidentally deleted these imports + the
+// validateAndTransformQuery wiring on the 4 region routes, which
+// regressed every partner regions GET to 500 (`req.queryConfig`
+// undefined → handler fell through to `fields: []` → query.graph
+// returned sparse rows → `.map(r => r.id)` choked).
+import {
+  AdminGetRegionsParams,
+  AdminGetRegionParams,
+} from "@medusajs/medusa/api/admin/regions/validators";
+import {
+  listTransformQueryConfig as partnerRegionListTransformQueryConfig,
+  retrieveTransformQueryConfig as partnerRegionRetrieveTransformQueryConfig,
+} from "@medusajs/medusa/api/admin/regions/query-config";
+import { AdminGetPaymentProvidersParams } from "@medusajs/medusa/api/admin/payments/validators";
+import { listTransformPaymentProvidersQueryConfig } from "@medusajs/medusa/api/admin/payments/query-config";
+import * as storeCollectionQueryConfig from "@medusajs/medusa/api/store/collections/query-config";
+import * as storeCategoryQueryConfig from "@medusajs/medusa/api/store/product-categories/query-config";
+import { ProductionRunRemindersSchema } from "./admin/production-runs/[id]/reminders/validators";
+import { setPersonSubscriptionSchema } from "./admin/persons/[id]/subscription/validators";
+import { PartnerBatchVariantInventoryItemsSchema } from "./partners/stores/[id]/products/[productId]/variants/inventory-items/batch/validators";
+import {
+  listInboundEmailsQuerySchema,
+  extractInboundEmailSchema,
+  executeInboundEmailSchema,
+  linkInboundEmailInventoryOrderSchema,
+  setInboundMailboxesSchema,
+  createInboundMailboxSchema,
+  syncInboundEmailsSchema,
+  testConnectionSchema,
+} from "./admin/inbound-emails/validators";
+import { LinkPersonValidator, UnlinkPersonValidator } from "./admin/products/[id]/linkPerson/validators";
+import { GenerateDescriptionValidator } from "./admin/products/[id]/generateDescription/validators";
+import { PublishSocialPostSchema } from "./admin/social-posts/[id]/publish/validators";
+import { GetAccountsSchema } from "./admin/socials/accounts/validators";
+import { FeedbackSchema, UpdateFeedbackSchema } from "./admin/feedbacks/validators";
+import { AnalyticsEventQuerySchema } from "./admin/analytics-events/validators";
+import { AdminNotificationsQueryParams } from "./admin/notifications/validators";
+import {
+  CreatePublishingCampaignSchema,
+  UpdatePublishingCampaignSchema,
+  ListPublishingCampaignsQuerySchema,
+  RetryItemSchema,
+} from "./admin/publishing-campaigns/validators";
+import {
+  ListLeadsQuerySchema,
+  UpdateLeadSchema,
+  SyncLeadsSchema,
+  SyncAdAccountsSchema,
+  ListCampaignsQuerySchema,
+  SyncCampaignsSchema,
+  SyncInsightsSchema,
+  MetaAdsOverviewQuerySchema,
+  CreateRemoteAdSchema,
+} from "./admin/meta-ads/validators";
+import { webSubmitFormResponseSchema, webVerifyFormResponseSchema } from "./web/website/[domain]/forms/[handle]/validators";
+import { WebSaveTourItinerarySchema } from "./web/tour-visits/[token]/validators";
+import { LinkDesignsToCustomerSchema } from "./admin/customers/[id]/designs/validators";
+import {
+  CreateDesignDraftOrderSchema,
+  CreateDesignOrderSchema,
+} from "./admin/customers/[id]/design-order/validators";
+import { listAbandonedCartsQuerySchema } from "./admin/abandoned-carts/validators";
+import {
+  CreatePersonPropertySchema,
+  UpdatePersonPropertySchema,
+} from "./admin/person-properties/validators";
+import {
+  CreateCrmCompanySchema,
+  UpdateCrmCompanySchema,
+} from "./admin/crm/companies/validators";
+import {
+  CreateCrmPersonSchema,
+  UpdateCrmPersonSchema,
+} from "./admin/crm/people/validators";
+import {
+  CreateCrmOpportunitySchema,
+  UpdateCrmOpportunitySchema,
+} from "./admin/crm/opportunities/validators";
+import {
+  CreateCrmNoteSchema,
+  UpdateCrmNoteSchema,
+} from "./admin/crm/notes/validators";
+import {
+  CreateCrmTaskSchema,
+  UpdateCrmTaskSchema,
+} from "./admin/crm/tasks/validators";
+import {
+  CreateCrmActivitySchema,
+  UpdateCrmActivitySchema,
+} from "./admin/crm/activities/validators";
+import { VerifyWeaverSchema } from "./web/census/verify/validators";
+
+/**
+ * In-process per-IP rate limiter for public token-resolution routes.
+ * Lives in node memory — no Redis dep — so it doesn't coordinate across
+ * multiple instances. For prod scale, swap for a Redis-backed limiter
+ * (e.g. rate-limiter-flexible). For our current single-instance Railway
+ * deploy this is enough to stop a runaway client without adding deps.
+ *
+ * Default: 60 req / 60s / IP. Configurable via env if you need to tune.
+ */
+const createRateLimitMiddleware = (
+  options: { windowMs?: number; max?: number; key?: string } = {}
+) => {
+  const windowMs = options.windowMs ?? 60_000
+  const max = options.max ?? 60
+  const buckets = new Map<string, { resetAt: number; count: number }>()
+
+  return (req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) => {
+    const ip =
+      ((req.headers["x-forwarded-for"] as string) || "")
+        .split(",")[0]
+        ?.trim() ||
+      req.socket?.remoteAddress ||
+      "unknown"
+    const bucketKey = `${options.key || "default"}:${ip}`
+    const now = Date.now()
+    const bucket = buckets.get(bucketKey)
+
+    if (!bucket || bucket.resetAt < now) {
+      buckets.set(bucketKey, { resetAt: now + windowMs, count: 1 })
+      return next()
+    }
+
+    bucket.count += 1
+    if (bucket.count > max) {
+      res.setHeader(
+        "Retry-After",
+        Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)).toString()
+      )
+      res.status(429).json({
+        message: "Too many requests — please slow down and try again shortly.",
+      })
+      return
+    }
+    next()
+  }
+}
+
+// Every partner storefront we provision lives at <handle>.{ROOT_DOMAIN}
+// (see src/api/admin/partners/[id]/storefront/provision/route.ts). Building
+// the wildcard regex from that same env var means every new partner is
+// CORS-allowed automatically — no Railway env-var update per provisioning.
+// Match: https://anything.<root> with no further sub-subdomains so we
+// don't accidentally whitelist evil.cicilabel.com.attacker.com.
+function rootDomainOrigins(): RegExp[] {
+  const root = (process.env.ROOT_DOMAIN || "").trim()
+  if (!root) return []
+  // Escape dots in the root for regex literal use.
+  const escaped = root.replace(/\./g, "\\.")
+  // Single-label subdomain match; supports both http (local) and https (prod).
+  return [new RegExp(`^https?:\\/\\/[a-z0-9-]+\\.${escaped}$`, "i")]
+}
+
+// Cache of allowed origins derived from the websites + website_domain
+// tables. A partner can register custom aliases (shop.partnername.com)
+// in the admin and they need to be CORS-allowed without an env-var edit.
+//
+// Refreshed lazily every CORS_DOMAIN_CACHE_TTL_MS — newly-added aliases
+// take at most one TTL before they're honored (per server instance).
+const CORS_DOMAIN_CACHE_TTL_MS = 60_000
+let corsDomainCache: { set: Set<string>; expiresAt: number } | null = null
+
+async function loadAllowedOriginsFromDb(scope: any): Promise<Set<string>> {
+  const set = new Set<string>()
+  try {
+    const query = scope.resolve(ContainerRegistrationKeys.QUERY) as any
+    const [websites, domains] = await Promise.all([
+      query
+        .graph({ entity: "websites", fields: ["domain"], pagination: { take: 1000 } })
+        .then((r: any) => r?.data || []),
+      query
+        .graph({ entity: "website_domain", fields: ["domain"], pagination: { take: 5000 } })
+        .then((r: any) => r?.data || [])
+        // website_domain may not be queryable in every env shape; fall
+        // through to just websites if it errors.
+        .catch(() => []),
+    ])
+    for (const w of websites) {
+      const d = String((w as any)?.domain || "").trim().toLowerCase()
+      if (!d) continue
+      set.add(`https://${d}`)
+      set.add(`http://${d}`)
+    }
+    for (const w of domains) {
+      const d = String((w as any)?.domain || "").trim().toLowerCase()
+      if (!d) continue
+      set.add(`https://${d}`)
+      set.add(`http://${d}`)
+    }
+  } catch {
+    // Surface as an empty cache for this refresh cycle — env-list +
+    // ROOT_DOMAIN regex still apply, so a transient DB blip doesn't
+    // suddenly lock partner storefronts out.
+  }
+  return set
+}
+
+async function getAllowedOriginsFromDb(scope: any): Promise<Set<string>> {
+  const now = Date.now()
+  if (corsDomainCache && now < corsDomainCache.expiresAt) {
+    return corsDomainCache.set
+  }
+  try {
+    const set = await loadAllowedOriginsFromDb(scope)
+    corsDomainCache = { set, expiresAt: now + CORS_DOMAIN_CACHE_TTL_MS }
+    return set
+  } catch {
+    // On failure, keep whatever cache we have (even if stale) rather
+    // than dropping all partner origins.
+    return corsDomainCache?.set ?? new Set<string>()
+  }
+}
+
+// Three-layer origin resolver used by both /web and /partners CORS:
+//   1. exact / regex matches from the *_CORS env var
+//   2. *.ROOT_DOMAIN regex (auto-provisioned partner subdomains)
+//   3. exact match against any registered website primary domain or alias
+function buildOriginAllowList(
+  envOrigins: (string | RegExp)[],
+  dbAllowed: Set<string>,
+  rootRegexes: RegExp[]
+) {
+  return (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+    // No origin header (curl, same-origin server-to-server, beacon
+    // navigations) — let it through; the route still authenticates.
+    if (!origin) return cb(null, true)
+    const normalized = origin.toLowerCase()
+
+    for (const allowed of envOrigins) {
+      if (typeof allowed === "string") {
+        if (allowed.toLowerCase() === normalized) return cb(null, true)
+      } else if (allowed instanceof RegExp) {
+        if (allowed.test(origin)) return cb(null, true)
+      }
+    }
+    for (const re of rootRegexes) {
+      if (re.test(origin)) return cb(null, true)
+    }
+    if (dbAllowed.has(normalized)) return cb(null, true)
+
+    return cb(null, false)
+  }
+}
+
+// Utility function to create CORS middleware with configurable options
+const createCorsMiddleware = (corsOptions?: cors.CorsOptions) => {
+  return async (req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) => {
+    req.scope.resolve<ConfigModule>("configModule")
+
+    const envOrigins = parseCorsOrigins(process.env.WEB_CORS as string)
+    const rootRegexes = rootDomainOrigins()
+    const dbAllowed = await getAllowedOriginsFromDb(req.scope)
+
+    const defaultOptions: cors.CorsOptions = {
+      origin: buildOriginAllowList(envOrigins, dbAllowed, rootRegexes),
+      credentials: true,
+    }
+
+    const options = { ...defaultOptions, ...corsOptions }
+    return cors(options)(req, res, next)
+  }
+}
+
+const createCorsPartnerMiddleware = (corsOptions?: cors.CorsOptions) => {
+  return async (req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) => {
+    req.scope.resolve<ConfigModule>("configModule")
+
+    const partnerOrigins =
+      process.env.PARTNER_CORS ||
+      process.env.AUTH_CORS ||
+      process.env.ADMIN_CORS ||
+      process.env.WEB_CORS ||
+      ""
+
+    const envOrigins = parseCorsOrigins(partnerOrigins)
+    const rootRegexes = rootDomainOrigins()
+    const dbAllowed = await getAllowedOriginsFromDb(req.scope)
+
+    const defaultOptions: cors.CorsOptions = {
+      origin: buildOriginAllowList(envOrigins, dbAllowed, rootRegexes),
+      credentials: true,
+    }
+    const options = { ...defaultOptions, ...corsOptions }
+    return cors(options)(req, res, next)
+  }
+}
+
+// Configure multer for small/CSV uploads (memory) - safe small limit
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } })
+
+// Configure disk-based multer for large media uploads to avoid OOM
+const mediaUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, os.tmpdir()),
+    filename: (_req, file, cb) => {
+      const unique = Date.now() + "-" + Math.round(Math.random() * 1e9)
+      // preserve original extension if present
+      const ext = path.extname(file.originalname)
+      cb(null, `${unique}${ext}`)
+    },
+  }),
+  // Allow large files; adjust if you want a cap (e.g., 2GB)
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 },
+})
+
+// Only apply multer when request is multipart/form-data, and gracefully handle empty/invalid forms
+const maybeMulterArray = (field: string) => {
+  return (req: any, res: any, next: any) => {
+    const ct = String(req.headers["content-type"] || "").toLowerCase()
+    if (!ct.startsWith("multipart/form-data")) {
+      // Not multipart -> treat as no files
+      req.files = []
+      return next()
+    }
+    // Use multer directly so we can intercept Busboy errors
+    const handler = upload.array(field)
+    handler(req, res, (err?: any) => {
+      if (err) {
+        const msg = String(err?.message || "")
+        if (msg.includes("Unexpected end of form")) {
+          // Treat malformed/empty multipart bodies as no files
+          req.files = []
+          return next()
+        }
+        return next(err)
+      }
+      return next()
+    })
+  }
+}
+
+// Only apply disk-based multer for media (large) uploads
+const maybeMediaMulterArray = (field: string) => {
+  return (req: any, res: any, next: any) => {
+    const ct = String(req.headers["content-type"] || "").toLowerCase()
+    if (!ct.startsWith("multipart/form-data")) {
+      req.files = []
+      return next()
+    }
+    const handler = mediaUpload.array(field)
+    handler(req, res, (err?: any) => {
+      if (err) {
+        const msg = String(err?.message || "")
+        if (msg.includes("Unexpected end of form")) {
+          req.files = []
+          return next()
+        }
+        return next(err)
+      }
+      return next()
+    })
+  }
+}
+
+// Adapter function to make multer middleware compatible with Medusa's middleware signature
+const adaptMulter = (multerMiddleware: any) => {
+  return (req: MedusaRequest, res: MedusaResponse, next: MedusaNextFunction) => {
+    // Call multer middleware and capture the next function
+    return multerMiddleware(req as any, res as any, (err: any) => {
+      // Log after multer has processed the request
+      // Continue the middleware chain
+      next(err);
+    });
+  };
+};
+
+// Category filter middleware — replicates Medusa's applyCategoryFilters
+const applyCategoryFilters = (req: MedusaRequest, _res: MedusaResponse, next: MedusaNextFunction) => {
+  if (!req.filterableFields) {
+    (req as any).filterableFields = {}
+  }
+  req.filterableFields = {
+    ...req.filterableFields,
+    is_active: true,
+    is_internal: false,
+  }
+  next()
+}
+
+/**
+ * Enforce a machine credential's MCP scope on ordinary `/admin/*` mutations
+ * (#1306 Track C).
+ *
+ * Without this the scope would be theatre: a Medusa secret API key authenticates
+ * every admin route, so a token scoped to `read` on the MCP surface could simply
+ * POST the wrapped route directly. Enforcing at the HTTP layer makes the scope
+ * real and, because the MCP dispatcher reaches routes over the same loopback
+ * HTTP path, gives one unbypassable choke point rather than two that can drift.
+ *
+ * Applies to MACHINE principals only (api-key / OAuth). A human admin holds a
+ * dashboard session and can do anything through the UI, so restricting their raw
+ * HTTP writes would restrict nothing while risking locking a real person out;
+ * their scope row still narrows the MCP tool surface.
+ *
+ * Absent a scope row this is a pass-through, so the behaviour of every existing
+ * key is unchanged until someone writes one.
+ */
+const enforceMcpScopeOnAdminWrites = async (
+  req: MedusaRequest,
+  res: MedusaResponse,
+  next: MedusaNextFunction
+) => {
+  const method = (req.method || "GET").toUpperCase()
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+    return next()
+  }
+
+  // `req.path` is relative to the matched mount, so read the full path.
+  const path = (req.originalUrl || "").split("?")[0].replace(/\/+$/, "")
+  if (MCP_SCOPE_EXEMPT_ADMIN_PATHS.includes(path)) {
+    return next()
+  }
+
+  const principal = mcpPrincipalFromRequest(req)
+  if (!principal || !isMcpMachinePrincipal(principal)) {
+    return next()
+  }
+
+  try {
+    const granted = await loadMcpScopeLevel(req.scope, principal)
+    if (!granted) {
+      return next()
+    }
+    // Per-ROUTE, not merely "is this a write" (#1306). Asking only the latter
+    // would let a `write`-scoped credential POST /admin/orders/:id/shipping-label
+    // — a route its MCP tool surface refuses — and spend money at a carrier
+    // through the route the tool just wraps.
+    const required = adminRouteTier(method, path)
+    if (mcpScopeAllows(granted, required)) {
+      return next()
+    }
+    return res.status(403).json({
+      message:
+        `This credential is scoped to '${granted}' and this route requires ` +
+        `'${required}'. Scope is set per credential in mcp_access_scope; widen ` +
+        `it via POST /admin/mcp/scopes as an admin user.`,
+    })
+  } catch {
+    // Fail CLOSED. `loadMcpScopeLevel` already returns null (→ pass through)
+    // when the module simply isn't registered, so reaching here means the
+    // module is present and the read failed — and a permission check that
+    // cannot read the permission must not grant it. Affects machine
+    // credentials only; human admin traffic never reaches this branch.
+    return res.status(503).json({
+      message:
+        "Could not read this credential's MCP scope; refusing the write rather than assuming it is permitted. Retry shortly.",
+    })
+  }
+}
+
+/**
+ * Refuse a revoked OAuth authorization on every `/admin/*` request (#1306
+ * Track B).
+ *
+ * An access token minted by the OAuth front door is a real Medusa user JWT, so
+ * it verifies on its signature alone and would otherwise keep working for the
+ * remainder of its hour no matter what the admin did in the settings UI. This
+ * is the only thing standing between "revoked" and "revoked in an hour".
+ *
+ * Ordered before `enforceMcpScopeOnAdminWrites` and — unlike that guard —
+ * applied to READS too. A revoked credential must not read either; scoping is
+ * about what a live credential may do, revocation is about whether it is live
+ * at all.
+ *
+ * Costs nothing for ordinary traffic: without the `mcp_oauth` claim it returns
+ * on the first line. Dashboard sessions and API keys never reach the lookup.
+ */
+const enforceMcpOauthRevocation = async (
+  req: MedusaRequest,
+  res: MedusaResponse,
+  next: MedusaNextFunction
+) => {
+  const tokenId = mcpOauthTokenIdFromRequest(req);
+  if (!tokenId) {
+    return next();
+  }
+  try {
+    const oauth = req.scope.resolve(MCP_OAUTH_MODULE) as McpOauthService;
+    const row = await oauth.getToken(tokenId);
+    if (!row || row.revoked_at) {
+      // A claim pointing at a row that no longer exists authorizes nothing —
+      // treat a missing row exactly like a revoked one.
+      return res.status(401).json({
+        message:
+          "This OAuth authorization has been revoked. Re-authorize the client to obtain a new token.",
+      });
+    }
+    return next();
+  } catch {
+    // Fail CLOSED, same reasoning as the scope guard below: a check that
+    // cannot read the permission must not grant it. Only affects requests that
+    // actually carry the claim.
+    return res.status(503).json({
+      message:
+        "Could not verify this token's revocation status; refusing the request rather than assuming it is valid. Retry shortly.",
+    });
+  }
+};
+
+/** Public, credential-free endpoints — safe to allow any origin. */
+const publicCors = cors({ origin: "*", credentials: false });
+
+export default defineMiddlewares({
+  routes: [
+    /**
+     * Medusa 2.21 — every Store API route now returns ONLY fields on its
+     * `allowed` list and SILENTLY strips the rest (a 200 with the data gone).
+     * These re-expose exactly what our storefronts already request and nothing
+     * more; each is our own module link, which core's lists cannot know about.
+     *
+     * 🔴 GLOBAL on purpose — no `method` / `methods`. The allowlist is read by
+     * core's `validateAndTransformQuery`, which runs before any method-scoped
+     * middleware; a method-scoped `allowFields` never takes effect.
+     *
+     * Measured on 2.21.1 against the fields the apps request (2026-09-25):
+     *   /store/products        storefront lib/data/products.ts:74 (listProducts
+     *                          default) → designs.*, artisan_product_detail.*;
+     *                          storefront-starter lib/data/products.ts:66 →
+     *                          artisan_detail.*
+     *   /store/customers/me    storefront lib/data/customer.ts:56 → *orders
+     * ⚠️ `designs.tasks.*` is served publicly today and stays so here; whether
+     * a storefront should see a design's tasks at all is a separate decision.
+     */
+    ...["/store/products", "/store/products/:id"].map((matcher) => ({
+      matcher,
+      middlewares: [
+        allowFields(
+          "artisan_product_detail",
+          "artisan_product_detail.*",
+          "artisan_detail",
+          "artisan_detail.*",
+          "designs",
+          "designs.*",
+          "designs.partners",
+          "designs.partners.*",
+          "designs.tasks",
+          "designs.tasks.*",
+          "designs.inventory_items",
+          "designs.inventory_items.raw_materials",
+          "designs.inventory_items.raw_materials.*",
+          "designs.inventory_items.raw_materials.material_type",
+          "designs.inventory_items.raw_materials.material_type.*"
+        ),
+      ],
+    })),
+    {
+      matcher: "/store/customers/me",
+      middlewares: [allowFields("orders", "orders.*")],
+    },
+    // OAuth revocation check (#1306 Track B). Method-less on purpose, exactly
+    // like the scope guard below — a "global" entry is concatenated ahead of
+    // every /admin/* handler — and registered FIRST so a revoked credential is
+    // rejected before anything asks what it is allowed to do.
+    {
+      matcher: "/admin/*",
+      middlewares: [enforceMcpOauthRevocation],
+    },
+    // Per-credential scope guard (#1306 Track C).
+    //
+    // No `method`/`methods` key on purpose: Medusa's routes sorter buckets a
+    // method-less entry as "global", and globals are concatenated ahead of
+    // wildcard/regex/static/params, so this registers as `app.use()` before
+    // every `/admin/*` route handler. It also runs after the framework's own
+    // admin auth middleware (applied in the loader before user middlewares),
+    // which is what makes `req.auth_context` available here.
+    {
+      matcher: "/admin/*",
+      middlewares: [enforceMcpScopeOnAdminWrites],
+    },
+
+    // =====================================================
+    // OAuth 2.1 front door for the Admin MCP (#1306 Track B)
+    // =====================================================
+
+    // Discovery documents. Medusa's file-based router ignores directories
+    // starting with ".", so the handlers in src/api/well-known/* are registered
+    // here — the /.well-known/ucp precedent further down. The wildcard variants
+    // exist because MCP clients probe the path-suffixed form
+    // (/.well-known/oauth-protected-resource/mcp/admin); this server protects
+    // exactly one resource, so both forms answer identically.
+    {
+      matcher: "/.well-known/oauth-protected-resource",
+      method: "GET",
+      middlewares: [publicCors, oauthProtectedResourceDoc as any],
+    },
+    {
+      matcher: "/.well-known/oauth-protected-resource/*",
+      method: "GET",
+      middlewares: [publicCors, oauthProtectedResourceDoc as any],
+    },
+    {
+      matcher: "/.well-known/oauth-authorization-server",
+      method: "GET",
+      middlewares: [publicCors, oauthAuthorizationServerDoc as any],
+    },
+    {
+      matcher: "/.well-known/oauth-authorization-server/*",
+      method: "GET",
+      middlewares: [publicCors, oauthAuthorizationServerDoc as any],
+    },
+
+    // Open CORS on the machine-facing endpoints. None of them read cookies, and
+    // all three are reached from clients whose origin we cannot know ahead of
+    // time.
+    //
+    // No body parser here: Medusa's own stack already applies
+    // `express.urlencoded({ extended: true })` to every route
+    // (`framework/dist/http/middlewares/bodyparser.js`), so the form encoding
+    // RFC 6749 specifies for the token endpoint is parsed before any of this
+    // runs. Adding a second parser does not merely duplicate work — it HANGS
+    // the request, because the stream is already consumed and the `end` event
+    // it waits for has long since fired.
+    {
+      matcher: "/oauth/token",
+      method: "POST",
+      middlewares: [publicCors],
+    },
+    {
+      matcher: "/oauth/revoke",
+      method: "POST",
+      middlewares: [publicCors],
+    },
+    {
+      matcher: "/oauth/register",
+      method: "POST",
+      middlewares: [publicCors],
+    },
+
+    // The consent step. `/oauth/*` is otherwise unauthenticated — this is the
+    // one endpoint that must know which admin is approving, and it gets that
+    // from the bearer the consent page just obtained via
+    // POST /auth/user/emailpass.
+    {
+      matcher: "/oauth/authorize/consent",
+      method: "POST",
+      middlewares: [authenticate("user", ["bearer", "session"])],
+    },
+
+    // The OAuth-facing MCP mount authenticates itself (it has to, in order to
+    // emit the RFC 9728 challenge on 401), so no `authenticate` here — only
+    // CORS, for browser-based clients.
+    {
+      matcher: "/mcp/admin",
+      middlewares: [publicCors],
+    },
+    // ─── Store collection & category validation (replicate framework middleware) ───
+    {
+      matcher: "/store/collections",
+      method: "GET",
+      middlewares: [
+        validateAndTransformQuery(
+          z.object({
+            q: z.string().optional(),
+            id: z.union([z.string(), z.array(z.string())]).optional(),
+            title: z.union([z.string(), z.array(z.string())]).optional(),
+            handle: z.union([z.string(), z.array(z.string())]).optional(),
+            fields: z.string().optional(),
+            offset: z.preprocess(Number, z.number().int().nonnegative()).optional(),
+            limit: z.preprocess(Number, z.number().int().positive()).optional(),
+            order: z.string().optional(),
+          }) as any,
+          {
+            defaults: ["id", "title", "handle", "created_at", "updated_at"],
+            // Medusa 2.21: a store route with no `allowed` list strips EVERY field,
+            // so queryConfig.fields came back [] and each collection as null.
+            allowed: storeAllowed(
+              storeCollectionQueryConfig.listTransformQueryConfig.allowed,
+              ["id", "title", "handle", "created_at", "updated_at"]
+            ),
+            defaultLimit: 10,
+            isList: true,
+          }
+        ),
+      ],
+    },
+    {
+      matcher: "/store/product-categories",
+      method: "GET",
+      middlewares: [
+        validateAndTransformQuery(
+          z.object({
+            q: z.string().optional(),
+            id: z.union([z.string(), z.array(z.string())]).optional(),
+            name: z.union([z.string(), z.array(z.string())]).optional(),
+            handle: z.union([z.string(), z.array(z.string())]).optional(),
+            parent_category_id: z.union([z.string(), z.array(z.string())]).optional(),
+            include_ancestors_tree: z.string().optional(),
+            include_descendants_tree: z.string().optional(),
+            fields: z.string().optional(),
+            offset: z.preprocess(Number, z.number().int().nonnegative()).optional(),
+            limit: z.preprocess(Number, z.number().int().positive()).optional(),
+            order: z.string().optional(),
+          }) as any,
+          {
+            defaults: [
+              "id", "name", "description", "handle", "rank",
+              "parent_category_id", "created_at", "updated_at", "metadata",
+              "parent_category.*", "category_children.*",
+            ],
+            allowed: storeAllowed(
+              storeCategoryQueryConfig.listProductCategoryConfig.allowed,
+              [
+                "id", "name", "description", "handle", "rank",
+                "parent_category_id", "created_at", "updated_at", "metadata",
+                "parent_category.*", "category_children.*",
+              ]
+            ),
+            defaultLimit: 50,
+            isList: true,
+          }
+        ),
+        applyCategoryFilters,
+      ],
+    },
+    // CORS middleware for public web routes
+    {
+      matcher: "/web/*",
+      middlewares: [createCorsMiddleware()],
+    },
+    // Analytics batch-ingest (#344): preserve the raw request body so the HMAC
+    // signature can be verified against the EXACT bytes the edge worker signed.
+    // Without this, the route falls back to JSON.stringify(req.body), whose
+    // key-order/whitespace won't match the worker's serialization → 401s.
+    // CORS still applies via the /web/* entry above (matchers compose).
+    {
+      matcher: "/web/analytics/ingest-batch",
+      method: "POST",
+      middlewares: [],
+      bodyParser: { preserveRawBody: true }, // req.rawBody = Buffer for HMAC, req.body = parsed JSON
+    },
+    // Webhooks (no authentication required)
+    {
+      matcher: "/webhooks/social/facebook",
+      method: "GET",
+      middlewares: [], // Verification endpoint
+    },
+    {
+      matcher: "/webhooks/social/facebook",
+      method: "POST",
+      middlewares: [],
+      bodyParser: false, // Disable default JSON body parser for this route
+    },
+    {
+      matcher: "/webhooks/social/whatsapp",
+      method: "GET",
+      middlewares: [], // Meta verification endpoint
+    },
+    {
+      matcher: "/webhooks/social/whatsapp",
+      method: "POST",
+      middlewares: [],
+      bodyParser: { preserveRawBody: true }, // req.rawBody = Buffer for HMAC, req.body = parsed JSON
+    },
+    {
+      matcher: "/webhooks/inbound-email/resend",
+      method: "POST",
+      middlewares: [],
+      bodyParser: false, // Need raw body for Svix signature verification
+    },
+    {
+      // Resend delivery events (bounce/complaint) → auto-suppress. Svix-signed,
+      // so the raw body is required for verification.
+      matcher: "/webhooks/resend/email-events",
+      method: "POST",
+      middlewares: [],
+      bodyParser: false,
+    },
+    {
+      // Mailjet Event API (bounce/blocked/spam/unsub) → auto-suppress. Gated by
+      // MAILJET_WEBHOOK_SECRET (?token=), JSON body parsed normally.
+      matcher: "/webhooks/mailjet/events",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      // Kit (kit.com) events (bounce/complain/unsubscribe/click) for the mass
+      // blog/newsletter lane → suppress + engagement ledger. Gated by
+      // KIT_WEBHOOK_SECRET (?token=), event kind in ?event=, JSON body parsed.
+      matcher: "/webhooks/kit",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      /**
+       * Delhivery EPOD push — the sibling of the tracking route. A base64
+       * proof-of-delivery document is orders of magnitude larger than a status
+       * ping; Medusa's default JSON limit would 413 it and Delhivery would drop
+       * the push (they retry on a timeout, not on a 4xx). 10mb covers a
+       * multi-page scanned delivery sheet.
+       */
+      matcher: "/webhooks/shipping/epod",
+      method: "POST",
+      middlewares: [],
+      bodyParser: { sizeLimit: "10mb" },
+    },
+    {
+      // Carrier tracking pushes (Shiprocket — #888). Gated by
+      // SHIPPING_WEBHOOK_SECRET (custom header configured in the carrier
+      // dashboard; Shiprocket has no HMAC), JSON body parsed normally.
+      matcher: "/webhooks/shipping/track",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      // PayU posts application/x-www-form-urlencoded; preserve the raw body so
+      // the route can parse it (and the reverse-hash uses the exact fields).
+      matcher: "/webhooks/payu/link",
+      method: "POST",
+      middlewares: [],
+      bodyParser: { preserveRawBody: true },
+    },
+    {
+      // Stripe Connect account events (JYT platform account). Raw body is
+      // required to verify the Stripe signature against STRIPE_CONNECT_WEBHOOK_SECRET.
+      matcher: "/webhooks/stripe/connect",
+      method: "POST",
+      middlewares: [],
+      bodyParser: { preserveRawBody: true },
+    },
+    {
+      // Etsy order webhooks (medusa-plugin-etsy-sync). Raw body is required to
+      // verify the Svix HMAC-SHA256 signature against ETSY_WEBHOOK_SECRET.
+      matcher: "/webhooks/etsy",
+      method: "POST",
+      middlewares: [],
+      bodyParser: { preserveRawBody: true },
+    },
+    {
+      matcher: "/webhooks/meta-ads/leadgen",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/webhooks/meta-ads/leadgen",
+      method: "POST",
+      middlewares: [],
+    },
+    // WhatsApp deep-link auth — no partner auth required (token IS the auth)
+    // Must be before the /partners* catch-all
+    {
+      matcher: "/partners/wa-auth",
+      method: "GET",
+      middlewares: [],
+    },
+    // Partner session refresh — PUBLIC on purpose: the bearer may be EXPIRED
+    // (up to 30 days), and `authenticate("partner", …)` would reject it before
+    // the handler runs. The route verifies the signature itself.
+    // 🔴 Never add authenticate() here or a wildcard that matches it.
+    {
+      matcher: "/partners/auth/refresh",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/partners*",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+      ],
+    },
+    // Apply locale resolution for partner GET routes (reads x-medusa-locale header or ?locale= param)
+    {
+      matcher: "/partners*",
+      method: "GET",
+      middlewares: [applyLocale],
+    },
+    {
+      matcher: "/partners/whatsapp-verify",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/details",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/me",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/me",
+      method: "PATCH",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(updatePartnerMeSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/me/pin",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // Phone login PIN (#2320)
+      matcher: "/partners/me/pin",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(setPartnerMePinSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/admins",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/admins",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+
+    {
+      matcher: "/partners/update",
+      method: "PUT",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(partnerUpdateSchema)),
+      ],
+    },
+
+    {
+      matcher: "/partners/onboarding-profile",
+      method: "PUT",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(onboardingProfileUpdateSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/onboarding-profile",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+
+    // Partner LayoutComposer persistence (#338). List across zones, plus
+    // per-zone read / upsert / reset. The static `configurations` matcher must
+    // stay above the `:zone` one so it isn't shadowed by the dynamic param.
+    {
+      matcher: "/partners/layouts/configurations",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/layouts/:zone/configuration",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/layouts/:zone/configuration",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(setLayoutConfigurationSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/layouts/:zone/configuration",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+
+    {
+      matcher: "/partners",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"], { allowUnregistered: true, }),
+        validateAndTransformBody(wrapSchema(partnerSchema)),
+      ],
+    },
+
+    // ─── Investor routes ───────────────────────────────────────────
+    {
+      matcher: "/investors*",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"], { allowUnregistered: true }),
+      ],
+    },
+    {
+      matcher: "/investors*",
+      method: "GET",
+      middlewares: [applyLocale],
+    },
+    {
+      matcher: "/investors",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"], { allowUnregistered: true }),
+        validateAndTransformBody(wrapSchema(investorSchema)),
+      ],
+    },
+    // Admin invite route (main Medusa admin). Auth is auto-applied to /admin/*.
+    {
+      matcher: "/admin/investors",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(investorSchema))],
+    },
+    {
+      matcher: "/admin/companies",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(companySchema))],
+    },
+    {
+      matcher: "/admin/companies/:id/investors",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(investorSchema))],
+    },
+    {
+      matcher: "/investors/me",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/investors/me",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(investorUpdateSchema)),
+      ],
+    },
+    {
+      // #969 follow-up — the investor's SAFEs / convertible notes with value.
+      matcher: "/investors/me/convertibles",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/investors/cap-tables",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(capTableSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/cap-tables/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(capTableUpdateSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/cap-tables/:id/share-classes",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(shareClassSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/cap-tables/:id/stakes",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(stakeSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/cap-tables/:id/funding-rounds",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(fundingRoundSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/cap-tables/:id/calls-for-shares",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(callForSharesSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/stakes/:id/payments",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(paymentSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/cap-tables/:id/documents",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(documentSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/pipeline",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(pipelineSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/companies",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(companySchema)),
+      ],
+    },
+    {
+      matcher: "/investors/companies/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(companyUpdateSchema)),
+      ],
+    },
+    {
+      matcher: "/investors/admins",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/investors/admins",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("investor", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(investorAdminSchema)),
+      ],
+    },
+
+    {
+      matcher: "/partners/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(partnerPeopleSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/tasks",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/tasks/:taskId/accept",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/tasks/:taskId/finish",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Assigned Tasks routes (standalone tasks)
+    {
+      matcher: "/partners/assigned-tasks",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/assigned-tasks/:taskId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/assigned-tasks/:taskId/accept",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/assigned-tasks/:taskId/finish",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+
+    {
+      matcher: "/partners/assigned-tasks/:taskId/comments",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/assigned-tasks/:taskId/comments",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/assigned-tasks/:taskId/subtasks",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/assigned-tasks/:taskId/subtasks/:subtaskId/complete",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Person Types
+    {
+      matcher: "/partners/person-types",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // The balance activation (#1451 follow-on). No body validator: the order
+    // comes from the path and the partner from the session, so there is nothing
+    // to validate and nothing to spoof.
+    {
+      matcher: "/partners/orders/:id/request-balance",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // The balance card's read, and the buyer's verdict on a sample. Both
+    // validate ownership in the handler; the sample route its own zod.
+    {
+      matcher: "/partners/orders/:id/balance",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/sample-approval",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // 🔴 A partner route 401s until it is named HERE — auth is per-route, and
+    // neither tsc nor a green suite says a word about the omission.
+    {
+      matcher: "/partners/people/id-extraction",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerIdExtractionReq)),
+      ],
+    },
+    /**
+     * Batch ID extraction (#1816). Every one of these 401s until it is named
+     * here — including the GETs.
+     *
+     * ⚠️ The batch matcher must come BEFORE `/partners/people/id-extraction`
+     * would match it as a prefix; Medusa matches these in order.
+     */
+    {
+      matcher: "/partners/people/id-extraction/batch",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerIdExtractionBatchReq)),
+      ],
+    },
+    {
+      matcher: "/partners/people/id-extraction/batch",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/people/id-extraction/batch/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/people/id-extraction/batch/:id/confirm",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/people/id-extraction/batch/:id/retry",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/people/id-extraction/batch/:id/approve",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerIdExtractionBatchApproveReq)),
+      ],
+    },
+    {
+      matcher: "/partners/person-types",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Available person types listing for partners
+    {
+      matcher: "/partners/persontypes",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/currencies",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ['session', 'bearer'])
+      ]
+    },
+    /**
+     * Warehouse without a storefront (#2061). Authenticated like every other
+     * partner route — the handler's own partner check fails closed, but relying
+     * on that alone would leave the route unauthenticated at the layer where
+     * every neighbour is protected.
+     */
+    {
+      matcher: "/partners/warehouses",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(CreatePartnerWarehouseReq)),
+      ],
+    },
+    {
+      matcher: "/partners/warehouses",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateStoreReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/products",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateProductReq)),
+      ],
+    },
+    {
+      // #859 S2 (#861): an artisan re-submits a rejected product for review.
+      matcher: "/partners/products/:id/resubmit",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #859: private shareable review link for an artisan's unpublished product.
+      matcher: "/partners/products/:id/preview-link",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #859 S3 (#862): read the artisan made-to-order/maker-story detail.
+      matcher: "/partners/products/:id/artisan-detail",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #859 S3 (#862): upsert the artisan made-to-order/maker-story detail.
+      matcher: "/partners/products/:id/artisan-detail",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerArtisanProductDetailReq)),
+      ],
+    },
+    {
+      // #1342: the weaving-technique catalog the spec picker is built from.
+      // Static segment, so it must not be shadowed by /partners/products/:id.
+      matcher: "/partners/products/spec-catalog",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #1342: read the partner-authored production spec for a product.
+      matcher: "/partners/products/:id/spec",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #1342: upsert the production spec (weave, params, palette, fields).
+      matcher: "/partners/products/:id/spec",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerProductSpecReq)),
+      ],
+    },
+
+    {
+      matcher: "/partners/stores/:id/products",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Payment Providers (discovery for the region form).
+    //
+    // The route existed with no middleware entry at all: `authenticate` never
+    // ran, so `req.auth_context` was empty and validatePartnerStoreAccess
+    // answered 400 "No partner associated with this account" to every caller.
+    // It also read `req.queryConfig`, which nothing populated. Mirrors admin's
+    // `/admin/payments/payment-providers` wiring.
+    {
+      matcher: "/partners/stores/:id/payment-providers",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(
+          wrapSchema(AdminGetPaymentProvidersParams),
+          listTransformPaymentProvidersQueryConfig
+        ),
+      ],
+    },
+    // Partner Store Regions
+    {
+      matcher: "/partners/stores/:id/regions",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(
+          wrapSchema(AdminGetRegionsParams),
+          partnerRegionListTransformQueryConfig
+        ),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/regions",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateRegionReq)),
+        validateAndTransformQuery(
+          wrapSchema(AdminGetRegionParams),
+          partnerRegionRetrieveTransformQueryConfig
+        ),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/regions/:regionId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(
+          wrapSchema(AdminGetRegionParams),
+          partnerRegionRetrieveTransformQueryConfig
+        ),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/regions/:regionId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateRegionReq)),
+        validateAndTransformQuery(
+          wrapSchema(AdminGetRegionParams),
+          partnerRegionRetrieveTransformQueryConfig
+        ),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/regions/:regionId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Locations
+    {
+      matcher: "/partners/stores/:id/locations",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/locations",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/locations/:locationId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/locations/:locationId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateLocationReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/locations/:locationId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/locations/:locationId/sales-channels",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/locations/:locationId/fulfillment-sets",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateFulfillmentSetReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/locations/:locationId/fulfillment-providers",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateFulfillmentProvidersReq)),
+      ],
+    },
+    // Partner Store Fulfillment Sets
+    {
+      matcher: "/partners/stores/:id/fulfillment-sets/:fulfillmentSetId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/fulfillment-sets/:fulfillmentSetId/service-zones",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/fulfillment-sets/:fulfillmentSetId/service-zones/:serviceZoneId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/fulfillment-sets/:fulfillmentSetId/service-zones/:serviceZoneId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/fulfillment-sets/:fulfillmentSetId/service-zones/:serviceZoneId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Product Variants
+    {
+      matcher: "/partners/stores/:id/product-variants",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Shipping Options
+    {
+      matcher: "/partners/stores/:id/shipping-options",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/shipping-options",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateShippingOptionReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/shipping-options/:optionId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/shipping-options/:optionId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateShippingOptionReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/shipping-options/:optionId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Shipping Profiles
+    {
+      matcher: "/partners/shipping-profiles",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/shipping-profiles",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Shipping Option Types
+    {
+      matcher: "/partners/shipping-option-types",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/shipping-option-types",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/shipping-option-types/:id",
+      method: ["GET", "POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Fulfillment Providers
+    {
+      matcher: "/partners/fulfillment-providers",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/fulfillment-providers/:providerId/options",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Product Categories
+    {
+      matcher: "/partners/product-categories",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-categories",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-categories/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-categories/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-categories/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-categories/:id/products",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Product Collections, Types, Tags
+    {
+      matcher: "/partners/product-collections",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-collections",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-collections/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-collections/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-collections/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-collections/:id/products",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-types",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-types",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-types/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-types/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-types/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/product-tags",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Discover Products
+    {
+      matcher: "/partners/discover/products",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/discover/products/:id/copy",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Inventory Items
+    {
+      matcher: "/partners/inventory-items",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // Raw-material catalog picker for the design BOM (roadmap #6).
+      matcher: "/partners/inventory-items/raw-materials",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-items/batch-levels",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-items/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-items/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-items/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-items/:id/levels",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-items/:id/levels/batch",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-items/:id/levels/:locationId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-items/:id/levels/:locationId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Payment Providers
+    {
+      matcher: "/partners/payment-providers",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Payment Config (per-partner credentials)
+    {
+      matcher: "/partners/payment-config",
+      method: ["GET", "POST"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // JYT Stripe Connect onboarding (must precede the /:configId matcher so
+    // "stripe-connect" isn't treated as a config id).
+    {
+      matcher: "/partners/payment-config/stripe-connect",
+      method: ["GET", "POST"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/payment-config/:configId",
+      method: ["GET", "POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Return Reasons
+    {
+      matcher: "/partners/return-reasons",
+      method: ["GET", "POST"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/return-reasons/:id",
+      method: ["GET", "POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Refund Reasons
+    {
+      matcher: "/partners/refund-reasons",
+      method: ["GET", "POST"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/refund-reasons/:id",
+      method: ["GET", "POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Tax Providers
+    {
+      matcher: "/partners/tax-providers",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Tax Rates
+    {
+      matcher: "/partners/tax-rates",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/tax-rates",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/tax-rates/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/tax-rates/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/tax-rates/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Storefront
+    {
+      matcher: "/partners/storefront",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/provision",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/redeploy",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Storefront Domain
+    {
+      matcher: "/partners/storefront/domain",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/domain",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/domain",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/domain/verify",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Storefront Website
+    {
+      matcher: "/partners/storefront/website",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/website",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Storefront Website Analytics
+    {
+      matcher: "/partners/storefront/website/analytics",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/website/analytics",
+      method: "PUT",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Notifications (in-app bell)
+    {
+      matcher: "/partners/notifications",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/notifications/unread",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/notifications/read",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Storefront Pages
+    {
+      matcher: "/partners/storefront/pages",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/pages",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(postPagesSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/pages/:pageId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/pages/:pageId",
+      method: "PUT",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(updatePageSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/pages/:pageId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Storefront Blocks
+    {
+      matcher: "/partners/storefront/pages/:pageId/blocks",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/pages/:pageId/blocks",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(createBlocksSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/pages/:pageId/blocks/:blockId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/pages/:pageId/blocks/:blockId",
+      method: "PUT",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(updateBlockSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/pages/:pageId/blocks/:blockId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Storefront Seed Pages
+    {
+      matcher: "/partners/storefront/seed-pages",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Storefront Website Theme
+    {
+      matcher: "/partners/storefront/website/theme",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/storefront/website/theme",
+      method: "PUT",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(websiteThemeSchema)),
+      ],
+    },
+    // Partner Storefront Website Theme Chat (#339)
+    {
+      matcher: "/partners/storefront/website/theme/chat",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(ThemeChatSchema)),
+      ],
+    },
+    // Partner Portal Assistant — streaming chat (drives the Partner API via the
+    // MCP tool registry: onboarding, persona, layout, reads).
+    {
+      matcher: "/partners/assistant/chat",
+      method: "POST",
+      // Same 100kb Express default as the admin assistant — see the note there.
+      bodyParser: { sizeLimit: "5mb" },
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerAssistantChatSchema)),
+      ],
+    },
+    // Partner assistant photo attachments. Multipart, so bodyParser is OFF and
+    // multer owns the body — Medusa already parses urlencoded on every route
+    // and a second parser on a stream whose `end` has fired hangs the request.
+    // Disk-backed (mediaUpload) rather than memory: a partner attaching several
+    // phone photos at once is tens of MB and memory storage OOMs the worker.
+    {
+      matcher: "/partners/assistant/attachments",
+      method: "POST",
+      bodyParser: false,
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        adaptMulter(mediaUpload.array("files")),
+      ],
+    },
+    // Capability-sample photographs (#1543). Same multipart shape and the same
+    // reasons: bodyParser OFF because multer owns the body (Medusa already
+    // parses urlencoded on every route, and a second parser on a stream whose
+    // `end` has fired HANGS the request), and disk-backed because a weaver
+    // attaching four phone photos at once is tens of MB.
+    {
+      matcher: "/partners/capabilities/uploads",
+      method: "POST",
+      bodyParser: false,
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        adaptMulter(mediaUpload.array("files")),
+      ],
+    },
+    // Partner assistant context compaction — the client calls this when the
+    // chat approaches the model's context window; the route returns a short
+    // summary the client stores in place of the older turns.
+    {
+      matcher: "/partners/assistant/summarize",
+      method: "POST",
+      bodyParser: { sizeLimit: "5mb" },
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerAssistantSummarizeSchema)),
+      ],
+    },
+    // Partner MCP — JSON-RPC endpoint exposing the Partner API as tools. Body is
+    // JSON-RPC (validated by the MCP transport), so no body validator here.
+    {
+      matcher: "/partners/mcp",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner assistant conversation history (#338 item 2) — server-persisted
+    // chat threads, partner-scoped. Collection then single-resource.
+    {
+      matcher: "/partners/assistant/conversations",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/assistant/conversations",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateConversationSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/assistant/conversations/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/assistant/conversations/:id",
+      method: "PATCH",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateConversationSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/assistant/conversations/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Admin assistant conversation history (#1092) — server-persisted chat
+    // threads, user-scoped. /admin/* is admin-authenticated globally, so only
+    // the write bodies need validation.
+    {
+      matcher: "/admin/assistant/conversations",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminAssistantCreateConversationSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/assistant/conversations/:id",
+      method: "PATCH",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminAssistantUpdateConversationSchema)),
+      ],
+    },
+    // Storefront design-assistant conversation history (chat design editor)
+    // — server-persisted design threads, email-scoped (public, mirrors the
+    // chat flow's email gate — no customer auth). Validation only.
+    {
+      matcher: "/store/custom/design-assistant/conversations",
+      method: "GET",
+      middlewares: [createCorsMiddleware()],
+    },
+    {
+      matcher: "/store/custom/design-assistant/conversations",
+      method: "POST",
+      middlewares: [
+        createCorsMiddleware(),
+        validateAndTransformBody(wrapSchema(CreateDesignConversationSchema)),
+      ],
+    },
+    {
+      matcher: "/store/custom/design-assistant/conversations/:id",
+      method: "GET",
+      middlewares: [createCorsMiddleware()],
+    },
+    {
+      matcher: "/store/custom/design-assistant/conversations/:id",
+      method: "PATCH",
+      middlewares: [
+        createCorsMiddleware(),
+        validateAndTransformBody(wrapSchema(UpdateDesignConversationSchema)),
+      ],
+    },
+    {
+      matcher: "/store/custom/design-assistant/conversations/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsMiddleware(),
+        validateAndTransformBody(wrapSchema(DeleteDesignConversationSchema)),
+      ],
+    },
+    {
+      // Deterministic canvas pick (scene panel "Build on this") — reuses the
+      // chat flow's set_active_canvas write without a model turn.
+      matcher: "/store/custom/design-assistant/pick",
+      method: "POST",
+      middlewares: [createCorsMiddleware()],
+    },
+    {
+      /**
+       * Reference photos → a design. Multipart, so `bodyParser: false` and
+       * multer, exactly like the partner design-media upload.
+       *
+       * 🔴 Public on purpose. The client used to presign to S3 itself, and
+       * that endpoint is customer-authenticated — in a flow whose makers are
+       * guests with an email. Every attached photo silently degraded to a
+       * session-local preview and never existed server-side.
+       */
+      matcher: "/store/custom/design-assistant/references",
+      method: "POST",
+      bodyParser: false,
+      middlewares: [createCorsMiddleware(), maybeMulterArray("files")],
+    },
+    {
+      // The board read. Public like the rest of the assistant's store mount and
+      // scoped by the maker's email — the board panel previously read through
+      // the CUSTOMER-authenticated `/store/custom/designs/:id`, which 401s for
+      // every guest, i.e. for everyone this flow is built for.
+      //
+      // ⚠️ A route file without a matcher entry is not a route.
+      matcher: "/store/custom/design-assistant/designs/:id",
+      method: "GET",
+      middlewares: [createCorsMiddleware()],
+    },
+    // Customs HS/HSN codes — bulk gap scan + bulk fill. /admin/* is
+    // admin-authenticated globally, so only the write body needs validation.
+    // The GET still needs its matcher registered: a route file without one is
+    // not a route.
+    {
+      matcher: "/admin/customs/hs-codes/missing",
+      method: "GET",
+      middlewares: [],
+    },
+    // Export IGST / LUT (#1216). What a label would declare today, and the CRUD
+    // for the LUTs that decide it. Same rule as above — every one of these needs
+    // a matcher registered or the route file is inert.
+    {
+      matcher: "/admin/customs/export-igst-status",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/platform-tax-identities",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      // #1918 — attach / replace / detach the design behind an ORDER line item.
+      // `design_id: null` detaches; omitting the field is rejected by the route.
+      matcher: "/admin/designs/orders/:lineItemId/design",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(ChangeOrderItemDesignSchema)),
+      ],
+    },
+    {
+      // #1918 — the same change for EVERY line at once, as one change and one
+      // email. Mirrors Medusa's order edit, where actions accumulate on one
+      // change and a single event is emitted when it is applied.
+      matcher: "/admin/orders/:id/design-changes",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(ChangeOrderDesignsSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/platform-cost-config",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      // #1939 — an INSERT, not an update: the table is effective-dated so a
+      // price already quoted stays explicable under the policy it was quoted
+      // under. There is deliberately no PATCH.
+      matcher: "/admin/platform-cost-config",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(CreatePlatformCostConfigSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/platform-tax-identities/:id/export-luts",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/platform-tax-identities/:id/export-luts",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateExportLutSchema))],
+    },
+    {
+      matcher: "/admin/platform-tax-identities/:id/export-luts/:lutId",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateExportLutSchema))],
+    },
+    {
+      matcher: "/admin/platform-tax-identities/:id/export-luts/:lutId",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/customs/hs-codes",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(BulkHsCodesSchema))],
+    },
+    // Bulk product / variant / inventory editing. The one path that can turn
+    // inventory tracking ON for an existing variant — core only ever turns it
+    // off. Partner mirror below is store- and location-scoped.
+    {
+      matcher: "/admin/products/bulk-update",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(BulkUpdateProductsSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/bulk-update",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(BulkUpdateProductsSchema)),
+      ],
+    },
+    // Bulk production-spec write. One weave, one param set and one palette
+    // across a whole run is the normal case; doing it product-by-product is
+    // twenty confirmations for one decision. Same validator on both surfaces —
+    // the partner route additionally ownership-checks every id in the handler.
+    {
+      matcher: "/admin/products/spec-bulk",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(BulkProductSpecReq))],
+    },
+    {
+      matcher: "/partners/products/spec-bulk",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(BulkProductSpecReq)),
+      ],
+    },
+    // Partner mirrors. These carry their own CORS + partner auth, and the POST
+    // additionally re-checks every id against the store's catalogue inside the
+    // handler (store access alone doesn't scope arbitrary ids in a body).
+    {
+      matcher: "/partners/stores/:id/customs/hs-codes/missing",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/customs/hs-codes",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(BulkHsCodesSchema)),
+      ],
+    },
+    // Partner Subscription
+    {
+      matcher: "/partners/subscription",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/subscription",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(partnerSubscribeSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/subscription",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // PayU subscription callback (unauthenticated — called by PayU)
+    {
+      matcher: "/partners/subscription/payu/complete",
+      method: "POST",
+      middlewares: [],
+    },
+    // Partner Price Preferences
+    {
+      matcher: "/partners/price-preferences",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/price-preferences",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/price-preferences/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/price-preferences/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/price-preferences/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner API Keys
+    {
+      matcher: "/partners/api-keys",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/api-keys",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/api-keys/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/api-keys/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/api-keys/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/api-keys/:id/revoke",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/api-keys/:id/sales-channels",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Detail
+    {
+      matcher: "/partners/stores/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateStoreReq)),
+      ],
+    },
+    // Partner Store FX-meta detach (DELETE /partners/stores/:id/prices/:priceId/fx-meta)
+    {
+      matcher: "/partners/stores/:id/prices/:priceId/fx-meta",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Sales Channels
+    {
+      matcher: "/partners/stores/:id/sales-channels",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/sales-channels",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateSalesChannelReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/sales-channels/:channelId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/sales-channels/:channelId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateSalesChannelReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/sales-channels/:channelId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Second route shipped without a middleware entry (see payment-providers
+    // above): unauthenticated, so validatePartnerStoreAccess rejected every
+    // caller with 400 "No partner associated with this account". The handler
+    // reads `req.body` directly, so no body validator here — matching how the
+    // route is written rather than inventing a schema for it.
+    {
+      matcher: "/partners/stores/:id/sales-channels/:channelId/products/batch",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Tax Regions
+    {
+      matcher: "/partners/stores/:id/tax-regions",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/tax-regions",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateTaxRegionReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/tax-regions/:taxRegionId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/tax-regions/:taxRegionId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateTaxRegionReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/tax-regions/:taxRegionId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Products
+    {
+      matcher: "/partners/stores/:id/products",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        // #1380 step 1 — this partner-facing route had no body validation at all.
+        validateAndTransformBody(wrapLooseSchema(PartnerStoreCreateProductReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/quick",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerQuickCreateProductReq)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Product Variants
+    {
+      matcher: "/partners/stores/:id/products/:productId/variants",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId/variants",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId/variants/batch",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        // #1370 — core's admin batch route wires `req.queryConfig.fields` into
+        // `refetchBatchVariants`, so a caller can shrink the response. This
+        // route hard-coded the list, and the enrichment it pays for is the
+        // phase that ran 377ms-6002ms (15977ms at its worst). `defaults` is
+        // exactly what the route used to hard-code, so nothing changes for a
+        // caller that sends no `?fields=`.
+        validateAndTransformQuery(
+          z.object({ fields: z.string().optional() }) as any,
+          { defaults: BATCH_VARIANT_FIELDS }
+        ),
+      ],
+    },
+    {
+      // Edit an existing variant's inventory kit. partner-ui's "Manage
+      // inventory items" form posted here long before the route existed.
+      matcher: "/partners/stores/:id/products/:productId/variants/inventory-items/batch",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerBatchVariantInventoryItemsSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId/variants/:variantId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId/variants/:variantId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId/variants/:variantId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner variant images batch — add/remove image associations for a variant
+    {
+      matcher: "/partners/stores/:id/products/:productId/variants/:variantId/images/batch",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Store Product Options
+    {
+      matcher: "/partners/stores/:id/products/:productId/options",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId/options/:optionId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/stores/:id/products/:productId/options/:optionId",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Production Runs APIs
+    {
+      matcher: "/partners/production-runs",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(wrapSchema(listProductionRunsQuerySchema), {}),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // Roadmap #6 Phase 5 — partner run cost-summary (admin parity)
+      matcher: "/partners/production-runs/:id/cost-summary",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/accept",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/start",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/finish",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/complete",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/decline",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // #891 goods movement — a route file is NOT a route until it has a matcher
+    // here; without one `authenticate` never runs and the handler refuses every
+    // caller including the owner (that was #1204). Body validation stays in the
+    // handler (its own zod schema) rather than `validateAndTransformBody`, so
+    // this matcher only has to establish CORS + partner auth.
+    {
+      matcher: "/partners/production-runs/:id/transfers",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/transfers",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/profit-share",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/profit-share/sales",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(RecordSaleSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/consumption-logs",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerPostProductionRunConsumptionLogReq)),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/consumption-logs",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/media",
+      method: "POST",
+      bodyParser: false,
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        maybeMulterArray("files"),
+      ],
+    },
+    {
+      matcher: "/partners/production-runs/:id/media/attach",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Reservations APIs
+    {
+      matcher: "/partners/reservations",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/reservations",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/reservations/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/reservations/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/reservations/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Inventory Orders APIs
+    {
+      // #2286 — inventory orders delivered TO this partner's warehouse.
+      matcher: "/partners/incoming-deliveries",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #2286 — the receiving partner confirms what arrived.
+      matcher: "/partners/incoming-deliveries/:orderId/receive",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(partnerReceiveIncomingSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-orders",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(wrapSchema(listInventoryOrdersQuerySchema), {}),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-orders/:orderId",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #1752 — partner proposes line edits/removals (staged, never applied).
+      matcher: "/partners/inventory-orders/:orderId/order-lines",
+      method: "PUT",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(partnerUpdateOrderLinesSchema)),
+      ],
+    },
+    {
+      // #1752 — partner proposes a `tax` charge (staged, never applied).
+      matcher: "/partners/inventory-orders/:orderId/charges",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(partnerAddOrderChargeSchema)),
+      ],
+    },
+    {
+      // The partner reads back what was APPLIED — the route was write-only, so
+      // an approved tax was invisible to the supplier who proposed it.
+      matcher: "/partners/inventory-orders/:orderId/charges",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/inventory-orders/:orderId/start",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-orders/:orderId/complete",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/inventory-orders/:orderId/submit-payment",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #790 — partner marks an order Ready for Delivery. Without this
+      // matcher authenticate("partner") never runs, req.auth_context is
+      // undefined, and the route's own guard returns 401.
+      matcher: "/partners/inventory-orders/:orderId/ready-for-delivery",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #790 — partner creates a carrier shipment for the order.
+      matcher: "/partners/inventory-orders/:orderId/shipment",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      /**
+       * The printable proforma for an assigned order. GET still needs the
+       * matcher or `req.auth_context` is undefined and the ownership check
+       * cannot run (the partner-route auth gotcha) — which would turn an
+       * authenticated document into an open one.
+       */
+      matcher: "/partners/inventory-orders/:orderId/invoice",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #641-inv — partner lists Shiprocket courier rates for the order (so it
+      // can pick a courier before creating the shipment). GET still needs the
+      // matcher or req.auth_context is undefined (partner-route auth gotcha).
+      matcher: "/partners/inventory-orders/:orderId/shiprocket-rates",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner device-token registration — the push leg of the partner
+    // notification system (apps register APNs/FCM tokens here).
+    {
+      matcher: "/partners/device-tokens",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(
+          wrapSchema(registerDeviceTokenSchema)
+        ),
+      ],
+    },
+    {
+      matcher: "/partners/device-tokens",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(
+          wrapSchema(unregisterDeviceTokenSchema)
+        ),
+      ],
+    },
+    // Partner Payments APIs
+    {
+      matcher: "/partners/:id/payments",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(wrapSchema(PartnerListPaymentsByPartnerQuerySchema), {}),
+      ],
+    },
+    {
+      matcher: "/partners/:id/payments/methods",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(wrapSchema(PartnerListPaymentMethodsByPartnerQuerySchema), {}),
+      ],
+    },
+    {
+      matcher: "/partners/:id/payments/methods",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreatePaymentMethodForPartnerSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/:id/payments/methods/:methodId",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/:id/payments/methods/:methodId",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdatePaymentMethodForPartnerSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/:id/payments/methods/:methodId",
+      method: "DELETE",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Admin Abandoned Carts (read-only, backed by native Cart Module)
+    {
+      matcher: "/admin/abandoned-carts",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listAbandonedCartsQuerySchema), {})],
+    },
+    // Admin Payments and Payment Methods
+    // Payments root
+    {
+      matcher: "/admin/payments",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListPaymentsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payments",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(PaymentSchema))],
+    },
+
+    {
+      /**
+       * 🔴 MUST precede `/admin/payments/:id` below (#1710). Matching is
+       * prefix-based and `UpdatePaymentSchema` is `.strict()`, so the update
+       * entry would otherwise claim this path and reject
+       * `payment_submission_id` as an unrecognised field — a 400 that reads
+       * like a bad request rather than a mis-ordered route.
+       */
+      matcher: "/admin/payments/:id/settles",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(PaymentSettlesSchema))],
+    },
+    {
+      matcher: "/admin/payments/:id/settles",
+      method: "DELETE",
+      middlewares: [],
+    },
+    /**
+     * #1737 — the mirror of `/settles`, one entity over. Same ordering rule:
+     * this MUST precede `/admin/payments/:id`, whose `.strict()` update schema
+     * would otherwise claim the path and reject `inventory_order_id`.
+     */
+    {
+      matcher: "/admin/payments/:id/records-against",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(PaymentRecordsAgainstSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/payments/:id/records-against",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/payments/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdatePaymentSchema))],
+    },
+    // Create payment and link to persons/partners
+    {
+      matcher: "/admin/payments/link",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreatePaymentAndLinkSchema))],
+    },
+    // Payments by person
+    {
+      matcher: "/admin/payments/persons/:id",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListPaymentsByPersonQuerySchema), {})],
+    },
+    // Payments by partner
+    {
+      matcher: "/admin/payments/partners/:id",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListPaymentsByPartnerQuerySchema), {})],
+    },
+    // Payment methods for person
+    {
+      matcher: "/admin/payments/persons/:id/methods",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListPaymentMethodsByPersonQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payments/persons/:id/methods",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreatePaymentMethodForPersonSchema))],
+    },
+    // Payment methods for partner
+    {
+      matcher: "/admin/payments/partners/:id/methods",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListPaymentMethodsByPartnerQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payments/partners/:id/methods",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreatePaymentMethodForPartnerSchema))],
+    },
+
+    // ── Partner Plans ──────────────────────────────────────────────────────
+    {
+      matcher: "/admin/partner-plans",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(createPlanSchema))],
+    },
+    {
+      matcher: "/admin/partner-plans/:id",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(updatePlanSchema))],
+    },
+    // ── Partner Subscriptions (Admin) ────────────────────────────────────
+    {
+      matcher: "/admin/partner-subscriptions",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(createSubscriptionSchema))],
+    },
+
+    // ── Payment Reports ──────────────────────────────────────────────────────
+    // Static sub-routes MUST come before /:id to avoid shadowing
+    {
+      matcher: "/admin/payment_reports/summary",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ReportingQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payment_reports/by-partner",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ReportingQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payment_reports/by-person",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ReportingQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payment_reports",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListPaymentReportsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payment_reports",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreatePaymentReportSchema))],
+    },
+    {
+      matcher: "/admin/payment_reports/:id",
+      method: "PATCH",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdatePaymentReportSchema))],
+    },
+    {
+      matcher: "/admin/payment_reports/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+
+    // ── Payment Reconciliation ──────────────────────────────────────────────
+    {
+      matcher: "/admin/payment_reports/reconciliation/:id/settle",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SettleReconciliationSchema))],
+    },
+    {
+      matcher: "/admin/payment_reports/reconciliation/:id",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/payment_reports/reconciliation/:id",
+      method: "PATCH",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateReconciliationSchema))],
+    },
+    {
+      matcher: "/admin/payment_reports/reconciliation",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListReconciliationsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payment_reports/reconciliation",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateReconciliationSchema))],
+    },
+
+    // ── Payment Submissions (Admin) ─────────────────────────────────────────
+    {
+      // Must be declared before "/admin/payment-submissions/:id" — a literal
+      // segment and a param segment both match this path, and the first entry
+      // that matches is the one whose validation runs.
+      matcher: "/admin/payment-submissions/payable-runs",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(AdminPayableRunsQuerySchema), {})],
+    },
+    {
+      // Goods, as opposed to work (#1612). Declared before the ":id" entries
+      // for the same reason `payable-runs` is: first matching entry wins, and
+      // "payable-inventory-orders" also matches ":id".
+      matcher: "/admin/payment-submissions/payable-inventory-orders",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(AdminPayableRunsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payment-submissions/:id/review",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminReviewPaymentSubmissionSchema))],
+    },
+    {
+      // Draft -> Pending, in place (#1604). Declared before the ":id" entries
+      // for the same reason `payable-runs` is: first matching entry wins.
+      matcher: "/admin/payment-submissions/:id/submit",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminSubmitPaymentSubmissionSchema))],
+    },
+    {
+      matcher: "/admin/payment-submissions/:id/items/:itemId",
+      method: "PATCH",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdatePaymentSubmissionItemSchema))],
+    },
+    {
+      // Attachments, at ANY status — the bank receipt proving a payout happened
+      // only exists after the money moves, when every other write is refused.
+      // Declared before the ":id" entries: first matching entry wins.
+      matcher: "/admin/payment-submissions/:id/documents",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminAttachSubmissionDocumentsReq))],
+    },
+    {
+      matcher: "/admin/payment-submissions/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      // Correcting the SENTENCE describing a payout, never its money (#1611).
+      matcher: "/admin/payment-submissions/:id",
+      method: "PATCH",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(UpdatePaymentSubmissionSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/payment-submissions/:id",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/payment-submissions",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(AdminListPaymentSubmissionsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/payment-submissions",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateAdminPaymentSubmissionSchema))],
+    },
+
+    // ── Payment Submissions (Partner) ───────────────────────────────────────
+    {
+      matcher: "/partners/payment-submissions/:submissionId/documents",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        maybeMulterArray("files"),
+      ],
+    },
+    {
+      /**
+       * 🔴 A partner route with no entry here has no `auth_context` at all —
+       * the `/partners*` wildcard supplies CORS and locale only. It 401s on
+       * every request while looking perfectly correct in the route file.
+       */
+      matcher: "/partners/payment-submissions/:submissionId/submit",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerSubmitPaymentSubmissionSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/payment-submissions/:submissionId",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    /**
+     * ⚠️ Must precede the `/partners/payment-submissions` GET entry below.
+     * Matching is prefix-based, so the list route's query validator would
+     * otherwise claim this path and reject it on an unknown query shape.
+     *
+     * 🔑 The `/partners*` wildcard only supplies CORS and locale —
+     * `authenticate("partner", …)` is registered per route. A partner route
+     * with no entry here has no `auth_context` at all, so it 401s on every
+     * request while looking perfectly correct in the route file.
+     */
+    {
+      matcher: "/partners/payment-submissions/payable-runs",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      /**
+       * #1710 — the goods half of what a partner may bill for. Same placement
+       * rule as `payable-runs` above: before the list entry, whose query
+       * validator would otherwise claim this path.
+       */
+      matcher: "/partners/payment-submissions/payable-inventory-orders",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    // Partner Credits (#1712) — read-only. Auth is PER-ROUTE here: without this
+    // entry the route 401s, and both tsc and a green suite stay silent about it.
+    {
+      matcher: "/partners/credits",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/payment-submissions",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(wrapSchema(ListPaymentSubmissionsQuerySchema), {}),
+      ],
+    },
+    {
+      matcher: "/partners/payment-submissions",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(CreatePaymentSubmissionSchema)),
+      ],
+    },
+
+    // Payment and its methods
+    {
+      matcher: "/admin/persons",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(personSchema))],
+    },
+    {
+      matcher: "/admin/persons/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/persons",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listPersonsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/persons/:id",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ReadPersonQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/persons/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdatePersonSchema))],
+    },
+    // Pause/resume the daily partner reminders on one production run.
+    {
+      matcher: "/admin/production-runs/:id/reminders",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(ProductionRunRemindersSchema))],
+    },
+    // The newsletter switch on a person (admin-added people were never mailed).
+    {
+      matcher: "/admin/persons/:id/subscription",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(setPersonSubscriptionSchema))],
+    },
+    // person_property CRUD (module-service backed; swappable Postgres/Hyperbee DAL)
+    {
+      matcher: "/admin/person-properties",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreatePersonPropertySchema))],
+    },
+    // Weaver edits upsert, addressed by census_id. Registered BEFORE the `:id`
+    // matcher below: matching is prefix-based, so `:id` would otherwise claim
+    // this two-segment path.
+    {
+      matcher: "/admin/person-properties/by-census/:census_id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdatePersonPropertySchema))],
+    },
+    {
+      matcher: "/admin/person-properties/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdatePersonPropertySchema))],
+    },
+    // crm CRUD (Hyperbee-only module-service backed)
+    {
+      matcher: "/admin/crm/companies",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateCrmCompanySchema))],
+    },
+    {
+      matcher: "/admin/crm/companies/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateCrmCompanySchema))],
+    },
+    {
+      matcher: "/admin/crm/people",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateCrmPersonSchema))],
+    },
+    {
+      matcher: "/admin/crm/people/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateCrmPersonSchema))],
+    },
+    {
+      matcher: "/admin/crm/activities",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateCrmActivitySchema))],
+    },
+    {
+      matcher: "/admin/crm/activities/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateCrmActivitySchema))],
+    },
+    {
+      matcher: "/admin/crm/opportunities",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateCrmOpportunitySchema))],
+    },
+    {
+      matcher: "/admin/crm/opportunities/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateCrmOpportunitySchema))],
+    },
+    {
+      matcher: "/admin/crm/notes",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateCrmNoteSchema))],
+    },
+    {
+      matcher: "/admin/crm/notes/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateCrmNoteSchema))],
+    },
+    {
+      matcher: "/admin/crm/tasks",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateCrmTaskSchema))],
+    },
+    {
+      matcher: "/admin/crm/tasks/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateCrmTaskSchema))],
+    },
+    // #1038 weaver verify against the census public core
+    {
+      matcher: "/web/census/verify",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(VerifyWeaverSchema))],
+    },
+    {
+      matcher: "/admin/persons/:id/resources/:resource",
+      method: "POST",
+      middlewares: [validatePersonResourceCreate],
+    },
+    {
+      matcher: "/admin/persons/:id/resources/:resource/:resourceId",
+      method: "PATCH",
+      middlewares: [validatePersonResourceUpdate],
+    },
+    {
+      matcher: "/admin/persons/:id/addresses",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(addressSchema))],
+    },
+    {
+      matcher: "/admin/persons/:id/addresses/:addressId",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(addressSchema))],
+    },
+    // Contact routes
+    {
+      matcher: "/admin/persons/:id/contacts",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(contactSchema))],
+    },
+    {
+      matcher: "/admin/persons/:id/contacts/:contactId",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(contactSchema))],
+    },
+    // Tag routes
+    {
+      matcher: "/admin/persons/:id/tags",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(tagSchema))],
+    },
+    {
+      matcher: "/admin/persons/:id/tags",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(tagSchema))],
+    },
+    {
+      matcher: "/admin/persons/:id/tags",
+      method: "DELETE",
+      middlewares: [validateAndTransformQuery(wrapSchema(deleteTagSchema), {})],
+    },
+    // Person Import routes
+    {
+      matcher: "/admin/persons/import",
+      method: "POST",
+      middlewares: [adaptMulter(upload.single("file"))],
+    },
+    {
+      matcher: "/admin/persons/import/:transaction_id/confirm",
+      method: "POST",
+      middlewares: [],
+    },
+    // Media routes
+    {
+      matcher: "/admin/medias",
+      method: "POST",
+      middlewares: [maybeMulterArray("files"), validateAndTransformBody(wrapSchema(uploadMediaSchema))],
+    },
+    // AI Image Extraction endpoint (JSON body with image_url)
+    {
+      matcher: "/admin/ai/image-extraction",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminImageExtractionReq))],
+    },
+    // ID card → person (vision extraction). Sibling of the image-extraction
+    // endpoint above; separate validator because the payload and the retention
+    // policy are different — see lib/people/id-card.ts.
+    {
+      matcher: "/admin/people/id-extraction",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminIdExtractionReq))],
+    },
+    // Inventory-nested alias of the image-extraction endpoint (#770) — the
+    // canonical "Import From Image" path under the Inventory resource. Same
+    // validation as the legacy /admin/ai/image-extraction matcher above.
+    {
+      matcher: "/admin/inventory-items/import-from-image",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminImageExtractionReq))],
+    },
+    // AI Chat endpoints (BM25 + LLM hybrid)
+    {
+      matcher: "/admin/ai/chat/chat",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminAiChatReq))],
+    },
+
+    // Admin MCP — JSON-RPC endpoint exposing the Admin API as tools (#1092).
+    // Body is JSON-RPC (validated by the MCP transport), so no body validator
+    // here. All /admin/* routes are admin-user authenticated by Medusa.
+    {
+      matcher: "/admin/mcp",
+      method: "POST",
+      middlewares: [],
+    },
+    // Admin agentic assistant — streaming tool-caller over the Admin MCP registry.
+    //
+    // The body carries up to 60 UI messages INCLUDING their tool parts, and a
+    // Data Plumbing job's `changes` array alone can be tens of kB. Medusa passes
+    // `sizeLimit` straight to express.json(), so leaving it unset means the
+    // Express default of 100kb — which a thread that has run a maintenance job
+    // blows through, and the operator sees an intermittent "Payload too large".
+    // The route discards tool parts before modelling anyway (see the normalise
+    // step in the handler); it just has to be able to RECEIVE them first.
+    {
+      matcher: "/admin/assistant/chat",
+      method: "POST",
+      bodyParser: { sizeLimit: "5mb" },
+      middlewares: [validateAndTransformBody(wrapSchema(AdminAssistantChatSchema))],
+    },
+    // Admin assistant context compaction — the client calls this when the thread
+    // approaches the model's context window; the route returns a short summary
+    // the client stores in place of the older turns.
+    {
+      matcher: "/admin/assistant/summarize",
+      method: "POST",
+      // Compaction is handed the very thread that grew too big to continue —
+      // the one request guaranteed to be large. Same 100kb default trap.
+      bodyParser: { sizeLimit: "5mb" },
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminAssistantSummarizeSchema)),
+      ],
+    },
+    // Admin assistant on-demand image reading. Attaching a photo never sends
+    // pixels anywhere; this is the explicit "actually look at it" call.
+    {
+      matcher: "/admin/assistant/vision",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminAssistantVisionSchema)),
+      ],
+    },
+
+    {
+      matcher: "/admin/ai/rag/search",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(AdminRagSearchQuery), {})],
+    },
+
+    // AI Chat Query Resolution endpoints
+    {
+      matcher: "/admin/ai/chat/resolve",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminAiChatResolveReq))],
+    },
+    {
+      matcher: "/admin/ai/chat/resolve",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(AdminAiChatResolveQuery), {})],
+    },
+
+    // Admin Feedback routes
+    {
+      matcher: "/admin/feedbacks",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(FeedbackSchema))],
+    },
+
+    // Folder-scoped media uploads
+    {
+      matcher: "/admin/medias/folder/:id/upload",
+      method: "POST",
+      middlewares: [maybeMulterArray("files")],
+    },
+    // Legacy upload path kept for backward compatibility
+    {
+      matcher: "/admin/medias/:id/upload",
+      method: "POST",
+      middlewares: [maybeMulterArray("files")],
+    },
+
+    {
+      matcher: "/admin/medias/existdir",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(folderSchema))],
+    },
+    // Folder creation endpoint
+    {
+      matcher: "/admin/medias/folder",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(folderSchema))],
+    },
+    // Textile Product Feature Extraction endpoints
+    {
+      matcher: "/admin/medias/extract-features",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(ExtractFeaturesRequestSchema))],
+    },
+    {
+      matcher: "/admin/medias/extract-features/:transaction_id/confirm",
+      method: "POST",
+      middlewares: [],
+    },
+    // Folder-wide (rate-limited) textile feature extraction endpoints
+    {
+      matcher: "/admin/medias/folder/:id/extract-features",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(ExtractFolderFeaturesRequestSchema))],
+    },
+    {
+      matcher: "/admin/medias/folder/:id/extract-features/:transaction_id/confirm",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/medias/folder/:id/extract-features/status",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/medias/folder/:id/extract-features/retry",
+      method: "POST",
+      middlewares: [],
+    },
+    // Person Types
+    {
+      matcher: "/admin/persontypes",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(personTypeSchema))],
+    },
+    {
+      matcher: "/admin/persontypes/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(updatePersonTypeSchema))],
+    },
+    {
+      matcher: "/admin/persontypes/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+    // Hang tag settings
+    {
+      matcher: "/admin/hang-tag-settings",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/hang-tag-settings",
+      method: "PUT",
+      middlewares: [],
+    },
+
+    // Inventory Split
+    {
+      matcher: "/admin/inventory-items/:id/split",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(splitInventorySchema))],
+    },
+
+    // Inventory Associations
+
+    {
+      matcher: "/admin/inventory-items/:id/rawmaterials",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(rawMaterialSchema))],
+    },
+    {
+      matcher: "/admin/inventory-items/:id/rawmaterials/:rawMaterialId",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateRawMaterialSchema))],
+    },
+    // Inventory orders
+    {
+      matcher: "/admin/inventory-orders",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(createInventoryOrdersSchema))],
+    },
+    {
+      matcher: "/admin/inventory-orders",
+      method: 'GET',
+      middlewares: [validateAndTransformQuery(wrapSchema(listInventoryOrdersQuerySchema), {})]
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/assign-partner",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(assignInventoryOrderPartnerSchema)),
+      ],
+    },
+    /**
+     * #1737 — amounts on an order that are not goods.
+     *
+     * ⚠️ Registered BEFORE `/admin/inventory-orders/:id`: matching is
+     * prefix-based, and the `:id` GET carries a query validator that would
+     * otherwise claim this path. Same trap as `/settles` and
+     * `/records-against` on the payments side.
+     */
+    /**
+     * #2315 — correct or remove ONE charge. MUST precede the `/charges` POST:
+     * matching is prefix-based, and the create schema (which requires `type`)
+     * would otherwise claim this path and reject an amount-only edit.
+     */
+    {
+      matcher: "/admin/inventory-orders/:id/charges/:chargeId",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(updateInventoryOrderChargeSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/charges/:chargeId",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/charges",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(createInventoryOrderChargeSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/charges",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      // The admin mirror of the partner proforma — same gatherer, same bytes.
+      matcher: "/admin/inventory-orders/:id/invoice",
+      method: "GET",
+      middlewares: [],
+    },
+    /**
+     * #1752 — a partner's proposed revision (line edits + tax) awaiting approval.
+     *
+     * ⚠️ Registered BEFORE `/admin/inventory-orders/:id` for the same reason as
+     * `/charges` above: matching is prefix-based and the `:id` matchers carry
+     * validators that would otherwise claim these paths.
+     */
+    {
+      matcher: "/admin/inventory-orders/:id/changes",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/changes/:changeId/approve",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/changes/:changeId/reject",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(rejectInventoryOrderChangeSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id",
+      method: 'GET',
+      middlewares: [validateAndTransformQuery(wrapSchema(ReadSingleInventoryOrderQuerySchema), {})]
+    },
+    {
+      matcher: "/admin/inventory-orders/:id",
+      method: 'PUT',
+      middlewares: [validateAndTransformBody(wrapSchema(updateInventoryOrdersSchema))],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/tasks",
+      method: 'POST',
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostInventoryOrderTasksReq))],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/tasks/:taskId",
+      method: 'POST',
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateInventoryOrderTask))],
+    },
+    /**
+     * #2115 — the admin receipt. Registered BEFORE `/admin/inventory-orders/:id`
+     * would be a concern for a GET, but this is a POST on a deeper path; kept
+     * beside its siblings for the same prefix-matching reason as `/charges`.
+     */
+    {
+      matcher: "/admin/inventory-orders/:id/receive",
+      method: 'POST',
+      middlewares: [validateAndTransformBody(wrapSchema(receiveInventoryOrderSchema))],
+    },
+    // #2289 S3 — close a short delivery with what was done about it.
+    {
+      matcher: "/admin/inventory-orders/:id/shortfalls/:shortfallId/resolve",
+      method: 'POST',
+      middlewares: [validateAndTransformBody(wrapSchema(resolveShortfallSchema))],
+    },
+    {
+      matcher: "/admin/inventory-transfers",
+      method: 'POST',
+      middlewares: [validateAndTransformBody(wrapSchema(createMaterialTransferSchema))],
+    },
+    {
+      matcher: "/admin/inventory-transfers/:id/receive",
+      method: 'POST',
+      middlewares: [validateAndTransformBody(wrapSchema(receiveMaterialTransferSchema))],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/send-to-partner",
+      method: 'POST',
+      middlewares: [validateAndTransformBody(wrapSchema(sendToPartnerSchema))],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/order-lines",
+      method: 'PUT',
+      middlewares: [validateAndTransformBody(wrapSchema(updateInventoryOrderLinesSchema))],
+    },
+    // Raw-material groups (#817 S3)
+    {
+      matcher: "/admin/raw-material-groups",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(createRawMaterialGroupSchema))],
+    },
+    {
+      matcher: "/admin/raw-material-groups",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listRawMaterialGroupsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/raw-material-groups/:id",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(readGroupQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/raw-material-groups/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(updateRawMaterialGroupSchema))],
+    },
+    {
+      matcher: "/admin/raw-material-groups/:id/colors",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(addGroupColorSchema))],
+    },
+    {
+      matcher: "/admin/raw-material-groups/:id/colors/full",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(addGroupColorFullSchema))],
+    },
+    {
+      matcher: "/admin/raw-material-groups/:id/colors/link",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(linkGroupColorsSchema))],
+    },
+    {
+      matcher: "/admin/raw-material-groups/:id/orders",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(createGroupOrderSchema))],
+    },
+    // Inbound Emails routes
+    {
+      matcher: "/admin/inbound-emails",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listInboundEmailsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/inbound-emails/sync",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(syncInboundEmailsSchema))],
+    },
+    // Static sub-routes must come before /:id to prevent dynamic segment shadowing in prod
+    {
+      matcher: "/admin/inbound-emails/test-connection",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(testConnectionSchema))],
+    },
+    {
+      matcher: "/admin/inbound-emails/actions",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/inbound-emails/folders",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/inbound-emails/mailboxes",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(setInboundMailboxesSchema))],
+    },
+    {
+      matcher: "/admin/inbound-emails/mailboxes/create",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(createInboundMailboxSchema))],
+    },
+    {
+      matcher: "/admin/inbound-emails/setup-resend-webhook",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/inbound-emails/:id/extract",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(extractInboundEmailSchema))],
+    },
+    {
+      matcher: "/admin/inbound-emails/:id/execute",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(executeInboundEmailSchema))],
+    },
+    {
+      matcher: "/admin/inbound-emails/:id/link-inventory-order",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(linkInboundEmailInventoryOrderSchema))],
+    },
+    // Admin Partners routes
+    {
+      matcher: "/admin/partners/notifications/broadcast",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminBroadcastNotificationSchema))],
+    },
+    {
+      matcher: "/admin/partners",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listPartnersQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/partners/:id",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listPartnersQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/partners/:id",
+      method: "PUT",
+      middlewares: [],
+    },
+    // Admin twin of the partner theme editor (#2061) — same schema.
+    {
+      matcher: "/admin/partners/:id/storefront/website/theme",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(websiteThemeSchema))],
+    },
+    {
+      matcher: "/admin/partners",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(PostPartnerSchema))],
+    },
+    // Admin Partner Credits (#1712) — money the partner already holds that no
+    // payout consumed. GET carries no body; POST is validated.
+    {
+      matcher: "/admin/partners/:id/credits",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/credits",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(CreatePartnerCreditSchema)),
+      ],
+    },
+    // Applying a credit to a payout (#1712) — the deliberate act the model was
+    // built around. Never inferred by a fold; always a human naming the payout.
+    {
+      matcher: "/admin/partners/:id/credits/:creditId/apply",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(ApplyPartnerCreditSchema)),
+      ],
+    },
+    // Admin Partner Subscription
+    {
+      matcher: "/admin/partners/:id/subscription",
+      method: ["GET", "POST", "DELETE"],
+      middlewares: [],
+    },
+    // Admin Partner Storefront Provisioning
+    {
+      matcher: "/admin/partners/:id/storefront",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/storefront/provision",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/storefront/redeploy",
+      method: "POST",
+      middlewares: [],
+    },
+    // Admin Partner Storefront Domain (mirror of /partners/storefront/domain)
+    {
+      matcher: "/admin/partners/:id/storefront/domain",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/storefront/domain",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/storefront/domain",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/storefront/domain/verify",
+      method: "POST",
+      middlewares: [],
+    },
+    // Admin Partner Disable — take the storefront domains down and set status
+    // inactive, without deleting the partner or its products/orders.
+    {
+      matcher: "/admin/partners/:id/disable",
+      method: "POST",
+      middlewares: [],
+    },
+    // Admin Partner Admins routes
+    {
+      matcher: "/admin/partners/:id/admins",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/admins",
+      method: "POST",
+      middlewares: [],
+    },
+    // Admin Partner Tasks routes
+    {
+      matcher: "/admin/partners/:id/tasks",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/tasks",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminCreatePartnerTaskReq))],
+    },
+    {
+      matcher: "/admin/partners/:id/tasks/:taskId",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/tasks/:taskId",
+      method: "PATCH",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminUpdatePartnerTaskReq))],
+    },
+    {
+      matcher: "/admin/partners/:id/tasks/:taskId/assign",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostPartnerTaskAssignReq))],
+    },
+    // Admin partner person types
+    {
+      matcher: "/admin/partners/:id/person-types",
+      method: "GET",
+    },
+    {
+      matcher: "/admin/partners/:id/person-types",
+      method: "POST",
+    },
+    // Admin partner WhatsApp verification
+    {
+      matcher: "/admin/partners/:id/whatsapp-verify",
+      method: "POST",
+    },
+    {
+      matcher: "/admin/partners/:id/whatsapp-verify",
+      method: "DELETE",
+    },
+    // Admin partner email verification bypass
+    {
+      matcher: "/admin/partners/:id/bypass-email-verification",
+      method: "POST",
+    },
+    // Admin Partner Capabilities (#1531) — the partner's capability library,
+    // surfaced for an operator. POST is validated; DELETE carries no body.
+    {
+      matcher: "/admin/partners/:id/capabilities",
+      method: "GET",
+      middlewares: [
+        validateAndTransformQuery(wrapSchema(AdminListPartnerCapabilitiesQuery), {}),
+      ],
+    },
+    {
+      matcher: "/admin/partners/:id/capabilities",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminCreatePartnerCapabilityReq)),
+      ],
+    },
+    // Website scan (#2249): scan proposes and stores; commit files by key.
+    // Registered before `:sampleId` purely for readability — the methods differ.
+    {
+      matcher: "/admin/partners/:id/capabilities/scan",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminScanPartnerWebsiteReq)),
+      ],
+    },
+    {
+      matcher: "/admin/partners/:id/capabilities/scans/:scanId/commit",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminCommitPartnerCapabilityScanReq)),
+      ],
+    },
+    {
+      matcher: "/admin/partners/:id/capabilities/knowledge",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminAddPartnerCapabilityKnowledgeReq)),
+      ],
+    },
+    {
+      matcher: "/admin/partners/:id/capabilities/:sampleId",
+      method: "DELETE",
+    },
+    // Admin Partner Onboarding Profile — the upsert behind the admin-assistant
+    // filing of questionnaire answers a partner gave outside the wizard. Same
+    // schema the partner's own PUT registers, so the two surfaces cannot
+    // disagree about what an answer looks like.
+    {
+      matcher: "/admin/partners/:id/onboarding-profile",
+      method: "PUT",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(onboardingProfileUpdateSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/persons/partner",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(AdminGetPartnersParamsSchema), {})],
+    },
+    {
+      matcher: "/admin/designs",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(designSchema))],
+    },
+    {
+      // Which stock locations are ours — gates every consumption deduction.
+      matcher: "/admin/location-ownership",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminPostLocationOwnershipReq)),
+      ],
+    },
+    {
+      // #457 admin data-plumbing / ops maintenance jobs
+      matcher: "/admin/ops/maintenance-jobs/:id/run",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(OpsMaintenanceRunSchema))],
+    },
+    {
+      // #457 ops maintenance-jobs audit-log history
+      matcher: "/admin/ops/maintenance-jobs/runs",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(OpsMaintenanceRunsQuerySchema), {})],
+    },
+    {
+      // #508 ops maintenance-jobs batch run (Data Plumbing v2)
+      matcher: "/admin/ops/maintenance-jobs/batches",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(OpsMaintenanceBatchSchema))],
+    },
+    {
+      // #508 ops maintenance-jobs batch-run history index (Data Plumbing v2)
+      matcher: "/admin/ops/maintenance-jobs/batches",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(OpsMaintenanceBatchesQuerySchema), {})],
+    },
+    // NOTE: /admin/* routes already get Medusa's default admin auth
+    // (session + bearer + api-key). Re-registering authenticate() with only
+    // ["session","bearer"] NARROWS that and silently breaks API-key access —
+    // don't add it back. (Removed from 11 admin matchers, 2026-06-12.)
+    {
+      matcher: "/admin/designs/:id/cancel-partner-assignment",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(CancelPartnerAssignmentSchema)),
+      ],
+    },
+    /**
+     * #1817 — the same two, for designs with NO customer link.
+     *
+     * 🔴 Registered BEFORE `/admin/designs/:id`, like every other static
+     * segment under `/admin/designs`: a static path landing after the
+     * parameterised one is matched as an id called "draft-order", and the body
+     * arrives unvalidated.
+     */
+    {
+      matcher: "/admin/designs/draft-order",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(CreateDesignDraftOrderSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/designs/draft-order/preview",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(CreateDesignOrderSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/designs/:id",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateDesignSchema))],
+    },
+
+    {
+      matcher: "/admin/designs/:id",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ReadDesignsQuerySchema), {})],
+    },
+
+    {
+      matcher: "/admin/designs/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+
+    // #604 slice B — design brief sub-resource (concept/persona/competitors/
+    // price_point/design_budget). GET reads, POST replaces, PUT patches.
+    {
+      matcher: "/admin/designs/:id/brief",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(DesignBriefSchema))],
+    },
+    {
+      matcher: "/admin/designs/:id/brief",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateDesignBriefSchema))],
+    },
+
+    // Designer-invite (#1113 S1): admin mints a scoped invite link for a design.
+    {
+      matcher: "/admin/designs/:id/designer-invites",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminCreateDesignerInviteSchema))],
+    },
+
+    // Inventory linkin on designs
+
+    /*
+     * #2111 — whose design this is, and what material it waits for.
+     *
+     * Both are MCP write tools, and the route-validator coverage guard requires
+     * every one of those to be bound to a validator or written down as knowingly
+     * unbound. Binding is the better half of that choice: it is what lets the
+     * guard check the tool's advertised body params against what the route will
+     * actually accept, so a stray field cannot be advertised into a 400.
+     */
+    {
+      matcher: "/admin/designs/:id/customer",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AttachDesignCustomerSchema))],
+    },
+    {
+      matcher: "/admin/designs/:id/inventory-orders",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AttachDesignInventoryOrderSchema)),
+      ],
+    },
+
+    {
+      matcher: "/admin/designs/:id/inventory",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostDesignInventoryReq))],
+    },
+
+    {
+      matcher: "/admin/designs/:id/inventory/delink",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminDeleteDesignInventoryReq))],
+    },
+    // The PATCH read `req.validatedBody ?? req.body` with nothing registered,
+    // so its schema never ran.
+    {
+      matcher: "/admin/designs/:id/inventory/:inventoryLinkId",
+      method: "PATCH",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPatchDesignInventoryLinkReq))],
+    },
+
+    // Raw-material groups pinned to a design (#817 S4)
+    {
+      matcher: "/admin/designs/:id/material-groups",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(pinDesignGroupSchema))],
+    },
+    {
+      matcher: "/admin/designs/:id/material-groups/:groupId",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(updateDesignGroupSchema))],
+    },
+
+    // Consumption logs on Designs
+
+    {
+      /**
+       * Fabrics searchable by what a vision model saw. A route file without a
+       * matcher entry is not a route — and this one is the only reader of a
+       * module whose whole justification is being queryable.
+       */
+      matcher: "/admin/textile-analyses",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      // Single row, hydrated with its media file, for the edit modal.
+      matcher: "/admin/textile-analyses/:id",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      // Correct one analysis. Until this, the only writer was the extractor —
+      // a misread garment / pattern / weight could not be fixed by a human.
+      matcher: "/admin/textile-analyses/:id",
+      method: "PATCH",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminUpdateTextileAnalysisSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/designs/:id/consumption-logs",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostConsumptionLogReq))],
+    },
+    {
+      /**
+       * Correct one consumption log. There was no edit path at all — the
+       * figure that decides stock deduction AND design cost could only ever be
+       * added to, so a `per_piece` basis recorded where `total` was meant
+       * stayed wrong by a multiple. Refuses a log already applied to stock.
+       */
+      matcher: "/admin/designs/:id/consumption-logs/:logId",
+      method: "PATCH",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPatchConsumptionLogReq))],
+    },
+    {
+      // Retire a duplicate. Same applied-to-stock refusal, same audit row.
+      matcher: "/admin/designs/:id/consumption-logs/:logId",
+      method: "DELETE",
+      middlewares: [],
+    },
+
+    // #1531 — spec-driven capability inquiries.
+    {
+      matcher: "/admin/designs/:id/inquiries",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostDesignInquiryReq))],
+    },
+
+    {
+      matcher: "/admin/designs/:id/inquiries/preview",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostDesignInquiryPreviewReq))],
+    },
+
+    {
+      matcher: "/admin/designs/:id/inquiries/:inquiryId/close",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostCloseDesignInquiryReq))],
+    },
+
+    {
+      matcher: "/admin/designs/:id/consumption-logs/commit",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostCommitConsumptionReq))],
+    },
+
+    // Consumption logs on production RUNS — the only capture path available to
+    // a product-only run, which has no design to hang a log off (#1112/#938).
+
+    {
+      matcher: "/admin/production-runs/:id/consumption-logs",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostRunConsumptionLogReq))],
+    },
+
+    // #2322 — profit share on partner runs made with our material.
+    {
+      matcher: "/admin/production-runs/:id/profit-share",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SetProfitShareSchema))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/profit-share/sales",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(RecordSaleSchema))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/profit-share/settlements",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(RecordSettlementSchema))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/consumption-logs/commit",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostRunCommitConsumptionReq))],
+    },
+
+    // Energy rates
+
+    {
+      matcher: "/admin/energy-rates",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminCreateEnergyRateReq))],
+    },
+    {
+      matcher: "/admin/energy-rates/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminUpdateEnergyRateReq))],
+    },
+
+    //Task on Designs
+
+    {
+      matcher: "/admin/designs/:id/tasks",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostDesignTasksReq))],
+    },
+    // Must add queryParams stuff here
+    {
+      matcher: "/admin/designs/:id/tasks/:taskId",
+      method: "GET",
+      middlewares: [],
+    },
+
+    {
+      matcher: "/admin/designs/:id/tasks/:taskId",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPutDesignTaskReq))],
+    },
+
+    {
+      matcher: "/admin/designs/:id/tasks/:taskId/assign",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminPostDesignTaskAssignReq))],
+    },
+
+    {
+      matcher: "/admin/designs/auto",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateDesignLLMSchema))],
+    },
+
+    // Customer notification for designs
+    {
+      matcher: "/admin/designs/:id/notify-customer",
+      method: "POST",
+      middlewares: [],
+    },
+
+    // Media folder linking on designs
+    {
+      matcher: "/admin/designs/:id/link-media-folder",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/designs/:id/link-media-folder",
+      method: "DELETE",
+      middlewares: [],
+    },
+
+    // Image segmentation on designs (fal.ai BiRefNet)
+    {
+      matcher: "/admin/designs/:id/segment",
+      method: "POST",
+      bodyParser: { sizeLimit: "20mb" },
+      middlewares: [validateAndTransformBody(wrapSchema(SegmentImageSchema))],
+    },
+    // Depth + normal map generation (fal.ai MiDaS)
+    {
+      matcher: "/admin/designs/:id/segment/depth",
+      method: "POST",
+      bodyParser: { sizeLimit: "20mb" },
+      middlewares: [],
+    },
+    // Image proxy for external CDNs (avoids CORS)
+    {
+      matcher: "/admin/image-proxy",
+      method: "GET",
+      middlewares: [],
+    },
+
+    // Link designs to customer + convert to draft order
+    // (default admin auth applies — see note at /admin/designs/:id)
+    {
+      matcher: "/admin/customers/:id/designs",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(LinkDesignsToCustomerSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/customers/:id/designs",
+      method: "DELETE",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(LinkDesignsToCustomerSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/customers/:id/design-order",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(CreateDesignOrderSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/customers/:id/design-order/preview",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(CreateDesignOrderSchema)),
+      ],
+    },
+
+    // PayU payment (called by storefront after redirect)
+    {
+      matcher: "/store/payu/complete",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/store/payu/refresh",
+      method: "POST",
+      middlewares: [],
+    },
+    // Store AI access fee endpoints
+    {
+      matcher: "/store/ai/accessfee",
+      method: "POST",
+      middlewares: [authenticate("customer", ["session", "bearer"])],
+    },
+    {
+      matcher: "/store/ai/accessfee/confirm",
+      method: "POST",
+      middlewares: [
+        authenticate("customer", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(AccessFeeConfirmSchema)),
+      ],
+    },
+
+    // Public freight estimate for a bulk quantity (#1389). Scoped to a store
+    // by the publishable key's sales channel — which IDENTIFIES the storefront
+    // but does not protect the route: the key ships in the browser bundle. The
+    // route is built to be cheap to hammer (manual options cost no carrier
+    // call; calculated rates are cached per lane) rather than hard to reach.
+    {
+      matcher: "/store/shipping-estimate",
+      method: "GET",
+      middlewares: [
+        validateAndTransformQuery(wrapSchema(StoreShippingEstimateSchema), {}),
+      ],
+    },
+
+    // Store AI endpoints
+    {
+      matcher: "/store/ai/search",
+      method: "GET",
+      // Public — no customer auth. Discovery should work for anonymous
+      // visitors. GET with query-string params so the call is idempotent
+      // and matches the SDK's `client.fetch(..., { query })` convention.
+      middlewares: [
+        validateAndTransformQuery(wrapSchema(StoreAiSearchSchema), {}),
+      ],
+    },
+    {
+      matcher: "/store/ai/chat",
+      method: "POST",
+      // Public — same reasoning as /store/ai/search. visitor_id in the
+      // body is the join key; we don't gate on a customer session.
+      middlewares: [
+        validateAndTransformBody(wrapSchema(StoreAiChatSchema)),
+      ],
+    },
+    {
+      matcher: "/store/ai/imagegen",
+      method: "POST",
+      middlewares: [
+        authenticate("customer", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(StoreGenerateAiImageReqSchema)),
+      ],
+    },
+    {
+      matcher: "/store/ai/tryon",
+      method: "POST",
+      bodyParser: { sizeLimit: "20mb" },
+      middlewares: [
+        authenticate("customer", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(StoreTryOnReqSchema)),
+      ],
+    },
+    // Store upload presign — authenticated customers can get presigned URLs for design layer images
+    {
+      matcher: "/store/uploads/presign",
+      method: "POST",
+      middlewares: [
+        authenticate("customer", ["session", "bearer"]),
+      ],
+    },
+    // Store design create — allow larger bodies for thumbnail data URLs
+    {
+      matcher: "/store/custom/designs",
+      method: "POST",
+      bodyParser: { sizeLimit: "5mb" },
+      middlewares: [
+        authenticate("customer", ["session", "bearer"]),
+      ],
+    },
+    // Store design update
+    {
+      matcher: "/store/custom/designs/:id",
+      method: "PUT",
+      bodyParser: { sizeLimit: "5mb" },
+      middlewares: [
+        authenticate("customer", ["session", "bearer"]),
+      ],
+    },
+    // Store design endpoints - cost estimation and checkout
+    {
+      matcher: "/store/custom/designs/:id/estimate",
+      method: "GET",
+      middlewares: [
+        authenticate("customer", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/store/custom/designs/:id/checkout",
+      method: "POST",
+      middlewares: [
+        authenticate("customer", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #1349: add a made-to-order line item, validated against the partner's
+      // published production spec. Deliberately NOT customer-authenticated —
+      // a guest cart is a cart, and requiring a login to configure a piece
+      // would put the sign-up wall before the thing that motivates it.
+      matcher: "/store/carts/:id/made-to-spec",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(StoreMadeToSpecReq))],
+    },
+    // Task-Templates
+    {
+      matcher: "/admin/task-templates",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(taskTemplateSchema))],
+    },
+    {
+      matcher: "/admin/task-templates/:id",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(updateTaskTemplateSchema))],
+    },
+
+    {
+      matcher: "/admin/production-runs",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminCreateProductionRunReq))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/approve",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminApproveProductionRunReq))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/send-to-production",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminSendProductionRunToProductionReq))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/cancel",
+      method: "POST",
+      // Admin routes get auth automatically via Medusa's admin route
+      // loader — explicit authenticate("user", …) here only narrowed the
+      // accepted auth modes to session + bearer, which blocked sk_*
+      // (secret key) tooling like backfill scripts and the prod
+      // operator CLI. Other production-run POST routes don't restrict
+      // and accept sk_, so this one was the odd one out.
+      middlewares: [validateAndTransformBody(wrapSchema(AdminCancelProductionRunReq))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/start-dispatch",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminStartDispatchProductionRunReq))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/resume-dispatch",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminResumeDispatchProductionRunReq))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/assign-partner",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminAssignProductionRunPartnerReq))],
+    },
+    {
+      matcher: "/admin/production-runs/:id/accept",
+      method: "POST",
+    },
+    {
+      matcher: "/admin/production-runs/:id/start",
+      method: "POST",
+    },
+    {
+      matcher: "/admin/production-runs/:id/finish",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminFinishProductionRunReq))],
+    },
+    {
+      // Re-send parked runs to the partner they came from (batch).
+      matcher: "/admin/production-runs/redispatch-parked",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminRedispatchParkedRunsReq))],
+    },
+    {
+      /**
+       * #1805 — review what completed runs produced, in bulk.
+       *
+       * A static segment beside `redispatch-parked`. Nothing shadows it: every
+       * parameterised production-run matcher carries a second segment, so none
+       * of them can read "approvals" as an id.
+       */
+      matcher: "/admin/production-runs/approvals",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminRunApprovalsReq))],
+    },
+
+    {
+      matcher: "/admin/production-run-policy",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/production-run-policy",
+      method: "PUT",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminUpdateProductionRunPolicySchema)),
+      ],
+    },
+
+    // Website routes
+    {
+      matcher: "/admin/websites",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(websiteSchema))],
+    },
+    {
+      matcher: "/admin/websites/:id",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(updateWebsiteSchema))],
+    },
+    {
+      matcher: "/admin/websites/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+    // Website Pages routes
+    {
+      matcher: "/admin/websites/:id/pages",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(postPagesSchema))],
+    },
+    {
+      matcher: "/admin/websites/:id/pages/:pageId",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(updatePageSchema))],
+    },
+
+    {
+      matcher: "/admin/websites/:id/pages/:pageId/blocks",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(createBlocksSchema))],
+    },
+
+    {
+      matcher: "/admin/websites/:id/pages/:pageId/blocks",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ReadBlocksQuerySchema), {})],
+    },
+
+    {
+      matcher: "/admin/email-editor/products",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listEmailEditorProductsQuerySchema), {})],
+    },
+
+    {
+      matcher: "/admin/websites/:id/pages/:pageId/blocks/:blockId",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(updateBlockSchema))],
+    },
+
+    {
+      matcher: "/admin/websites/:id/pages/:pageId/blocks/:blockId",
+      method: "DELETE",
+      middlewares: [],
+    },
+
+    {
+      matcher: "/admin/websites/:id/pages/:pageId",
+      method: "DELETE",
+      middlewares: [],
+    },
+
+    {
+      matcher: "/admin/websites/:id/pages/:pageId/subs/:workflowId/confirm",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/websites/:id/pages/:pageId/subs",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SendBlogSubscriptionSchema))],
+    },
+    {
+      matcher: "/admin/websites/:id/pages/:pageId/subs/test",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(TestBlogEmailSchema))],
+    },
+    {
+      matcher: "/web/health",
+      method: "GET",
+      middlewares: [createCorsMiddleware()],
+    },
+    {
+      matcher: "/web/website/:domain",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/web/website/:domain/subscribe",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(subscriptionSchema))],
+    },
+    {
+      // Public unsubscribe — GET resolves the (masked) target for the confirm
+      // page; POST performs the opt-out. Both validated inline in the route.
+      matcher: "/web/website/:domain/unsubscribe",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/web/website/:domain/unsubscribe",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/web/website/:domain/forms/:handle",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(webSubmitFormResponseSchema))],
+    },
+    {
+      matcher: "/web/website/:domain/forms/:handle/verify",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(webVerifyFormResponseSchema))],
+    },
+    {
+      matcher: "/web/website/:domain/forms/:handle/schema",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/web/tour-visits/:token",
+      method: "GET",
+      middlewares: [createRateLimitMiddleware({ key: "tour-visit", max: 60 })],
+    },
+    {
+      matcher: "/web/tour-visits/:token",
+      method: "PATCH",
+      middlewares: [
+        createRateLimitMiddleware({ key: "tour-visit-write", max: 30 }),
+        validateAndTransformBody(wrapSchema(WebSaveTourItinerarySchema)),
+      ],
+    },
+    {
+      matcher: "/web/guide-visits/:token",
+      method: "GET",
+      middlewares: [createRateLimitMiddleware({ key: "guide-visit", max: 120 })],
+    },
+    {
+      matcher: "/web/tour-visits/:token/share",
+      method: "POST",
+      middlewares: [createRateLimitMiddleware({ key: "share-mint", max: 10 })],
+    },
+    {
+      matcher: "/web/tour-visits/:token/share/:share_token",
+      method: "DELETE",
+      middlewares: [createRateLimitMiddleware({ key: "share-revoke", max: 30 })],
+    },
+
+    // Raw Materials Categories API
+    {
+      matcher: "/admin/categories/rawmaterials",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ReadRawMaterialCategoriesSchema), {})],
+    },
+    {
+      matcher: "/admin/categories/rawmaterials",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateMaterialTypeSchema))],
+    },
+
+    {
+      matcher: "/admin/inventory-items/raw-materials",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListInventoryItemRawMaterialsQuerySchema), {})],
+    },
+
+    // #1662 — the whole pickable catalog, not just raw-material-linked items.
+    {
+      matcher: "/admin/inventory-items/catalog",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListInventoryCatalogQuerySchema), {})],
+    },
+
+    // Bulk Import Inventory
+    {
+      matcher: "/admin/inventory-items/bulk-import",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(BulkImportSchema))],
+    },
+
+    {
+      matcher: "/admin/social-platforms",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SocialPlatformSchema))],
+    },
+
+    {
+      matcher: "/admin/social-platforms/whatsapp/connect",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(ConnectWhatsAppSchema))],
+    },
+
+    {
+      matcher: "/admin/social-posts",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SocialPostSchema))],
+    },
+
+    {
+      matcher: "/admin/social-posts/:socialPostId",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateSocialPostSchema))],
+    },
+
+    {
+      matcher: "/admin/social-platforms/:socialPlatformId",
+      method: ["POST", "PUT"],
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateSocialPlatformSchema))],
+    },
+
+    {
+      matcher: "/admin/social-platforms",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listSocialPlatformsQuerySchema), {})],
+    },
+
+    // ── Deployment accounts (rotatable storefront hosting accounts, #884 S4) ──
+    {
+      matcher: "/admin/deployment-accounts",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateDeploymentAccountSchema))],
+    },
+    {
+      matcher: "/admin/deployment-accounts",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListDeploymentAccountsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/deployment-accounts/:id",
+      method: ["POST", "PUT"],
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateDeploymentAccountSchema))],
+    },
+    {
+      matcher: "/admin/social-posts",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listSocialPostsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/social-posts/:id/publish",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(PublishSocialPostSchema))],
+    },
+    {
+      matcher: "/admin/socials/accounts",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(GetAccountsSchema), {})],
+    },
+    // Publishing Campaigns routes
+    {
+      matcher: "/admin/publishing-campaigns",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListPublishingCampaignsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/publishing-campaigns",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreatePublishingCampaignSchema))],
+    },
+    {
+      matcher: "/admin/publishing-campaigns/:id",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/publishing-campaigns/:id",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdatePublishingCampaignSchema))],
+    },
+    {
+      matcher: "/admin/publishing-campaigns/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/publishing-campaigns/:id/start",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/publishing-campaigns/:id/pause",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/publishing-campaigns/:id/cancel",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/publishing-campaigns/:id/preview",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/publishing-campaigns/:id/retry-item",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(RetryItemSchema))],
+    },
+    {
+      matcher: "/admin/publishing-campaigns/:id/retry-all",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/users/:id/suspend",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/persons/:id/geocode-addresses",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/persons/geocode-addresses/:transaction_id/confirm",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(ConfirmBody))],
+    },
+    {
+      matcher: "/web/persons",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(listPublicPersonsQuerySchema), {})],
+    },
+    {
+      matcher: "/web/persons/:id/contact",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(personContactRequestSchema))],
+    },
+    {
+      matcher: "/admin/products/:id/hang-tag",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      // #1346: the admin mirror of the partner production-spec write. Shares
+      // the partner request schema deliberately — two copies of the shape a
+      // spec may take is one edit from the surfaces disagreeing about what a
+      // valid spec is, and the workflow behind both is already the single
+      // place that knows the weave ranges.
+      matcher: "/admin/products/:id/spec",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(PartnerProductSpecReq)),
+      ],
+    },
+    {
+      matcher: "/admin/products/:id/linkDesign",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(LinkDesignValidator))],
+    },
+    {
+      matcher: "/admin/products/:id/unlinkDesign",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UnlinkDesignValidator))],
+    },
+    // People and Design Link
+    {
+      matcher: "/admin/products/:id/linkPerson",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(LinkPersonValidator))],
+    },
+    {
+      matcher: "/admin/products/:id/unlinkPerson",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UnlinkPersonValidator))],
+    },
+    {
+      matcher: "/admin/products/:id/generateDescription",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(GenerateDescriptionValidator))],
+    },
+    // Store management APIs
+
+    {
+      matcher: "/admin/stores",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(createStoreSchema))],
+    },
+    // Store disable/enable — flip the store's default sales channel `is_disabled`.
+    {
+      matcher: "/admin/stores/:id/disable",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/stores/:id/enable",
+      method: "POST",
+      middlewares: [],
+    },
+    // Email Templates 
+    {
+      matcher: "/admin/email-templates",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(EmailTemplateSchema))],
+    },
+    {
+      matcher: "/admin/email-templates",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(EmailTemplateQueryParams), {})],
+    },
+    // Notifications (custom listing endpoint to avoid overriding core /admin/notifications)
+    {
+      matcher: "/admin/notifications/custom",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(AdminNotificationsQueryParams), {})],
+    },
+    {
+      matcher: "/admin/email-templates/:id",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(EmailTemplateQueryParams), {})],
+    },
+    {
+      matcher: "/admin/email-templates/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateEmailTemplateSchema))],
+    },
+    {
+      matcher: "/admin/agreements",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateAgreementSchema))],
+    },
+    {
+      matcher: "/admin/agreements/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/agreements/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateAgreementSchema))],
+    },
+    // Forms
+    {
+      matcher: "/admin/forms",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminCreateFormSchema))],
+    },
+    {
+      matcher: "/admin/forms",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(AdminListFormsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/forms/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminUpdateFormSchema))],
+    },
+    {
+      matcher: "/admin/forms/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/forms/:id/fields",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminSetFormFieldsSchema))],
+    },
+    {
+      matcher: "/admin/forms/:id/responses",
+      method: "GET",
+      middlewares: [
+        validateAndTransformQuery(wrapSchema(AdminListFormResponsesQuerySchema), {}),
+      ],
+    },
+    {
+      matcher: "/admin/forms/:id/responses/:response_id",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/forms/:id/import-tour-bookings",
+      method: "POST",
+      bodyParser: false,
+      middlewares: [maybeMulterArray("file")],
+    },
+    {
+      matcher: "/admin/persons/:id/agreements/send",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminSendPersonAgreementReq))],
+    },
+    {
+      matcher: "/admin/designs/:id/partner",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(LinkDesignPartnerSchema))],
+    },
+    {
+      matcher: "/admin/designs/:id/production-runs",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminCreateDesignProductionRunSchema)),
+      ],
+    },
+    {
+      matcher: "/admin/designs/recreate-production-run",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminRecreateProductionRunSchema)),
+      ],
+    },
+    // Design components (bundling)
+    {
+      matcher: "/admin/designs/:id/components",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/designs/:id/components",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/designs/:id/components/:componentId",
+      method: "PATCH",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/designs/:id/components/:componentId",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/designs/:id/used-in",
+      method: "GET",
+      middlewares: [],
+    },
+    // Design revisions
+    {
+      matcher: "/admin/designs/:id/revise",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(ReviseDesignSchema))],
+    },
+    {
+      matcher: "/admin/designs/:id/revisions",
+      method: "GET",
+      middlewares: [],
+    },
+    // Designer-invite accept (#1113 S1) — PUBLIC (token IS the auth, like
+    // /partners/wa-auth). CORS is inherited from the /partners* catch-all; no
+    // partner session yet, so only body validation runs here.
+    {
+      matcher: "/partners/designer-invites/:token/accept",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AcceptDesignerInviteSchema))],
+    },
+
+    /**
+     * #1531 slice 2 — the partner's half of a design inquiry.
+     *
+     * 🔴 Every one of these authenticates and then re-derives the partner from
+     * the auth context inside the handler. `partner_id` is in NO schema below:
+     * a partner able to name the partner they answer as could answer as a
+     * competitor, and these are competing bids on one design.
+     */
+    {
+      matcher: "/partners/inquiries",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(wrapSchema(PartnerListInquiriesQuery), {}),
+      ],
+    },
+    {
+      matcher: "/partners/inquiries/:inquiryId",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/inquiries/:inquiryId/answers",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerPostInquiryAnswersReq)),
+      ],
+    },
+    {
+      matcher: "/partners/inquiries/:inquiryId/submit",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerPostInquirySubmitReq)),
+      ],
+    },
+
+    // The durable capability library the wizard's photo step deposits into.
+    {
+      matcher: "/partners/capabilities",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(wrapSchema(PartnerListCapabilitySamplesQuery), {}),
+      ],
+    },
+    {
+      matcher: "/partners/capabilities",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerPostCapabilitySampleReq)),
+      ],
+    },
+
+    // Partner Designs APIs
+    {
+      matcher: "/partners/designs",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(wrapSchema(listDesignsQuerySchema), {}),
+      ],
+    },
+    {
+      matcher: "/partners/designs",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateDesignReq)),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId",
+      method: "PUT",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateDesignReq)),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId",
+      method: "DELETE",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // Roadmap #6 Phase 2 — design ↔ inventory BOM (partner)
+      matcher: "/partners/designs/:designId/inventory",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerPostDesignInventoryReq)),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId/inventory",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/designs/:designId/inventory/:inventoryLinkId",
+      method: "PATCH",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerPatchDesignInventoryLinkReq)),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId/inventory/delink",
+      method: "DELETE",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerDeleteDesignInventoryReq)),
+      ],
+    },
+    {
+      // Roadmap #6 Phase 3 — partner cost estimation
+      matcher: "/partners/designs/:designId/recalculate-cost",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // #1113 S2 — partner moodboard generate (brief-as-cards). Owner OR
+      // assigned partner (the invited designer); guard is in the route.
+      matcher: "/partners/designs/:designId/moodboard/generate",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      /**
+       * #2228 — the moodboard image proxy. Same per-route auth rule as every
+       * sibling; without this entry the route is dead exactly as seed was.
+       */
+      matcher: "/partners/designs/:designId/moodboard/image",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      /**
+       * 🔴 #2229 — the seed route had NO auth entry, so it was DEAD.
+       *
+       * Authentication here is per-route: `/partners*` carries only CORS and
+       * locale. Every sibling declares `authenticate("partner", …)` — generate,
+       * blocks, the boards list, the scene PUT — and this one did not, so
+       * `req.auth_context` was never populated and
+       * `assertPartnerCanAuthorDesign` rejected every caller with "Partner
+       * authentication required". It failed closed, so it was a dead route
+       * rather than an open one.
+       *
+       * This is what #2229 could not account for. The confusing part was the
+       * OTHER answer it sometimes gave — a 200 with `{ moodboard: null }` —
+       * which came from a dev server left in a half-reloaded state by a failed
+       * rebind, not from this code.
+       */
+      matcher: "/partners/designs/:designId/moodboard/seed",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      /**
+       * #2017 — the admin's board save. A scene is large; without this the
+       * default body limit rejects a real board and the failure looks like a
+       * save bug rather than a limit. Mirrors the partner PUT's 20mb.
+       */
+      matcher: "/admin/designs/:id/moodboards",
+      method: "POST",
+      bodyParser: { sizeLimit: "20mb" },
+      middlewares: [],
+    },
+    {
+      /**
+       * #2017 — the design's boards, split into the caller's own (editable)
+       * and everyone else's (read-only).
+       *
+       * ⚠️ Registered here because a partner route 401s until this file names
+       * it — `/partners*` above only attaches CORS and locale, not auth. Neither
+       * tsc nor the test suite says a word about the omission.
+       */
+      matcher: "/partners/designs/:designId/moodboards",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // #1113 Feature A — insert-block palette: list drop-in blocks.
+      matcher: "/partners/designs/:designId/moodboard/blocks",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // #1113 Feature A — build one drop-in block from the design's data.
+      matcher: "/partners/designs/:designId/moodboard/blocks",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // #1113 Feature B — construction catalog for the categorized picker.
+      matcher: "/partners/designs/:designId/construction-techniques",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // #1113 Feature B — list the design's construction details.
+      matcher: "/partners/designs/:designId/construction-details",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // #1113 Feature B — add a construction detail (author-scoped guard).
+      matcher: "/partners/designs/:designId/construction-details",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // #1113 Feature B — delete a construction detail.
+      matcher: "/partners/designs/:designId/construction-details/:detailId",
+      method: "DELETE",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // #1113 S3 — partner saves the moodboard scene edited on the canvas.
+      // Owner OR assigned designer (author-scoped guard in the route), scoped
+      // to just the `moodboard` column.
+      matcher: "/partners/designs/:designId/moodboard",
+      method: "PUT",
+      bodyParser: { sizeLimit: "20mb" },
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(SavePartnerMoodboardSchema)),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId/cost",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // Roadmap #6 — partner design revision lineage (mirrors GET /admin/designs/:id/revisions)
+      matcher: "/partners/designs/:designId/revisions",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // Roadmap #6 — partner design "used-in" (mirrors GET /admin/designs/:id/used-in)
+      matcher: "/partners/designs/:designId/used-in",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // Roadmap #6 — partner design "components" / BOM children (mirrors GET /admin/designs/:id/components)
+      matcher: "/partners/designs/:designId/components",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // Roadmap #6 — partner design "tasks" read (mirrors GET /admin/designs/:id/tasks)
+      matcher: "/partners/designs/:designId/tasks",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // Roadmap #6/#337 — partner creates tasks on their OWN design (mirrors
+      // POST /admin/designs/:id/tasks, createTasksFromTemplatesWorkflow).
+      // Ownership-guarded; no assignee/external side-effects in the handler.
+      matcher: "/partners/designs/:designId/tasks",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerPostDesignTasksReq)),
+      ],
+    },
+    {
+      // Roadmap #6/#337 — partner image segmentation (mirrors POST
+      // /admin/designs/:id/segment, fal.ai BiRefNet). Ownership-guarded +
+      // quota-metered (image_segment soft-paywall) in the handler.
+      matcher: "/partners/designs/:designId/segment",
+      method: "POST",
+      bodyParser: { sizeLimit: "20mb" },
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(SegmentImageSchema)),
+      ],
+    },
+    {
+      // Roadmap #6/#337 — partner depth/normal-map estimation (mirrors POST
+      // /admin/designs/:id/segment/depth, fal.ai MiDaS). Ownership-guarded +
+      // quota-metered (image_depth soft-paywall) in the handler.
+      matcher: "/partners/designs/:designId/segment/depth",
+      method: "POST",
+      bodyParser: { sizeLimit: "20mb" },
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(DepthImageSchema)),
+      ],
+    },
+    {
+      // Roadmap #6/#337 — partner revises their OWN design (mirrors POST
+      // /admin/designs/:id/revise). Ownership-guarded + revisable-status
+      // pre-check in the handler; reviseDesignWorkflow re-links the partner
+      // to the new revision so it stays partner-owned & isolated.
+      matcher: "/partners/designs/:designId/revise",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerReviseDesignSchema)),
+      ],
+    },
+    {
+      // Roadmap #604 slice C — partner reads the brief of their OWN design
+      // (mirrors GET /admin/designs/:id/brief). Ownership-guarded in handler.
+      matcher: "/partners/designs/:designId/brief",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      // Roadmap #604 slice C — partner full-replaces the brief of their OWN
+      // design (mirrors POST /admin/designs/:id/brief). Ownership-guarded.
+      matcher: "/partners/designs/:designId/brief",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerDesignBriefSchema)),
+      ],
+    },
+    {
+      // Roadmap #604 slice C — partner partial-updates the brief of their OWN
+      // design (mirrors PUT /admin/designs/:id/brief). Ownership-guarded.
+      matcher: "/partners/designs/:designId/brief",
+      method: "PUT",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdateDesignBriefSchema)),
+      ],
+    },
+    {
+      // Roadmap #6 Phase 4 — partner-originated (self-approved) runs
+      matcher: "/partners/designs/:designId/production-runs",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreateProductionRunReq)),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId/consumption-logs",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerPostConsumptionLogReq)),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId/consumption-logs",
+      method: "GET",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId/media",
+      method: "POST",
+      bodyParser: false,
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        maybeMulterArray("files"),
+      ],
+    },
+    {
+      matcher: "/partners/designs/:designId/media/attach",
+      method: "POST",
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        // JSON body is handled by default express.json; no multer needed here
+      ],
+    },
+    // Partner AI — image description (Qwen vision via SocialPlatform)
+    {
+      matcher: "/partners/ai/describe-image",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/ai/usage",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner file uploads (product images, etc.)
+    {
+      matcher: "/partners/uploads",
+      method: "POST",
+      bodyParser: false,
+      middlewares: [
+        authenticate("partner", ["session", "bearer"]),
+        adaptMulter(upload.array("files")),
+      ],
+    },
+    // Partner multipart upload endpoints (bypass Netlify 8MB limit)
+    {
+      matcher: "/partners/medias/uploads/initiate",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/medias/uploads/parts",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/medias/uploads/complete",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    // Partner shared folders endpoints
+    {
+      matcher: "/partners/shared-folders",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/shared-folders/:folderId",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/shared-folders/:folderId/upload",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/shared-folders/:folderId/media/:mediaId",
+      method: "GET",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/shared-folders/:folderId/media/:mediaId/comments",
+      method: ["GET", "POST"],
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    // Partner customer endpoints
+    {
+      matcher: "/partners/customers",
+      method: ["GET", "POST"],
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/customers/:id",
+      method: ["GET", "POST", "DELETE"],
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/customers/:id/addresses",
+      method: ["GET", "POST"],
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/customers/:id/addresses/:addressId",
+      method: ["GET", "POST", "DELETE"],
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/customers/:id/customer-groups",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    // Partner customer group endpoints
+    {
+      matcher: "/partners/customer-groups",
+      method: ["GET", "POST"],
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/customer-groups/:id",
+      method: ["GET", "POST", "DELETE"],
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    {
+      matcher: "/partners/customer-groups/:id/customers",
+      method: "POST",
+      middlewares: [authenticate("partner", ["session", "bearer"])],
+    },
+    // Partner B2B quotes (#1389 S3). The buyer half lives at
+    // /store/b2b/quotes/:token and is deliberately unauthenticated — the token
+    // IS the credential.
+    {
+      matcher: "/partners/quotes",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/quotes",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerMintQuoteReq)),
+      ],
+    },
+    // The readiness preflight (#1445). Registered BEFORE /partners/quotes/:id
+    // so "readiness" is never matched as a quote id.
+    {
+      matcher: "/partners/quotes/readiness",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(QuoteReadinessReq)),
+      ],
+    },
+    // The design picker (#1486). Registered BEFORE /partners/quotes/:id, for
+    // the same reason `readiness` is: a static segment that lands after the
+    // parameterised route is matched as a quote id and 404s.
+    {
+      matcher: "/partners/quotes/designs",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    /**
+     * Minting the made-to-order variant a custom design is quoted through.
+     *
+     * 🔴 Named explicitly, and it has to be. The `/partners/*` wildcard entry
+     * carries CORS and locale only — authentication is per-route on this
+     * surface — so a route missing from this list authenticates nobody,
+     * `getPartnerFromAuthContext` finds no partner and every call 401s. Both
+     * `tsc` and a green test suite are silent about it (#1571).
+     */
+    {
+      matcher: "/partners/quotes/designs/:designId/variant",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        /**
+         * 🔴 Without this the route reads NOTHING. `req.validatedBody` is
+         * populated by this middleware and by nothing else, so the client's
+         * JSON sat in `req.body` unread and every pick answered
+         * "currency_code is required" — a message that was true about the
+         * requirement and wrong about the cause.
+         */
+        validateAndTransformBody(wrapSchema(MintDesignVariantReq)),
+      ],
+    },
+    // Admin quotes (#1389 S5). Same capability as the partner surface, but the
+    // owning partner must be named — an admin has none of their own.
+    {
+      matcher: "/admin/quotes",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminMintQuoteReq))],
+    },
+    /**
+     * Draft quotes (#1446).
+     *
+     * 🔴 Registered BEFORE `/admin/quotes/:id`, like `readiness` and `designs`
+     * above it. This file's ordering IS the contract: a static segment landing
+     * after the parameterised one is matched as an id called "drafts", and the
+     * body arrives unvalidated.
+     */
+    {
+      matcher: "/admin/quotes/drafts",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminCreateQuoteDraftReq))],
+    },
+    {
+      matcher: "/admin/quotes/drafts/:id",
+      method: "PATCH",
+      middlewares: [validateAndTransformBody(wrapSchema(AdminUpdateQuoteDraftReq))],
+    },
+    {
+      matcher: "/admin/quotes/readiness",
+      method: "POST",
+      middlewares: [
+        validateAndTransformBody(wrapSchema(AdminQuoteReadinessReq)),
+      ],
+    },
+    /**
+     * The admin twin of the made-to-order mint. No auth entry needed — the
+     * /admin surface authenticates globally, unlike /partners — but the body
+     * validator is NOT optional: an empty middleware list leaves
+     * `req.validatedBody` undefined and the route reads nothing.
+     */
+    {
+      matcher: "/admin/quotes/designs/:designId/variant",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(MintDesignVariantReq))],
+    },
+    // An admin corrects any quote in place, before acceptance. Same body as the
+    // partner surface — the refusals live in `adjustQuote` so they cannot drift.
+    {
+      matcher: "/admin/quotes/:id/adjust",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(AdjustQuoteReq))],
+    },
+    // A partner withdraws their own quote (#1517). Registered BEFORE
+    // /partners/quotes/:id for the same reason `readiness` and `designs` are:
+    // this file's ordering is the contract, and a route that lands after the
+    // parameterised one is a support ticket waiting to be filed.
+    //
+    // No body validator: the route reads none, exactly as the admin twin does.
+    {
+      matcher: "/partners/quotes/:id/revoke",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // A partner corrects their own quote in place, before acceptance.
+    // Registered BEFORE /partners/quotes/:id for the same ordering reason as
+    // revoke above — this file's order is the contract.
+    {
+      matcher: "/partners/quotes/:id/adjust",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(AdjustQuoteReq)),
+      ],
+    },
+    {
+      matcher: "/partners/quotes/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner price list endpoints (#1405). Unlike customer-groups above,
+    // every write body is validated — a price list carries money and the rule
+    // that decides whose money it is.
+    {
+      matcher: "/partners/price-lists",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/price-lists",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerCreatePriceListReq)),
+      ],
+    },
+    {
+      matcher: "/partners/price-lists/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/price-lists/:id",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformBody(wrapSchema(PartnerUpdatePriceListReq)),
+      ],
+    },
+    {
+      matcher: "/partners/price-lists/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Order endpoints
+    {
+      matcher: "/partners/orders",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // Without `validateAndTransformQuery` here, the route hands raw
+      // field strings (incl. bare relation paths like `region.automatic_taxes`)
+      // straight to MikroORM populate, which trips
+      // "Cannot read properties of undefined (reading 'kind')". Reusing
+      // admin's exact query config keeps partner-ui field requests in
+      // lockstep with what admin already validates.
+      matcher: "/partners/orders/:id",
+      method: ["GET", "POST"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+        validateAndTransformQuery(
+          AdminGetOrdersOrderParams,
+          retrieveOrderTransformQueryConfig
+        ),
+      ],
+    },
+    {
+      // #623 — per-order partner fee (commission). Read-only; no field
+      // selection, so no validateAndTransformQuery. Ownership is enforced in
+      // the route via validatePartnerOrderOwnership.
+      matcher: "/partners/orders/:id/partner-fee",
+      method: ["GET"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/fulfillments",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/fulfillments/:fulfillmentId/shipment",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #639 — partner Shiprocket parity: generate a carrier label / attach an
+      // existing AWB for the partner's own order. Ownership is enforced inside
+      // the handler (validatePartnerOrderOwnership).
+      matcher: "/partners/orders/:id/shiprocket-label",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      // #1204 — the `fulfillment-label` alias (#835) re-exports the handler
+      // above, but a route file is not a route: with no matcher here
+      // `authenticate` never ran, so `auth_context` was always undefined and
+      // `validatePartnerOrderOwnership` refused EVERY caller, the owner
+      // included. Must stay identical to the canonical matcher above — an alias
+      // that authenticates differently from its target is worse than no alias.
+      matcher: "/partners/orders/:id/fulfillment-label",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/shiprocket-rates",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/shiprocket-attach-awb",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/fulfillments/:fulfillmentId/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/fulfillments/:fulfillmentId/mark-as-delivered",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/fulfillments/:fulfillmentId/label",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/fulfillments/:fulfillmentId/tracking",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/fulfillments/:fulfillmentId/pickup",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/preview",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/changes",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/changes/:changeId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/line-items",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/shipping-options",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/transfer",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/transfer/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/:id/credit-lines",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/orders/changes/:orderChangeId",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Return endpoints
+    {
+      matcher: "/partners/returns",
+      method: ["GET", "POST"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/confirm",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/request",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/request/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/items/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/shipping",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/shipping/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/receive",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/receive/confirm",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/receive/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/receive-items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/receive-items/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/dismiss-items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/returns/:id/dismiss-items/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Exchange endpoints
+    {
+      matcher: "/partners/exchanges",
+      method: ["GET", "POST"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/inbound-items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/inbound-items/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/inbound-shipping",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/inbound-shipping/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/outbound-items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/outbound-items/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/outbound-shipping",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/outbound-shipping/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/request",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/exchanges/:id/request/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Claim endpoints
+    {
+      matcher: "/partners/claims",
+      method: ["GET", "POST"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/claim-items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/claim-items/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/inbound-items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/inbound-items/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/inbound-shipping",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/inbound-shipping/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/outbound-items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/outbound-items/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/outbound-shipping",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/outbound-shipping/:actionId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/request",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/claims/:id/request/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Order Edit endpoints
+    {
+      matcher: "/partners/order-edits",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/order-edits/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/order-edits/:id/request",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/order-edits/:id/confirm",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/order-edits/:id/items",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/order-edits/:id/items/:itemId",
+      method: ["POST", "DELETE"],
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Payment endpoints
+    {
+      matcher: "/partners/payments/providers",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/payments/:id",
+      method: "GET",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/payments/:id/capture",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/payments/:id/refund",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Fulfillment endpoints (standalone)
+    {
+      matcher: "/partners/fulfillments",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/fulfillments/:id/cancel",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/fulfillments/:id/shipment",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Partner Payment Collection endpoints
+    {
+      matcher: "/partners/payment-collections",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/payment-collections/:id",
+      method: "DELETE",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    {
+      matcher: "/partners/payment-collections/:id/mark-as-paid",
+      method: "POST",
+      middlewares: [
+        createCorsPartnerMiddleware(),
+        authenticate("partner", ["session", "bearer"]),
+      ],
+    },
+    // Admin Users: list auth identities by email
+    {
+      matcher: "/admin/users/identities",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListIdentitiesQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/users/:id/suspend",
+      method: "POST",
+      middlewares: [],
+    },
+    // Admin Feedbacks routes
+    {
+      matcher: "/admin/feedbacks",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/feedbacks",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(FeedbackSchema))],
+    },
+    // Admin Analytics Events routes
+    {
+      matcher: "/admin/analytics-events",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(AnalyticsEventQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/feedbacks/:id",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/feedbacks/:id",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateFeedbackSchema))],
+    },
+    {
+      matcher: "/admin/feedbacks/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+    // Entity-specific feedback routes
+    {
+      matcher: "/admin/partners/:id/feedbacks",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/partners/:id/feedbacks",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(FeedbackSchema))],
+    },
+    {
+      matcher: "/admin/tasks/:id/feedbacks",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/tasks/:id/feedbacks",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(FeedbackSchema))],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/feedbacks",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/inventory-orders/:id/feedbacks",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(FeedbackSchema))],
+    },
+    // Meta Ads routes
+    {
+      matcher: "/admin/meta-ads/leads",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListLeadsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/meta-ads/leads/:id",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/meta-ads/leads/:id",
+      method: "PATCH",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateLeadSchema))],
+    },
+    {
+      matcher: "/admin/meta-ads/leads/:id",
+      method: "DELETE",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/meta-ads/leads/sync",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SyncLeadsSchema))],
+    },
+    {
+      matcher: "/admin/meta-ads/accounts",
+      method: "GET",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/meta-ads/accounts/sync",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SyncAdAccountsSchema))],
+    },
+    {
+      matcher: "/admin/meta-ads/campaigns",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListCampaignsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/meta-ads/campaigns/sync",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SyncCampaignsSchema))],
+    },
+    {
+      matcher: "/admin/meta-ads/insights/sync",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SyncInsightsSchema))],
+    },
+    {
+      matcher: "/admin/meta-ads/overview",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(MetaAdsOverviewQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/meta-ads/remote/ads",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateRemoteAdSchema))],
+    },
+    // Admin Messaging routes
+    {
+      matcher: "/admin/messaging",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListConversationsQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/messaging",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateConversationSchema))],
+    },
+    {
+      matcher: "/admin/messaging/:conversationId/request-photos",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(RequestPartnerPhotosSchema))],
+    },
+    {
+      matcher: "/admin/messaging/:conversationId",
+      method: "GET",
+      middlewares: [validateAndTransformQuery(wrapSchema(ListMessagesQuerySchema), {})],
+    },
+    {
+      matcher: "/admin/messaging/:conversationId",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(SendMessageSchema))],
+    },
+    {
+      matcher: "/admin/messaging/:conversationId/archive",
+      method: "POST",
+      middlewares: [],
+    },
+    {
+      matcher: "/admin/messaging/:conversationId/delete",
+      method: "DELETE",
+      middlewares: [],
+    },
+    // =====================================================
+    // UCP (Universal Commerce Protocol) routes
+    // =====================================================
+
+    // --- .well-known/ucp route alias ---
+    // Medusa's file-based router ignores directories starting with ".", so the
+    // actual /.well-known/ucp route is registered here as a middleware entry.
+    {
+      matcher: "/.well-known/ucp",
+      method: "GET",
+      middlewares: [
+        async (req: MedusaRequest, res: MedusaResponse) => {
+          const proto = (req.protocol || "http").split(",")[0].trim()
+          const host = req.get("host")
+          const baseUrl = process.env.STORE_MCP_LOOPBACK_URL?.replace(/\/$/, "") || `${proto}://${host}`
+          // Buyer-facing store URL is the storefront's own domain (a partner
+          // domain when scoped by publishable key, else the core store's
+          // cicilabel.com) — not the API host. Env/host fallback.
+          const callerKey = (req.headers["x-publishable-api-key"] as string) || undefined
+          const storefrontUrl = await resolveStorefrontUrl(req.scope, req, callerKey)
+          const UCP_VERSION = "2026-04-08"
+          res.json({
+            ucp: {
+              version: UCP_VERSION,
+              services: {
+                "dev.ucp.shopping": [{ version: UCP_VERSION, transport: "rest", endpoint: `${baseUrl}/ucp` }],
+              },
+              capabilities: {
+                "dev.ucp.shopping.catalog.search": [{ version: UCP_VERSION }],
+                "dev.ucp.shopping.catalog.lookup": [{ version: UCP_VERSION }],
+                "dev.ucp.shopping.checkout": [{ version: UCP_VERSION }],
+                "dev.ucp.shopping.cart": [{ version: UCP_VERSION }],
+                "dev.ucp.shopping.order": [{ version: UCP_VERSION }],
+                "dev.ucp.shopping.fulfillment": [{ version: UCP_VERSION }],
+                "dev.ucp.shopping.discount": [{ version: UCP_VERSION }],
+              },
+              payment_handlers: [
+                {
+                  id: "payu",
+                  name: "dev.jyt.payu",
+                  version: UCP_VERSION,
+                  config: { description: "PayU — INR payments (cards, UPI, netbanking)", currencies: ["inr"] },
+                },
+                {
+                  id: "stripe",
+                  name: "dev.jyt.stripe",
+                  version: UCP_VERSION,
+                  config: { description: "Stripe — non-INR payments (cards, Apple/Google Pay)", currencies: ["usd","eur","gbp","aud","cad","sgd","aed"] },
+                },
+              ],
+            },
+            store: { name: process.env.STORE_NAME || "JYT Store", url: storefrontUrl },
+          })
+        },
+      ],
+    },
+
+    // --- UCP validation middleware ---
+    // Validates UCP-Agent and Request-Id headers on all /ucp/* routes.
+    {
+      matcher: "/ucp/*",
+      middlewares: [
+        (req: MedusaRequest, res: MedusaResponse, next: any) => {
+          const ucpAgent = req.headers["ucp-agent"]
+          if (!ucpAgent) {
+            res.status(400).json({
+              ucp: { version: "2026-04-08", status: "error" },
+              messages: [{ type: "error", code: "missing_ucp_agent", content: "Missing UCP-Agent header for platform identification", severity: "unrecoverable" }],
+            })
+            return
+          }
+          // Request-Id is for correlation, not authorization — the UCP spec does
+          // not mandate it. Echo the caller's when present, else mint one, so
+          // conformant agents that omit it aren't rejected.
+          const requestId =
+            (req.headers["request-id"] as string) || randomUUID()
+          res.set("Request-Id", requestId)
+          next()
+        },
+      ],
+    },
+
+    // --- UCP Zod body validation ---
+    {
+      matcher: "/ucp/checkout-sessions",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CreateUcpCheckoutSessionSchema))],
+    },
+    {
+      matcher: "/ucp/checkout-sessions/:id",
+      method: "PUT",
+      middlewares: [validateAndTransformBody(wrapSchema(UpdateUcpCheckoutSessionSchema))],
+    },
+    {
+      matcher: "/ucp/checkout-sessions/:id/complete",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CompleteUcpCheckoutSessionSchema))],
+    },
+    {
+      matcher: "/ucp/catalog/search",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CatalogSearchSchema))],
+    },
+    {
+      matcher: "/ucp/catalog/lookup",
+      method: "POST",
+      middlewares: [validateAndTransformBody(wrapSchema(CatalogLookupSchema))],
+    },
+  ],
+  errorHandler: ((
+    error: any, // or whatever type you prefer
+    req,
+    res,
+    next
+  ) => {
+    // Only log errors in non-test environments to keep test output clean
+    if (!process.env.TEST_TYPE) {
+      console.log(error);
+    }
+    // Option 1: standard name check
+    // if (error.name === "ZodError") {
+    // Option 2: check if error is an instance of ZodError
+    if (error.__isMedusaError) {
+      return res.status(medusaErrorStatus(error.type)).json({
+        message: error.message,
+      });
+    }
+    if (error instanceof z.ZodError) {
+      /*
+       * ZodError has an `issues` array. But in some scenarios, it might be missing or
+       * shaped unexpectedly. We’ll guard against that possibility.
+       */
+      const rawIssues = Array.isArray(error.issues) ? error.issues : [];
+      const formattedIssues = rawIssues.map((issue) => ({
+        path: Array.isArray(issue?.path)
+          ? issue.path.join(".")
+          : "unknown_path",
+        message: issue?.message ?? "Validation error",
+        code: issue?.code ?? "unknown_code",
+      }));
+
+      // Create a single error message that includes code and path for each issue
+      const errorMessage = formattedIssues.map(issue =>
+        `${issue.code} ${issue.message} (at path: ${issue.path})`
+      ).join('; ');
+
+      return res.status(400).json({
+        message: errorMessage,
+        //details: formattedIssues // Keep the detailed issues for debugging
+      });
+    }
+
+    // Non-MedusaError objects that still carry a Medusa-shaped `type` (ORM
+    // errors, module errors). Route them through the SAME map so a
+    // `duplicate_error` doesn't answer 422 when thrown as a MedusaError and
+    // 400 when thrown as a plain object — which is what the two hand-written
+    // branches here used to do.
+    if (typeof error.type === "string" && error.type in MEDUSA_ERROR_STATUS) {
+      return res.status(MEDUSA_ERROR_STATUS[error.type]).json({
+        message: error.message,
+      });
+    }
+
+    // For everything else, fall back to the default error handler
+    next(error);
+  }) as MedusaErrorHandlerFunction,
+});

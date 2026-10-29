@@ -1,0 +1,29 @@
+---
+title: Ux
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.ux.mjs'
+import { UxExample, UxMiniExample } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Ux** component family provides the following components:
+
+- [Ux](#ux)
+- [UxMini](#uxmini)
+
+### Ux
+
+<ComponentDocs docs={jsdoc.jsdocUx} example={UxExample} />
+
+### UxMini
+
+<ComponentDocs docs={jsdoc.jsdocUxMini} example={UxMiniExample} />
+
+</DocusaurusDoc>

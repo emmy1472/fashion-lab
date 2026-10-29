@@ -1,0 +1,369 @@
+---
+title: '@freesewing/core'
+---
+
+import { cbqc, hidePresets, goldenRatio, version } from '@freesewing/core'
+
+FreeSewing's **core** package holds the core library for parametric design
+of sewing patterns.
+
+It is published on NPM as [@freesewing/core
+](https://www.npmjs.com/package/@freesewing/core).\
+The source code for this package is available in [our monorepo on Codeberg
+](https://codeberg.org/freesewing/freesewing) under [packages/core
+](https://codeberg.org/freesewing/freesewing/src/branch/develop/packages/core).
+
+:::tip
+Refer to [the core API reference documentation](/reference/api) for in-depth
+info on how to use this package.
+:::
+:::note
+This package does not provide a default export.
+:::
+
+## Installation
+
+```sh
+npm install --save @freesewing/core
+```
+
+## Named Exports
+
+### Attributes
+
+The constructor method for [Attributes](/reference/api/attributes/).
+
+```js
+import { Attributes } from '@freesewing/core'
+```
+
+### beamIntersectsCircle
+
+The [beamIntersectsCircle](/reference/api/utils/beamintersectscircle/) function.
+
+```js
+import { beamIntersectsCircle } from '@freesewing/core'
+```
+
+### beamIntersectsCurve
+
+The [beamIntersectsCurve](/reference/api/utils/beamintersectscurve/) function.
+
+```js
+import { beamIntersectsCurve } from '@freesewing/core'
+```
+
+### beamIntersectsX
+
+The [beamIntersectsX](/reference/api/utils/beamintersectsx/) function.
+
+```js
+import { beamIntersectsX } from '@freesewing/core'
+```
+
+### beamIntersectsY
+
+The [beamIntersectsY](/reference/api/utils/beamintersectsy/) function.
+
+```js
+import { beamIntersectsY } from '@freesewing/core'
+```
+
+### beamsIntersect
+
+The [beamsIntersect](/reference/api/utils/beamsintersect/) function.
+
+```js
+import { beamsIntersect } from '@freesewing/core'
+```
+
+### Bezier
+
+A copy of the [BezierJs](https://www.npmjs.com/package/bezier-js) library.
+
+```js
+import { Bezier } from '@freesewing/core'
+```
+
+### capitalize
+
+The [capitalize](/reference/api/utils/capitalize/) function.
+
+```js
+import { capitalize } from '@freesewing/core'
+```
+
+### cbqc
+
+The [cbqc](/reference/api/utils/cbqc/) number, which is the ideal value
+to approximate a quarter circle with a cubic Bezier curve.
+
+:::tip
+**cbqc** stands for Cubic Bezier Quarter Circle
+:::
+
+```js
+import { capitalize } from '@freesewing/core'
+```
+
+<ConsoleButton data={cbqc} />
+
+### circlesIntersect
+
+The [circlesIntersect](/reference/api/utils/circlesintersect/) function.
+
+```js
+import { circlesIntersect } from '@freesewing/core'
+```
+
+### curveEdge
+
+The [curveEdge](/reference/api/utils/curveedge/) function.
+
+```js
+import { curveEdge } from '@freesewing/core'
+```
+
+### curveIntersectsX
+
+The [curveIntersectsX](/reference/api/utils/curveintersectsx/) function.
+
+```js
+import { curveIntersectsX } from '@freesewing/core'
+```
+
+### curveIntersectsY
+
+The [curveIntersectsY](/reference/api/utils/curveintersectsy/) function.
+
+```js
+import { curveIntersectsY } from '@freesewing/core'
+```
+
+### curvesIntersect
+
+The [curvesIntersect](/reference/api/utils/curvesintersect/) function.
+
+```js
+import { curvesIntersect } from '@freesewing/core'
+```
+
+### deg2rad
+
+The [deg2rad](/reference/api/utils/deg2rad/) function.
+
+```js
+import { deg2rad } from '@freesewing/core'
+```
+
+### Design
+
+The constructor method for [Design](/reference/api/design/).
+
+```js
+import { Design } from '@freesewing/core'
+```
+
+### generateStackTransform
+
+The [generateStackTransform](/reference/api/utils/generatestacktransform/) function.
+
+```js
+import { generateStackTransform } from '@freesewing/core'
+```
+
+### getTransformedBounds
+
+The [getTransformedBounds](/reference/api/utils/gettransformedbounds/) function.
+
+```js
+import { getTransformedBounds } from '@freesewing/core'
+```
+
+### goldenRatio
+
+The [goldenRatio](/reference/api/utils/goldenratio/) number, which is the ideal value
+to approximate a quarter circle with a cubic Bezier curve.
+
+<ConsoleButton data={goldenRatio} />
+
+### hidePresets
+
+The [hidePresets](/reference/api/utils/hidepresets) object holds presets for
+hiding parts in a FreeSewing design.
+
+```js
+import { hidePresets } from '@freesewing/core'
+```
+
+<ConsoleButton data={hidePresets} />
+
+### lineIntersectsCircle
+
+The [lineIntersectsCircle](/reference/api/utils/lineintersectscircle/) function.
+
+```js
+import { lineIntersectsCircle } from '@freesewing/core'
+```
+
+### lineIntersectsCurve
+
+The [lineIntersectsCurve](/reference/api/utils/lineintersectscurve/) function.
+
+```js
+import { lineIntersectsCurve } from '@freesewing/core'
+```
+
+### linesIntersect
+
+The [linesIntersect](/reference/api/utils/linesintersect/) function.
+
+```js
+import { linesIntersect } from '@freesewing/core'
+```
+
+### mergeI18n
+
+The [mergeI18n](/reference/api/utils/mergei18n/) function.
+
+```js
+import { mergeI18n } from '@freesewing/core'
+```
+
+### mergeOptions
+
+The [mergeOptions](/reference/api/utils/mergeoptions/) function.
+
+```js
+import { mergeOptions } from '@freesewing/core'
+```
+
+### Part
+
+The constructor method for [Part](/reference/api/part/).
+
+```js
+import { Part } from '@freesewing/core'
+```
+
+### Path
+
+The constructor method for [Path](/reference/api/path/).
+
+```js
+import { Path } from '@freesewing/core'
+```
+
+### Pattern
+
+The constructor method for [Pattern](/reference/api/pattern/).
+
+```js
+import { Pattern } from '@freesewing/core'
+```
+
+### pctBasedOn
+
+The [pctBasedOn](/reference/api/utils/pctbasedon/) function.
+
+```js
+import { pctBasedOn } from '@freesewing/core'
+```
+
+### Point
+
+The constructor method for [Point](/reference/api/point/).
+
+```js
+import { Point } from '@freesewing/core'
+```
+
+### pointOnBeam
+
+The [pointOnBeam](/reference/api/utils/pointonbeam/) function.
+
+```js
+import { pointOnBeam } from '@freesewing/core'
+```
+
+### pointOnCurve
+
+The [pointOnCurve](/reference/api/utils/pointoncurve/) function.
+
+```js
+import { pointOnCurve } from '@freesewing/core'
+```
+
+### pointOnLine
+
+The [pointOnLine](/reference/api/utils/pointonline/) function.
+
+```js
+import { pointOnLine } from '@freesewing/core'
+```
+
+### rad2deg
+
+The [rad2deg](/reference/api/utils/rad2deg/) function.
+
+```js
+import { rad2deg } from '@freesewing/core'
+```
+
+### round
+
+The [round](/reference/api/utils/round/) function.
+
+```js
+import { round } from '@freesewing/core'
+```
+
+### Snippet
+
+The constructor method for [Snippet](/reference/api/snippet/).
+
+```js
+import { Snippet } from '@freesewing/core'
+```
+
+### splitCurve
+
+The [splitCurve](/reference/api/utils/splitcurve/) function.
+
+```js
+import { splitCurve } from '@freesewing/core'
+```
+
+### Store
+
+The constructor method for [Store](/reference/api/store/).
+
+```js
+import { Store } from '@freesewing/core'
+```
+
+### stretchToScale
+
+The [stretchToScale](/reference/api/utils/stretchtoscale/) function.
+
+```js
+import { stretchToScale } from '@freesewing/core'
+```
+
+### units
+
+The [units](/reference/api/utils/units/) function.
+
+```js
+import { units } from '@freesewing/core'
+```
+
+### version
+
+The version of the FreeSewing core library.
+
+```js
+import { version } from '@freesewing/core'
+```
+
+<ConsoleButton data={version} />

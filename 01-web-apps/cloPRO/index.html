@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>cloPRO — Custom Apparel Designer</title>
+<meta name="description" content="cloPRO is a full custom apparel studio: design jerseys, hoodies, tees and more, build logos in a built-in image editor, and export print-ready files for Custom Ink and team jersey builders."/>
+<meta name="theme-color" content="#0b0e14"/>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>👕</text></svg>"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="gfonts" rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Archivo+Black&family=Bebas+Neue&family=Oswald:wght@700&family=Teko:wght@700&family=Staatliches&family=Graduate&family=Alfa+Slab+One&family=Bungee&family=Bungee+Shade&family=Righteous&family=Russo+One&family=Orbitron:wght@900&family=Black+Ops+One&family=Press+Start+2P&family=Monoton&family=Rye&family=Special+Elite&family=Creepster&family=Permanent+Marker&family=Pacifico&family=Lobster&family=Yellowtail&family=Playfair+Display:wght@900&family=Roboto+Condensed:wght@700&family=Inter:wght@400;500;600;700&display=swap"/>
+<link rel="stylesheet" href="styles/app.css"/>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">clo<b>PRO</b></span>
+    <span class="brand-sub">apparel studio</span>
+  </div>
+
+  <input id="projectName" class="project-name" value="Untitled Design" aria-label="Project name" spellcheck="false"/>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-tab="studio" role="tab">Studio</button>
+    <button class="tab" data-tab="forge" role="tab">Forge</button>
+    <button class="tab" data-tab="library" role="tab">Library</button>
+    <button class="tab" data-tab="team" role="tab">Team</button>
+    <button class="tab" data-tab="export" role="tab">Export</button>
+  </nav>
+
+  <div class="top-actions">
+    <button class="icon-btn" id="btnUndo" title="Undo (Ctrl+Z)">↶</button>
+    <button class="icon-btn" id="btnRedo" title="Redo (Ctrl+Shift+Z)">↷</button>
+    <button class="btn ghost" id="btnMyDesigns">My Designs</button>
+    <button class="btn ghost" id="btnNew">New</button>
+    <button class="btn primary" id="btnQuickExport">Export</button>
+  </div>
+</header>
+
+<main id="app">
+
+  <!-- ══════════════════════════ STUDIO ══════════════════════════ -->
+  <section class="panel is-active" id="tab-studio">
+    <aside class="rail rail-left">
+      <div class="rail-scroll">
+        <section class="block" data-block="garment">
+          <h3 class="block-title">Garment<span class="hint" id="garmentCount"></span></h3>
+          <div class="chips" id="catChips"></div>
+          <div class="garment-grid" id="garmentGrid"></div>
+        </section>
+
+        <section class="block">
+          <h3 class="block-title">Design Presets</h3>
+          <div class="preset-grid" id="presetGrid"></div>
+        </section>
+
+        <section class="block">
+          <h3 class="block-title">Colour Palettes</h3>
+          <div class="chips" id="paletteGroups"></div>
+          <div class="palette-list" id="paletteList"></div>
+          <div class="harmony">
+            <label>Build from a colour
+              <input type="color" id="harmonySeed" value="#c41e3a"/>
+            </label>
+            <select id="harmonyKind">
+              <option value="complement">Complementary</option>
+              <option value="triad">Triadic</option>
+              <option value="analogous">Analogous</option>
+              <option value="split">Split complement</option>
+              <option value="shades">Shades</option>
+            </select>
+            <div class="palette-swatches" id="harmonyOut"></div>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <div class="stage" id="stage">
+      <div class="stage-bar">
+        <div class="seg" id="viewToggle"></div>
+        <div class="stage-tools">
+          <button class="chip-btn" id="toggleAreas" title="Show print areas">Print areas</button>
+          <button class="chip-btn" id="toggleShading" title="Toggle fabric shading">Shading</button>
+          <select id="textureSel" class="mini-select" title="Fabric texture">
+            <option value="fabric">Fabric</option>
+            <option value="knit">Knit</option>
+            <option value="mesh">Mesh</option>
+            <option value="none">Flat</option>
+          </select>
+          <select id="bgSel" class="mini-select" title="Backdrop">
+            <option value="studio">Studio</option>
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+            <option value="grid">Grid</option>
+          </select>
+          <span class="zoom-group">
+            <button class="chip-btn" id="zoomOut">−</button>
+            <span id="zoomLabel">100%</span>
+            <button class="chip-btn" id="zoomIn">+</button>
+            <button class="chip-btn" id="zoomFit">Fit</button>
+          </span>
+        </div>
+      </div>
+      <div class="canvas-wrap" id="canvasWrap">
+        <div class="canvas-host" id="canvasHost"></div>
+      </div>
+      <div class="stage-foot">
+        <div class="add-row">
+          <button class="add-btn" data-add="text">+ Text</button>
+          <button class="add-btn" data-add="number">+ Number</button>
+          <button class="add-btn" data-add="name">+ Player Name</button>
+          <button class="add-btn" data-add="art">+ Graphic</button>
+          <button class="add-btn" data-add="upload">+ Upload</button>
+          <button class="add-btn" data-add="forge">+ From Forge</button>
+        </div>
+        <div class="status" id="stageStatus">Click a garment part to recolour it · drag artwork to move</div>
+      </div>
+    </div>
+
+    <aside class="rail rail-right">
+      <div class="rail-tabs" id="railTabs">
+        <button class="rail-tab is-active" data-rt="colour">Colourway</button>
+        <button class="rail-tab" data-rt="layers">Layers</button>
+        <button class="rail-tab" data-rt="props">Properties</button>
+      </div>
+      <div class="rail-scroll">
+        <div class="rail-page is-active" id="rp-colour"></div>
+        <div class="rail-page" id="rp-layers"></div>
+        <div class="rail-page" id="rp-props"></div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ══════════════════════════ FORGE ══════════════════════════ -->
+  <section class="panel" id="tab-forge">
+    <aside class="forge-tools" id="forgeTools"></aside>
+    <div class="forge-main">
+      <div class="forge-optbar" id="forgeOptions"></div>
+      <div class="forge-stage" id="forgeStage">
+        <div class="forge-canvas-host" id="forgeHost">
+          <canvas id="forgeCanvas" width="900" height="900"></canvas>
+          <canvas id="forgeOverlay" width="900" height="900"></canvas>
+        </div>
+      </div>
+      <div class="forge-foot">
+        <span id="forgeStatus">Forge — build logos, badges and artwork</span>
+        <span class="spacer"></span>
+        <button class="chip-btn" id="forgeZoomOut">−</button><span id="forgeZoom">100%</span>
+        <button class="chip-btn" id="forgeZoomIn">+</button>
+        <button class="chip-btn" id="forgeFit">Fit</button>
+      </div>
+    </div>
+    <aside class="rail rail-right">
+      <div class="rail-tabs">
+        <button class="rail-tab is-active" data-ft="layers">Layers</button>
+        <button class="rail-tab" data-ft="adjust">Adjust</button>
+        <button class="rail-tab" data-ft="assets">Assets</button>
+      </div>
+      <div class="rail-scroll">
+        <div class="rail-page is-active" id="fp-layers"></div>
+        <div class="rail-page" id="fp-adjust"></div>
+        <div class="rail-page" id="fp-assets"></div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ══════════════════════════ LIBRARY ══════════════════════════ -->
+  <section class="panel" id="tab-library">
+    <div class="library-wrap">
+      <div class="library-head">
+        <h2>Asset Library</h2>
+        <input id="libSearch" class="search" placeholder="Search 100+ graphics, patterns, fonts…"/>
+        <div class="chips" id="libTabs"></div>
+      </div>
+      <div class="library-body" id="libraryBody"></div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════ TEAM ══════════════════════════ -->
+  <section class="panel" id="tab-team">
+    <div class="team-wrap">
+      <div class="team-left">
+        <div class="library-head">
+          <h2>Team Roster</h2>
+          <div class="row">
+            <button class="btn" id="rosterAdd">+ Add player</button>
+            <button class="btn ghost" id="rosterPaste">Paste list…</button>
+            <button class="btn ghost" id="rosterCsv">Download CSV</button>
+          </div>
+        </div>
+        <div class="roster-table" id="rosterTable"></div>
+        <div class="team-meta" id="teamMeta"></div>
+      </div>
+      <div class="team-right">
+        <h3 class="block-title">Roster preview</h3>
+        <p class="muted small">Name and number layers update per player so you can check every jersey before ordering.</p>
+        <div class="roster-preview" id="rosterPreview"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════ EXPORT ══════════════════════════ -->
+  <section class="panel" id="tab-export">
+    <div class="export-wrap" id="exportWrap"></div>
+  </section>
+</main>
+
+<!-- modals -->
+<div class="modal-back" id="modalBack" hidden>
+  <div class="modal" id="modal">
+    <header class="modal-head"><h3 id="modalTitle">Title</h3><button class="icon-btn" id="modalClose">✕</button></header>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts"></div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,139 @@
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import type { MedusaContainer } from "@medusajs/framework/types"
+import type { IOrderModuleService } from "@medusajs/types"
+
+import { createProductionRunWorkflow } from "../production-runs/create-production-run"
+import { projectDesignOrderToUnifiedOrder } from "../production-runs/dual-write-unified-run-order"
+import { PRODUCTION_RUNS_MODULE } from "../../modules/production_runs"
+import type ProductionRunService from "../../modules/production_runs/service"
+import { resolveLineItemDesignId } from "../../lib/resolve-line-item-production"
+
+/**
+ * #826 S3 (step 1) — fan out one production_run per design line item on a
+ * commissioning order.
+ *
+ * A design commissioning order (created by createDraftOrderFromDesignsWorkflow +
+ * convert-design-order) carries one TITLE-ONLY line item per design, each with
+ * `metadata.design_id`. Auto-run-creation is DELIBERATELY off for these: since
+ * #1920 every such item is stamped `metadata.no_auto_produce: true`, and both
+ * automatic doors (order.placed, order.fulfillment_created) honour it.
+ *
+ * 🔑 This function is the EXPLICIT door and ignores the flag by design — it IS
+ * the admin saying "produce this now". Do not add an `isAutoProduceSuppressed`
+ * check here; doing so would make design orders unproduceable altogether.
+ *
+ * Each run is stamped with `order_id` = the commissioning order and
+ * `order_line_item_id` = its design line. `order_id` is the group key the
+ * collated projection (#826 S3a) uses to fold N runs into ONE partner
+ * work-order — the design analog of inventory's one-order-many-lines shape.
+ *
+ * Idempotent: a line item that already has a run (matched on
+ * `order_line_item_id`, mirroring order-placed) is skipped. Shared as a plain
+ * function (like linkDesignsToOrder) so a route, subscriber or backfill can all
+ * reuse the exact traversal.
+ */
+export async function createRunsForDesignOrder(
+  container: MedusaContainer,
+  orderId: string,
+  opts?: { partner_id?: string | null }
+): Promise<{
+  created: number
+  run_ids: string[]
+  design_ids: string[]
+  work_order_id: string | null
+}> {
+  const logger: any = container.resolve(ContainerRegistrationKeys.LOGGER)
+  const query: any = container.resolve(ContainerRegistrationKeys.QUERY)
+  const orderService = container.resolve(Modules.ORDER) as IOrderModuleService
+  const runService = container.resolve(
+    PRODUCTION_RUNS_MODULE
+  ) as ProductionRunService
+
+  const order: any = await orderService.retrieveOrder(orderId, {
+    relations: ["items"],
+  })
+  const items: any[] = order?.items || []
+
+  // Idempotency: which line items already spawned a run. One authoritative
+  // (synchronous) read of the order's existing runs — filtering by
+  // `order_line_item_id` directly proved unreliable, but `order_id` is exact.
+  const existingRuns = await runService.listProductionRuns(
+    { order_id: [orderId] } as any,
+    { select: ["id", "order_line_item_id"] }
+  )
+  const alreadyProduced = new Set(
+    (existingRuns || [])
+      .map((r: any) => r.order_line_item_id)
+      .filter(Boolean) as string[]
+  )
+
+  const runIds: string[] = []
+  const designIds: string[] = []
+
+  for (const item of items) {
+    const lineItemId = item?.id
+    if (!lineItemId || alreadyProduced.has(lineItemId)) {
+      continue
+    }
+    /**
+     * Design lines used to be found by reading `metadata.design_id` directly.
+     * That string is provenance — what the item was ORDERED as — so after an
+     * order edit re-points an item (#1921) it names the design the customer is
+     * no longer getting, and this path would have produced the wrong one.
+     * `resolveLineItemDesignId` prefers the link and falls back to the string
+     * for orders the backfill has not reached (#1919).
+     */
+    const { designId } = await resolveLineItemDesignId(query, {
+      lineItemId,
+      metadata: item?.metadata,
+    })
+    if (!designId) {
+      continue
+    }
+
+    try {
+      const { result } = await createProductionRunWorkflow(container).run({
+        input: {
+          design_id: designId,
+          quantity: Number(item?.quantity) || 1,
+          order_id: orderId,
+          order_line_item_id: lineItemId,
+          partner_id: opts?.partner_id ?? undefined,
+          // Producing a design order commits it to a partner, so the runs are
+          // born partner-facing (sent_to_partner) when a partner is assigned —
+          // that's the status the collated projection needs to create the
+          // partner↔order link (else the work-order is invisible to the partner).
+          ...(opts?.partner_id ? { status: "sent_to_partner" as const } : {}),
+          // Collated into ONE work-order by projectDesignOrderToUnifiedOrder
+          // below — do NOT let each run mint its own per-run work-order.
+          skip_unified_projection: true,
+          metadata: {
+            source: "design-order-produce",
+            source_order_id: orderId,
+          },
+        },
+      })
+      const run = (result as any)?.production_run ?? (result as any)?.run ?? result
+      if (run?.id) {
+        runIds.push(run.id)
+        designIds.push(designId)
+      }
+    } catch (e: any) {
+      logger.warn(
+        `[create-runs-for-design-order] run creation failed for line ${lineItemId} (design ${designId}) on order ${orderId}: ${e?.message}`
+      )
+    }
+  }
+
+  // Collate the order's runs (the just-created ones + any pre-existing) into ONE
+  // kind=design work-order with a line per design (#826 S3a). Idempotent, so a
+  // re-produce that created nothing new still resolves the existing work-order.
+  const projection = await projectDesignOrderToUnifiedOrder(container, orderId)
+
+  return {
+    created: runIds.length,
+    run_ids: runIds,
+    design_ids: designIds,
+    work_order_id: projection.unified_order_id,
+  }
+}

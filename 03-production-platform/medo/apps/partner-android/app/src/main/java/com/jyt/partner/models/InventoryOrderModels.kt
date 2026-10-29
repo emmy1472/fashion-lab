@@ -1,0 +1,265 @@
+package com.jyt.partner.models
+
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+
+// The inventory-order API contract — the Kotlin mirror of the iOS app's
+// InventoryOrderModels.swift. The partner is the SUPPLIER here: they are
+// commissioned to make/ship raw material (cloth, yarn, trim) and
+// "complete" = record what was delivered, per line, with a delivery date
+// and tracking number — the goods receipt the backend receives against stock.
+
+@Serializable
+enum class InventoryOrderStatus(val raw: String) {
+    @SerialName("Pending") PENDING("Pending"),
+    @SerialName("Processing") PROCESSING("Processing"),
+    @SerialName("Ready for Delivery") READY_FOR_DELIVERY("Ready for Delivery"),
+    @SerialName("Shipped") SHIPPED("Shipped"),
+    @SerialName("Delivered") DELIVERED("Delivered"),
+    @SerialName("Cancelled") CANCELLED("Cancelled"),
+    @SerialName("Partial") PARTIAL("Partial");
+
+    companion object {
+        fun from(raw: String?): InventoryOrderStatus? =
+            raw?.let { r -> entries.firstOrNull { it.raw == r } }
+    }
+}
+
+@Serializable
+data class RawMaterialSummary(
+    val id: String? = null,
+    val name: String? = null,
+)
+
+@Serializable
+data class InventoryItemSummary(
+    val id: String? = null,
+    val sku: String? = null,
+    val title: String? = null,
+    @SerialName("raw_materials") val rawMaterials: List<RawMaterialSummary>? = null,
+)
+
+@Serializable
+data class LineFulfillment(
+    val id: String? = null,
+    val quantity: Double? = null,
+    val status: String? = null,
+)
+
+/** #2289 — per line, what the partner dispatched vs what the receiver counted.
+ *  A dispatch posts no stock and is not a receipt row, so the server computes
+ *  this; the app does not sum rows itself. */
+@Serializable
+data class LineLedger(
+    val ordered: Double = 0.0,
+    val dispatched: Double = 0.0,
+    val received: Double = 0.0,
+    @SerialName("to_dispatch") val toDispatch: Double = 0.0,
+    /** #2289 S3 — counted by the receiver and not there. */
+    val short: Double = 0.0,
+    @SerialName("awaiting_count") val awaitingCount: Double = 0.0,
+)
+
+/** One order line — these goods are cloth, yarn and trim, so quantity is a
+ *  REAL (metres/kilograms), not a count. */
+@Serializable
+data class InventoryOrderLine(
+    val id: String,
+    @SerialName("inventory_item_id") val inventoryItemId: String? = null,
+    val quantity: Double = 0.0,
+    val price: Double = 0.0,
+    @SerialName("extra_cost") val extraCost: Double? = null,
+    val metadata: Map<String, String>? = null,
+    @SerialName("inventory_items") val inventoryItems: List<InventoryItemSummary>? = null,
+    @SerialName("line_fulfillments") val lineFulfillments: List<LineFulfillment>? = null,
+    val ledger: LineLedger? = null,
+) {
+    val displayName: String
+        get() = inventoryItems?.firstOrNull()
+            ?.rawMaterials?.firstOrNull()?.name
+            ?: inventoryItems?.firstOrNull()?.sku
+            ?: "Material"
+
+    /** What the partner has sent. The server's ledger when present; before
+     *  #2289 the app summed `quantity`, a field the API never sends (rows carry
+     *  `quantity_delta`), so it always read 0. */
+    val fulfilled: Double
+        get() = ledger?.dispatched ?: lineFulfillments.orEmpty().sumOf { it.quantity ?: 0.0 }
+
+    val outstanding: Double
+        get() = ledger?.toDispatch ?: (quantity - fulfilled).coerceAtLeast(0.0)
+
+    /** Sent but not yet counted by the receiver. */
+    val awaitingCount: Double get() = ledger?.awaitingCount ?: 0.0
+
+    /** Counted short by the receiver. */
+    val short: Double get() = ledger?.short ?: 0.0
+}
+
+@Serializable
+data class InventoryOrderPartnerInfo(
+    @SerialName("assigned_partner_id") val assignedPartnerId: String? = null,
+    @SerialName("partner_name") val partnerName: String? = null,
+    @SerialName("partner_status") val partnerStatus: String? = null,
+    @SerialName("partner_started_at") val partnerStartedAt: String? = null,
+    @SerialName("partner_completed_at") val partnerCompletedAt: String? = null,
+    @SerialName("delivery_date") val deliveryDate: String? = null,
+    @SerialName("tracking_number") val trackingNumber: String? = null,
+    @SerialName("admin_notes") val adminNotes: String? = null,
+    @SerialName("workflow_tasks_count") val workflowTasksCount: Int? = null,
+)
+
+@Serializable
+data class PartnerInventoryOrder(
+    val id: String,
+    val status: String = "",
+    val quantity: Double? = null,
+    @SerialName("total_price") val totalPrice: Double? = null,
+    @SerialName("currency_code") val currencyCode: String? = null,
+    @SerialName("expected_delivery_date") val expectedDeliveryDate: String? = null,
+    @SerialName("order_date") val orderDate: String? = null,
+    @SerialName("is_sample") val isSample: Boolean? = null,
+    @SerialName("order_lines") val orderLines: List<InventoryOrderLine>? = null,
+    @SerialName("partner_info") val partnerInfo: InventoryOrderPartnerInfo? = null,
+    /** Carrier shipments, newest first (the partner GET detail route). */
+    val shipments: List<InventoryShipment>? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("updated_at") val updatedAt: String? = null,
+) {
+    val statusEnum: InventoryOrderStatus? get() = InventoryOrderStatus.from(status)
+
+    /** What the partner still owes on this order, summed over lines. */
+    val outstandingQuantity: Double
+        get() = orderLines.orEmpty().sumOf { it.outstanding }
+}
+
+@Serializable
+data class PartnerInventoryOrderListResponse(
+    @SerialName("inventory_orders") val inventoryOrders: List<PartnerInventoryOrder>,
+    val count: Int,
+    val limit: Int,
+    val offset: Int,
+)
+
+@Serializable
+data class PartnerInventoryOrderDetailResponse(
+    @SerialName("inventoryOrder") val inventoryOrder: PartnerInventoryOrder,
+)
+
+@Serializable
+data class InventoryOrderChargesResponse(
+    val charges: List<Charge>,
+    val totals: Totals? = null,
+    @SerialName("goods_total") val goodsTotal: Double? = null,
+    @SerialName("payable_ceiling") val payableCeiling: Double? = null,
+) {
+    @Serializable
+    data class Charge(
+        val id: String,
+        val type: String,
+        val amount: Double,
+        val note: String? = null,
+        /** 1 raises, -1 lowers, 0 unknown. The backend's, never re-derived. */
+        val direction: Int? = null,
+    )
+
+    @Serializable
+    data class Totals(
+        val raises: Double? = null,
+        val lowers: Double? = null,
+        val net: Double? = null,
+    )
+}
+
+/** The complete (goods-receipt) payload — POST /partners/inventory-orders/:id/complete. */
+@Serializable
+data class CompleteInventoryOrderBody(
+    val notes: String? = null,
+    /** "yyyy-MM-dd" — the backend validator takes the date as a string. */
+    @SerialName("deliveryDate") val deliveryDate: String? = null,
+    @SerialName("trackingNumber") val trackingNumber: String? = null,
+    val lines: List<Line>,
+) {
+    @Serializable
+    data class Line(
+        @SerialName("order_line_id") val orderLineId: String,
+        val quantity: Double,
+    )
+}
+
+/** A carrier shipment on an inventory order (the inventory_shipment row). */
+@Serializable
+data class InventoryShipment(
+    val id: String? = null,
+    val carrier: String? = null,
+    val awb: String? = null,
+    @SerialName("tracking_number") val trackingNumber: String? = null,
+    @SerialName("tracking_url") val trackingUrl: String? = null,
+    /** created | pickup_scheduled | picked_up | in_transit | out_for_delivery
+     *  | delivered | rto | cancelled */
+    val status: String? = null,
+    @SerialName("pickup_scheduled_date") val pickupScheduledDate: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+)
+
+/** GET /partners/inventory-orders/:id/shiprocket-rates. */
+@Serializable
+data class ShippingRatesResponse(
+    @SerialName("origin_pincode") val originPincode: String? = null,
+    @SerialName("destination_pincode") val destinationPincode: String? = null,
+    @SerialName("weight_grams") val weightGrams: Double? = null,
+    val cod: Boolean? = null,
+    val rates: List<ShippingRate> = emptyList(),
+)
+
+@Serializable
+data class ShippingRate(
+    /** A string or a number depending on the carrier — kept raw. */
+    @SerialName("courier_id") val courierIdRaw: JsonElement? = null,
+    @SerialName("courier_name") val courierName: String? = null,
+    val amount: Double = 0.0,
+    @SerialName("currency_code") val currencyCode: String? = null,
+    @SerialName("estimated_days") val estimatedDays: Double? = null,
+    @SerialName("is_recommended") val isRecommended: Boolean? = null,
+) {
+    /** The id as text — what the shipment's preferred_courier_id takes. */
+    val courierId: String?
+        get() = (courierIdRaw as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() && it != "null" }
+}
+
+/** POST /partners/inventory-orders/:id/shipment. Nulls are left out. */
+@Serializable
+data class CreateShipmentBody(
+    val carrier: String,
+    @SerialName("weight_grams") val weightGrams: Int? = null,
+    @SerialName("dimensions_cm") val dimensionsCm: Dimensions? = null,
+    @SerialName("preferred_courier_id") val preferredCourierId: String? = null,
+    /** "YYYY-MM-DD". */
+    @SerialName("pickup_date") val pickupDate: String? = null,
+) {
+    @Serializable
+    data class Dimensions(
+        val length: Double? = null,
+        val breadth: Double? = null,
+        val height: Double? = null,
+    )
+}
+
+/** `{ shipment }` — the workflow's ShipmentResult plus the scheduled pickup. */
+@Serializable
+data class CreateShipmentResponse(val shipment: CreatedShipment)
+
+@Serializable
+data class CreatedShipment(
+    val carrier: String? = null,
+    val awb: String? = null,
+    @SerialName("tracking_number") val trackingNumber: String? = null,
+    @SerialName("tracking_url") val trackingUrl: String? = null,
+    @SerialName("label_url") val labelUrl: String? = null,
+    val pickup: Pickup? = null,
+) {
+    @Serializable
+    data class Pickup(@SerialName("scheduled_date") val scheduledDate: String? = null)
+}

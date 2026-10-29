@@ -1,0 +1,37 @@
+---
+title: Xray
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import { ConstantDocs } from '@site/src/components/constant-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.xray.mjs'
+import * as cdoc from '@site/prebuild/jsdoc/constants.xray.mjs'
+import { Example } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+- [Constants](#constants)
+
+## Components
+
+The **Xray** component family provides the following components:
+
+- [Xray](#json)
+
+### Xray
+
+<ComponentDocs docs={jsdoc.jsdocXray} example={Example} />
+
+## Constants
+
+The **Xray** family exports the following constants:
+
+- [defaultComponents](#defaultcomponents)
+
+### defaultComponents
+
+<ConstantDocs docs={cdoc.jsdocdefaultComponents} />
+
+</DocusaurusDoc>

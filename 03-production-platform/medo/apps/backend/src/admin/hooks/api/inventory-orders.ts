@@ -1,0 +1,774 @@
+import { FetchError } from "@medusajs/js-sdk";
+import { PaginatedResponse } from "@medusajs/types";
+import {
+  QueryKey,
+  UseMutationOptions,
+  UseQueryOptions,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+
+import { sdk } from "../../lib/config";
+import { queryKeysFactory } from "../../lib/query-key-factory";
+
+export interface OrderLine {
+  inventory_item_id: string;
+  quantity: number;
+  price: number;
+  // Per-unit extra charge on top of price (colour/dye job, finishing, …).
+  extra_cost?: number | null;
+  // Batch tag for separate-batch quick-add lines (null ⇒ not batched).
+  batch_number?: number | null;
+  // #817 S2 — denormalized color identity persisted on the line.
+  color?: string | null;
+  material_name?: string | null;
+  raw_material_id?: string | null;
+}
+
+export interface StockLocations {
+  id: string,
+  name: string, 
+  address: {
+    id: string
+    address_1: string,
+    address_2: string,
+    company: string,
+    phone: string,
+    province: string,
+    postal_code: string,
+    city: string, 
+    country_code: string
+  }
+  address_1: string
+  address_2: string
+  company: string
+  phone: string
+  province: string
+  postal_code: string
+  city: string
+  country_code: string
+}
+
+export interface AdminInventoryOrder {
+  id: string;
+  status: string;
+  /**
+   * #2289 — per line: ordered / dispatched by the supplier / received (counted)
+   * / awaiting count. A dispatch posts no stock; only a count does.
+   */
+  dispatch_ledger?: Array<{
+    line_id: string;
+    ordered: number;
+    dispatched: number;
+    received: number;
+    to_dispatch: number;
+    short?: number;
+    awaiting_count: number;
+  }>;
+  /** #2289 S3 — the receiver counted less than was dispatched. */
+  shortfalls?: Array<{
+    id: string;
+    inventory_order_line_id: string;
+    quantity: number;
+    dispatched_quantity: number;
+    received_quantity: number;
+    status: "open" | "resolved";
+    resolution_note?: string | null;
+    created_at?: string;
+  }>;
+  quantity: number;
+  total_price: number;
+  expected_delivery_date: string;
+  order_date: string;
+  shipping_address?: Record<string, any>;
+  stock_locations: StockLocations[];
+  order_lines: OrderLine[];
+  is_sample?: boolean;
+  /** #2315 — when the supplier is paid. */
+  payment_terms?: "on_receipt" | "advance";
+  advance_percent?: number | null;
+  tasks?: any[];
+  partner?: any;
+  metadata?: Record<string, any> | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type CreateAdminInventoryOrderPayload = Omit<AdminInventoryOrder, "id" | "created_at" | "updated_at">;
+export type UpdateAdminInventoryOrderPayload = Partial<CreateAdminInventoryOrderPayload>;
+
+export interface SendInventoryOrderToPartnerPayload {
+  partnerId: string;
+  notes?: string;
+}
+
+export interface AdminInventoryOrderResponse {
+  inventoryOrder: AdminInventoryOrder;
+}
+
+export interface AdminInventoryOrdersResponse {
+  inventory_orders: AdminInventoryOrder[];
+  count: number;
+  offset: number;
+  limit: number;
+}
+
+export interface AdminInventoryOrdersQuery {
+  offset?: number;
+  limit?: number;
+  status?: string;
+  quantity?: number;
+  order_date?: string;
+  expected_delivery_date?: string;
+  q?: string;
+  // Sort directive, e.g. "order_date:DESC" — parsed server-side by
+  // parseOrderParam. Drives the table's default recent-first ordering and
+  // column-header sorting (#784).
+  order?: string;
+}
+
+const INVENTORY_ORDER_QUERY_KEY = "inventory-orders" as const;
+export const inventoryOrderQueryKeys = queryKeysFactory(INVENTORY_ORDER_QUERY_KEY);
+
+export interface InventoryOrderQuery {
+  fields?: string[];
+}
+
+/**
+ * The APPLIED non-goods amounts on an inventory order (#1737).
+ *
+ * `totals` and `payable_ceiling` are folded SERVER-SIDE by the same pure lib
+ * that backs the payable guard, and each row carries its own `direction`, so
+ * this screen never re-derives whether a type raises or lowers what we owe.
+ */
+export type AdminInventoryOrderCharge = {
+  id: string;
+  type: string;
+  amount: number;
+  note?: string | null;
+  /** `1` raises, `-1` lowers, `0` a type the backend does not understand. */
+  direction: 1 | -1 | 0;
+};
+
+export type AdminInventoryOrderChargesResponse = {
+  charges: AdminInventoryOrderCharge[];
+  totals: { raises: number; lowers: number; net: number };
+  goods_total: number;
+  payable_ceiling: number;
+};
+
+export const useInventoryOrderCharges = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<
+      AdminInventoryOrderChargesResponse,
+      FetchError,
+      AdminInventoryOrderChargesResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: [...inventoryOrderQueryKeys.detail(id), "charges"],
+    queryFn: async () =>
+      sdk.client.fetch<AdminInventoryOrderChargesResponse>(
+        `/admin/inventory-orders/${id}/charges`,
+        { method: "GET" },
+      ),
+    enabled: !!id,
+    ...options,
+  });
+
+  return { ...data, ...rest };
+};
+
+export const useInventoryOrder = (
+  id: string,
+  query?: InventoryOrderQuery,
+  options?: Omit<
+    UseQueryOptions<AdminInventoryOrderResponse, FetchError, AdminInventoryOrderResponse, QueryKey>,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: inventoryOrderQueryKeys.detail(id, query),
+    queryFn: async () =>
+      sdk.client.fetch<AdminInventoryOrderResponse>(`/admin/inventory-orders/${id}`, {
+        method: "GET",
+        query: {
+          ...query,
+          fields: query?.fields ? query.fields.join(",") : undefined,
+        },
+      }),
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+    ...options,
+  });
+  return { ...data, ...rest };
+};
+
+export const useInventoryOrders = (
+  query?: AdminInventoryOrdersQuery,
+  options?: Omit<
+    UseQueryOptions<PaginatedResponse<AdminInventoryOrdersResponse>, FetchError, PaginatedResponse<AdminInventoryOrdersResponse>, QueryKey>,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: async () =>
+      sdk.client.fetch<PaginatedResponse<AdminInventoryOrdersResponse>>(
+        `/admin/inventory-orders`,
+        {
+          method: "GET",
+          query,
+        },
+      ),
+    queryKey: inventoryOrderQueryKeys.list(query),
+    ...options,
+  });
+  return { ...data, ...rest };
+};
+
+export const useCreateInventoryOrder = (
+  options?: UseMutationOptions<AdminInventoryOrderResponse, FetchError, CreateAdminInventoryOrderPayload>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: CreateAdminInventoryOrderPayload) =>
+      sdk.client.fetch<AdminInventoryOrderResponse>(`/admin/inventory-orders`, {
+        method: "POST",
+        body: payload,
+      }),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.lists() });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export const useUpdateInventoryOrder = (
+  id: string,
+  options?: UseMutationOptions<AdminInventoryOrderResponse, FetchError, UpdateAdminInventoryOrderPayload>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: UpdateAdminInventoryOrderPayload) =>
+      sdk.client.fetch<AdminInventoryOrderResponse>(`/admin/inventory-orders/${id}`, {
+        method: "PUT",
+        body: payload,
+      }),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.details() });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+// #790 slice 3 — mark an order "Ready for Delivery" (Partial → it; completion
+// must be recorded first, so raw "Processing" is rejected by the API).
+export const useMarkInventoryOrderReadyForDelivery = (
+  id: string,
+  options?: UseMutationOptions<{ order: AdminInventoryOrder }, FetchError, void>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      sdk.client.fetch<{ order: AdminInventoryOrder }>(`/admin/inventory-orders/${id}/ready-for-delivery`, {
+        method: "POST",
+        body: {},
+      }),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.lists() });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export interface CreateInventoryOrderShipmentPayload {
+  carrier?: string;
+  pickup_stock_location_id?: string;
+  weight_grams?: number;
+  dimensions_cm?: { length?: number; breadth?: number; height?: number };
+  preferred_courier_id?: string | number;
+  delivered_quantities?: Record<string, number>;
+  /** Requested carrier pickup date ("YYYY-MM-DD"). */
+  pickup_date?: string;
+}
+
+export interface CreateInventoryOrderShipmentResponse {
+  shipment?: { awb?: string; tracking_number?: string; label_url?: string; [k: string]: any };
+}
+
+// #790 slice 3 — generate a real carrier shipment (AWB + label) for the order.
+export const useCreateInventoryOrderShipment = (
+  id: string,
+  options?: UseMutationOptions<CreateInventoryOrderShipmentResponse, FetchError, CreateInventoryOrderShipmentPayload>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: CreateInventoryOrderShipmentPayload) =>
+      sdk.client.fetch<CreateInventoryOrderShipmentResponse>(`/admin/inventory-orders/${id}/shipment`, {
+        method: "POST",
+        body: payload,
+      }),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.lists() });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export type ShiprocketRateOption = {
+  courier_id: number | string;
+  courier_name: string;
+  amount: number;
+  currency_code: string;
+  estimated_days?: number;
+  cod_charges?: number;
+  is_recommended?: boolean;
+};
+
+export type InventoryOrderShiprocketRatesResponse = {
+  origin_pincode: string;
+  destination_pincode: string;
+  weight_grams: number;
+  cod: boolean;
+  rates: ShiprocketRateOption[];
+};
+
+export type ShiprocketRatesParams = {
+  weight_grams?: number;
+  length?: number;
+  breadth?: number;
+  height?: number;
+  /** Explicit ship-from override, mirroring the shipment payload's field. */
+  pickup_stock_location_id?: string;
+};
+
+const ratesQuery = (params: ShiprocketRatesParams): string => {
+  const qs = new URLSearchParams();
+  const { pickup_stock_location_id, ...numeric } = params;
+  for (const [k, v] of Object.entries(numeric)) {
+    if (v != null && Number.isFinite(Number(v)) && Number(v) > 0) qs.set(k, String(v));
+  }
+  if (pickup_stock_location_id) {
+    qs.set("pickup_stock_location_id", pickup_stock_location_id);
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : "";
+};
+
+/**
+ * On-demand Shiprocket courier rates for an inventory order (#641-inv). A
+ * mutation so the modal can fetch when the operator clicks "Get rates" and pass
+ * the current weight/dimensions, without a query key/enabled dance.
+ */
+export const useInventoryOrderShiprocketRates = (
+  id: string,
+  options?: UseMutationOptions<
+    InventoryOrderShiprocketRatesResponse,
+    FetchError,
+    ShiprocketRatesParams
+  >,
+) => {
+  return useMutation({
+    mutationFn: async (params: ShiprocketRatesParams) =>
+      sdk.client.fetch<InventoryOrderShiprocketRatesResponse>(
+        `/admin/inventory-orders/${id}/shiprocket-rates${ratesQuery(params)}`,
+        { method: "GET" },
+      ),
+    ...options,
+  });
+};
+
+export const useCreateInventoryOrderTasks = (
+  id: string,
+  options?: UseMutationOptions<any, FetchError, { type: string; template_names: string[]; dependency_type?: string }>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: { type: string; template_names: string[]; dependency_type?: string }) =>
+      sdk.client.fetch(`/admin/inventory-orders/${id}/tasks`, {
+        method: "POST",
+        body: payload,
+      }),
+    ...options,
+    onSuccess: (...args) => {
+      // invalidate inventory order detail and tasks queries
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.detail(id) });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export const useDeleteInventoryOrder = (
+  id: string,
+  options?: UseMutationOptions<AdminInventoryOrder, FetchError, void>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      sdk.client.fetch<AdminInventoryOrder>(`/admin/inventory-orders/${id}`, {
+        method: "DELETE",
+      }),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.lists() });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export const useSendInventoryOrderToPartner = (
+  id: string,
+  options?: UseMutationOptions<any, FetchError, SendInventoryOrderToPartnerPayload>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: SendInventoryOrderToPartnerPayload) =>
+      sdk.client.fetch<any>(`/admin/inventory-orders/${id}/send-to-partner`, {
+        method: "POST",
+        body: payload,
+      }),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.lists() });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export interface UpdateInventoryOrderLinesPayload {
+  id: string;
+  data: {
+    quantity?: number;
+    total_price?: number;
+  };
+  // Fields are all optional to mirror the server validator (updateOrderLineSchema):
+  // a keep/update entry carries inventory_item_id/quantity/price; a removal marker
+  // needs only { id, remove: true }.
+  order_lines: Array<{
+    id?: string;
+    inventory_item_id?: string;
+    quantity?: number;
+    price?: number;
+    batch_number?: number | null;
+    // Marks an existing line for deletion (soft-delete + link dismiss server-side).
+    remove?: boolean;
+  }>;
+}
+
+export const useUpdateInventoryOrderLines = (
+  options?: UseMutationOptions<AdminInventoryOrderResponse, FetchError, UpdateInventoryOrderLinesPayload>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, ...body }: UpdateInventoryOrderLinesPayload) =>
+      // `id` is the URL param only — the PUT body is strictly validated against
+      // updateInventoryOrderLinesSchema ({ data?, order_lines }), so sending a
+      // top-level `id` fails with "unrecognised fields: id". Send just the body.
+      sdk.client.fetch<AdminInventoryOrderResponse>(`/admin/inventory-orders/${id}/order-lines`, {
+        method: "PUT",
+        body,
+      }),
+    ...options,
+    onSuccess: async (data, variables, ...args) => {
+      // Invalidate all queries related to inventory orders
+      await queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.lists() });
+      await queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.details() });
+      // Force refetch of all active detail queries
+      await queryClient.refetchQueries({ 
+        queryKey: inventoryOrderQueryKeys.details(),
+        type: 'active'
+      });
+      options?.onSuccess?.(data, variables, ...args);
+    },
+  });
+};
+
+/**
+ * What this order has been billed for, and what was actually paid (#1622).
+ *
+ * Distinct from the order's `internal_payments`: those exist only once a payout
+ * is APPROVED, so a Pending payout naming this order is invisible on the order
+ * itself. `/payments` reads the submission lines, which name the order from the
+ * moment they are written, at every status.
+ */
+export type InventoryOrderPayout = {
+  line_id: string;
+  submission_id: string;
+  submission_status: string | null;
+  submission_total: number | null;
+  partner_id: string | null;
+  currency: string | null;
+  created_at: string | null;
+  reviewed_at: string | null;
+  amount: number;
+  quantity: number | null;
+  unit_amount: number | null;
+  notes: string | null;
+  source_type: string | null;
+  design_id: string | null;
+  design_name: string | null;
+  task_id: string | null;
+  task_name: string | null;
+  inventory_order_id: string | null;
+  inventory_order_name: string | null;
+  order_id: string | null;
+  production_run_ids: string[] | null;
+};
+
+export type InventoryOrderPaymentsResponse = {
+  payouts: InventoryOrderPayout[];
+  payments: any[];
+  totals: { billed: number; paid: number; recorded: number };
+  count: number;
+};
+
+export const useInventoryOrderPayments = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<
+      InventoryOrderPaymentsResponse,
+      FetchError,
+      InventoryOrderPaymentsResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: [INVENTORY_ORDER_QUERY_KEY, id, "payments"],
+    queryFn: async () =>
+      sdk.client.fetch<InventoryOrderPaymentsResponse>(
+        `/admin/inventory-orders/${id}/payments`,
+        { method: "GET" },
+      ),
+    ...options,
+  });
+  return { ...data, ...rest };
+};
+
+// #1752 — a partner's proposed revision (line edits + tax), staged and awaiting
+// admin approval. Mirrors Medusa's order-change surface: a pending proposal is a
+// request, not a fact, until the operator approves or rejects it.
+export type InventoryOrderChangeLine = {
+  id: string
+  quantity?: number
+  price?: number
+  extra_cost?: number | null
+  remove?: boolean
+}
+
+export type InventoryOrderChangeCharge = {
+  type: "tax"
+  amount: number
+  note?: string | null
+}
+
+export type AdminInventoryOrderChange = {
+  id: string
+  status: "pending" | "approved" | "rejected"
+  proposed_lines: InventoryOrderChangeLine[] | null
+  proposed_charges: InventoryOrderChangeCharge[] | null
+  submitted_by?: string | null
+  submitted_at?: string | null
+  decided_by?: string | null
+  decided_at?: string | null
+  rejection_reason?: string | null
+}
+
+export type InventoryOrderChangesResponse = {
+  changes: AdminInventoryOrderChange[]
+}
+
+export const useInventoryOrderChanges = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<InventoryOrderChangesResponse, FetchError, InventoryOrderChangesResponse, QueryKey>,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: [INVENTORY_ORDER_QUERY_KEY, id, "changes"],
+    queryFn: async () =>
+      sdk.client.fetch<InventoryOrderChangesResponse>(
+        `/admin/inventory-orders/${id}/changes`,
+        { method: "GET" },
+      ),
+    ...options,
+  });
+  return { ...data, ...rest };
+};
+
+export const useApproveInventoryOrderChange = (
+  id: string,
+  options?: UseMutationOptions<{ change: AdminInventoryOrderChange }, FetchError, string>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (changeId: string) =>
+      sdk.client.fetch<{ change: AdminInventoryOrderChange }>(
+        `/admin/inventory-orders/${id}/changes/${changeId}/approve`,
+        { method: "POST", body: {} },
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: [INVENTORY_ORDER_QUERY_KEY, id, "changes"] });
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.detail(id) });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export const useRejectInventoryOrderChange = (
+  id: string,
+  options?: UseMutationOptions<
+    { change: AdminInventoryOrderChange },
+    FetchError,
+    { changeId: string; reason?: string }
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ changeId, reason }: { changeId: string; reason?: string }) =>
+      sdk.client.fetch<{ change: AdminInventoryOrderChange }>(
+        `/admin/inventory-orders/${id}/changes/${changeId}/reject`,
+        { method: "POST", body: { reason } },
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: [INVENTORY_ORDER_QUERY_KEY, id, "changes"] });
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.detail(id) });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+/**
+ * RECEIVING GOODS — #2144.
+ *
+ * 🔴 `Delivered` is a CARRIER event. It comes from the Shiprocket webhook and
+ * proves a parcel reached a door; it moves NO stock and means nobody counted
+ * what was inside. Until this runs, the level reads 0 however OTP-verified the
+ * scan was — which is exactly how two pashminas sat off our books at Kiyo.
+ *
+ * A line may be listed MORE THAN ONCE with different `stock_location_id`s.
+ * That is a SPLIT receipt and it is the ordinary consignment case: the partner
+ * keeps what they will cut and the balance goes to our own warehouse. Both
+ * halves arrived — it is not a short delivery.
+ */
+export interface ReceiveInventoryOrderPortion {
+  order_line_id: string;
+  quantity: number;
+  /** Where THIS portion lands. Omit to follow the order's destination. */
+  stock_location_id?: string;
+}
+
+export interface ReceiveInventoryOrderPayload {
+  /** Omit entirely to receive everything still outstanding. */
+  lines?: ReceiveInventoryOrderPortion[];
+  /** Whole-receipt destination override. A per-portion location beats it. */
+  stock_location_id?: string;
+  notes?: string;
+}
+
+export interface ReceiveInventoryOrderResponse {
+  order_id: string;
+  received: Array<{
+    order_line_id: string;
+    quantity: number;
+    inventory_item_id: string;
+    location_id: string;
+  }>;
+  postings: Array<{
+    inventory_item_id: string;
+    location_id: string;
+    quantity: number;
+  }>;
+  /** Only ONE of the destinations on a split receipt — prefer the plural. */
+  destination_location_id: string;
+  destination_location_ids?: string[];
+}
+
+export const useReceiveInventoryOrder = (
+  id: string,
+  options?: UseMutationOptions<
+    ReceiveInventoryOrderResponse,
+    FetchError,
+    ReceiveInventoryOrderPayload
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: ReceiveInventoryOrderPayload) =>
+      sdk.client.fetch<ReceiveInventoryOrderResponse>(
+        `/admin/inventory-orders/${id}/receive`,
+        { method: "POST", body: payload },
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.lists() });
+      // The whole point is that a level moved. Anything rendering stock has to
+      // re-read, or the receipt looks like it did nothing.
+      queryClient.invalidateQueries({ queryKey: ["inventory_items"] });
+      queryClient.invalidateQueries({ queryKey: ["inventory-levels"] });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+/** #2289 S2 — one order a supplier dispatched that nobody has counted yet. */
+export type AdminAwaitingCountOrder = {
+  id: string;
+  status: string;
+  partner_id: string | null;
+  partner_name: string | null;
+  destination_location_id: string | null;
+  destination_name: string | null;
+  first_dispatched_at: string | null;
+  last_dispatched_at: string | null;
+  days_since_dispatch: number | null;
+  carrier_delivered: boolean;
+  awaiting_quantity: number;
+  lines: Array<{ line_id: string; title: string | null; dispatched: number; received: number; awaiting_count: number }>;
+};
+
+export const useInventoryOrdersAwaitingCount = () => {
+  const { data, ...rest } = useQuery({
+    queryKey: [...inventoryOrderQueryKeys.lists(), "awaiting-count"],
+    queryFn: async () =>
+      sdk.client.fetch<{ orders: AdminAwaitingCountOrder[]; count: number; awaiting_quantity: number }>(
+        `/admin/inventory-orders/awaiting-count`,
+        { method: "GET" },
+      ),
+  });
+  return { ...data, orders: data?.orders ?? [], ...rest };
+};
+
+/** #2289 S3 — close a short delivery with what was done about it. */
+export const useResolveInventoryOrderShortfall = (orderId: string) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ shortfallId, note }: { shortfallId: string; note: string }) =>
+      sdk.client.fetch<{ shortfall: unknown }>(
+        `/admin/inventory-orders/${orderId}/shortfalls/${shortfallId}/resolve`,
+        { method: "POST", body: { note } },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.detail(orderId) });
+      queryClient.invalidateQueries({ queryKey: inventoryOrderQueryKeys.lists() });
+    },
+  });
+};

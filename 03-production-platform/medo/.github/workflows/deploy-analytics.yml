@@ -1,0 +1,127 @@
+name: Deploy Analytics Script to CDN
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'apps/analytics/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/deploy-analytics.yml'
+  workflow_dispatch: # Allow manual trigger
+
+env:
+  # Opt into Node.js 24 for JS-based actions. Node 20 runtime is deprecated
+  # on GHA runners; forced default 2026-06-02, removed 2026-09-16.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  deploy-analytics:
+    name: Build and Deploy Analytics Script
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        # Scope to the analytics workspace only. A full install builds the
+        # backend's isolated-vm (it's in onlyBuiltDependencies, so no prebuild)
+        # from source, which fails on this Node 20 runner — isolated-vm@6.1.x
+        # needs Node 22+'s V8 (v8::SourceLocation). Analytics is pure JS
+        # (terser), so it needs none of the backend's native deps.
+        run: pnpm install --frozen-lockfile --filter @jyt/analytics
+
+      - name: Verify tracker behaviour
+        # This artifact goes straight to the CDN and runs on customers' pages,
+        # so the gate has to be here — nothing else in CI looks at it.
+        run: pnpm --filter @jyt/analytics test
+
+      - name: Build analytics script
+        run: pnpm --filter @jyt/analytics build
+
+      - name: Get version from analytics package.json
+        id: version
+        run: echo "VERSION=$(node -p "require('./apps/analytics/package.json').version")" >> $GITHUB_OUTPUT
+
+      - name: Upload to Cloudflare R2 using AWS CLI
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          # Install AWS CLI
+          pip install awscli
+
+          # Upload analytics.min.js to R2
+          aws s3 cp ./apps/analytics/dist/analytics.min.js \
+            s3://$S3_BUCKET/analytics.min.js \
+            --endpoint-url=$AWS_ENDPOINT_URL \
+            --content-type="application/javascript" \
+            --cache-control="public, max-age=31536000"
+
+          echo "Uploaded analytics.min.js to R2 bucket: $S3_BUCKET"
+
+      - name: Purge Cloudflare Cache
+        env:
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          # Purge specific file from Cloudflare cache
+          RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/purge_cache" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"files":["https://automatic.jaalyantra.com/analytics.min.js"]}')
+
+          # Check if purge was successful
+          if echo "$RESPONSE" | grep -q '"success":true'; then
+            echo "Successfully purged Cloudflare cache"
+          else
+            echo "Cache purge response: $RESPONSE"
+            exit 1
+          fi
+
+      - name: Create deployment summary
+        if: success()
+        run: |
+          echo "## Analytics Script Deployed Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**File:** analytics.min.js" >> $GITHUB_STEP_SUMMARY
+          echo "**CDN URL:** https://automatic.jaalyantra.com/analytics.min.js" >> $GITHUB_STEP_SUMMARY
+          echo "**Bucket:** ${{ secrets.S3_BUCKET }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Completed Steps:" >> $GITHUB_STEP_SUMMARY
+          echo "- Built minified script with Terser" >> $GITHUB_STEP_SUMMARY
+          echo "- Uploaded to Cloudflare R2 via AWS CLI" >> $GITHUB_STEP_SUMMARY
+          echo "- Purged CDN cache" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test the deployment:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "curl -I https://automatic.jaalyantra.com/analytics.min.js" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "## Analytics Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check the logs above for details." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Common Issues:" >> $GITHUB_STEP_SUMMARY
+          echo "- Verify CLOUDFLARE_API_TOKEN has correct permissions" >> $GITHUB_STEP_SUMMARY
+          echo "- Check CLOUDFLARE_ACCOUNT_ID is correct" >> $GITHUB_STEP_SUMMARY
+          echo "- Ensure R2_BUCKET_NAME exists" >> $GITHUB_STEP_SUMMARY
+          echo "- Verify CLOUDFLARE_ZONE_ID is correct" >> $GITHUB_STEP_SUMMARY

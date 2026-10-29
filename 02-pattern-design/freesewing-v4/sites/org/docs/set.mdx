@@ -1,0 +1,13 @@
+---
+title: Measurement Set
+sidebar_class_name: 'tw:hidden'
+---
+
+import { getSearchParam } from '@freesewing/utils'
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { Set } from '@freesewing/react/components/Account'
+import Link from '@docusaurus/Link'
+
+<DocusaurusDoc>
+  <Set Link={Link} id={getSearchParam('id')} publicOnly={true} />
+</DocusaurusDoc>

@@ -1,0 +1,462 @@
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils";
+import {
+  createWorkflow,
+  createStep,
+  StepResponse,
+  WorkflowResponse,
+  when,
+} from "@medusajs/framework/workflows-sdk"
+import { ORDER_INVENTORY_MODULE } from "../../modules/inventory_orders";
+import { LinkDefinition } from "@medusajs/framework/types";
+import { transform } from "@medusajs/framework/workflows-sdk";
+import { InferTypeOf } from "@medusajs/framework/types"
+import InventoryOrder from "../../modules/inventory_orders/models/order";
+import InventoryOrderService from "../../modules/inventory_orders/service";
+import type { InventoryOrderInputStatus } from "../../modules/inventory_orders/constants";
+import {
+  sumLineTotals,
+  buildMaterialLookupByInventoryId,
+  enrichOrderLinesWithMaterial,
+  type CreateOrderLineInput,
+} from "../../modules/inventory_orders/lib/create-helpers";
+import type { Link } from "@medusajs/modules-sdk";
+import { dualWriteUnifiedOrderStep } from "./dual-write-unified-order";
+import { ensureLineInventoryItems } from "./lib/ensure-line-inventory-items";
+export type InventoryOrder = InferTypeOf<typeof InventoryOrder>;
+
+// --- Interfaces for API Input ---
+export interface InventoryOrderLineInput {
+  /**
+   * Optional ONLY because #1662 lets a line name an untracked variant instead
+   * (see `variant_id`). By the time the create step runs it is always set —
+   * `ensureOrderLineInventoryItemsStep` resolves the variant form first.
+   */
+  inventory_item_id?: string;
+  /**
+   * #1662 — a partner's fabric/finished-good variant that core never gave an
+   * inventory item. Tracking is established at OUR end when the order is
+   * placed; the resolved item id replaces this before anything is written.
+   */
+  variant_id?: string;
+  quantity: number;
+  price: number;
+  // Per-unit extra charge on top of `price` (colour/dye job, finishing, …).
+  extra_cost?: number;
+  batch_number?: number | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CreateInventoryOrderInput {
+  quantity: number;
+  total_price: number;
+  currency_code?: string;
+  status: InventoryOrderInputStatus;
+  expected_delivery_date: Date | undefined;
+  order_date: Date | undefined;
+  shipping_address: Record<string, unknown>;
+  stock_location_id: string;
+  from_stock_location_id?: string;
+  metadata?: Record<string, unknown>;
+  order_lines: InventoryOrderLineInput[];
+  is_sample: boolean;
+  // Order-level tax, recorded as an order charge of type "tax" at create.
+  tax_amount?: number;
+  // #2315 — when the supplier is paid. Omitted → the column default, on_receipt.
+  payment_terms?: "on_receipt" | "advance";
+  advance_percent?: number | null;
+}
+
+// --- Inventory Orders Steps ---
+
+export const createInventoryOrderWithLinesStep = createStep(
+  "create-inventory-order-with-lines-step",
+  async (input: CreateInventoryOrderInput, { container }) => {
+    const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE);
+
+    // Prepare order and order lines for the service
+    const { order_lines, ...orderData } = input;
+
+    // Map to service's expected order line shape
+    const orderLinesForService = order_lines.map(line => {
+      // By here every line has a real item id: the variant form is resolved by
+      // ensureOrderLineInventoryItemsStep, which runs first and throws rather
+      // than passing a line through unresolved. Assert it anyway — a line
+      // written with an undefined inventory id would link to nothing and read
+      // as an ordinary order (#1662).
+      if (!line.inventory_item_id) {
+        throw new Error(
+          `Order line has no inventory_item_id${
+            line.variant_id ? ` (variant ${line.variant_id} was not resolved)` : ""
+          }.`
+        );
+      }
+      return {
+      inventory_id: line.inventory_item_id,
+      quantity: line.quantity,
+      price: line.price,
+      extra_cost: line.extra_cost ?? null,
+      batch_number: line.batch_number ?? null,
+      // #1873 — the SECOND place the variant was lost. This mapping builds the
+      // service input field by field, so keeping `variant_id` on the ensured
+      // line upstream achieves nothing unless it is named here too. Null for a
+      // raw-material line, which has no product.
+      variant_id: (line as any).variant_id ?? null,
+      metadata: line.metadata
+    };
+    });
+
+    // #817 S2 — denormalize color identity onto each line from its
+    // inventory_item's linked raw_material, so the order is self-describing.
+    // Resolved here (the step has the container) since the module service's
+    // create transaction can't do a cross-module query.graph. Best-effort: a
+    // lookup failure leaves the fields null rather than failing order creation.
+    let enrichedLines: CreateOrderLineInput[] = orderLinesForService;
+    try {
+      const inventoryItemIds = Array.from(
+        new Set(orderLinesForService.map((l) => l.inventory_id).filter(Boolean))
+      );
+      if (inventoryItemIds.length) {
+        const query: any = container.resolve(ContainerRegistrationKeys.QUERY);
+        const { data: inventoryItems } = await query.graph({
+          entity: "inventory_item",
+          fields: ["id", "raw_materials.id", "raw_materials.color", "raw_materials.name"],
+          filters: { id: inventoryItemIds },
+        });
+        const lookup = buildMaterialLookupByInventoryId(inventoryItems as any);
+        enrichedLines = enrichOrderLinesWithMaterial(orderLinesForService, lookup);
+      }
+    } catch (err) {
+      // Denormalization is best-effort; the module link remains source of truth.
+      console.warn(
+        `[create-inventory-order] color-identity denormalization skipped: ${(err as any)?.message || err}`
+      );
+    }
+
+    // Compute defaults for fields that may be undefined when called from a visual
+    // flow. #778 H9 — `price` is the PER-UNIT price, so the order total is the
+    // sum of price × quantity per line (see sumLineTotals).
+    const totalFromLines = sumLineTotals(orderLinesForService)
+    const quantityFromLines = orderLinesForService.reduce(
+      (sum, l) => sum + (Number(l.quantity) || 0),
+      0
+    )
+
+    const processedOrderData = {
+      ...orderData,
+      // Fall back to computed values if top-level quantity/total_price are missing
+      quantity: orderData.quantity != null ? Number(orderData.quantity) : quantityFromLines,
+      total_price: orderData.total_price != null ? Number(orderData.total_price) : totalFromLines,
+      // Accept metadata as either an object or a JSON string
+      metadata: typeof orderData.metadata === "string"
+        ? (() => { try { return JSON.parse(orderData.metadata as unknown as string) } catch { return {} } })()
+        : (orderData.metadata ?? null),
+    }
+
+    const created = await inventoryOrderService.createInvWithLines(processedOrderData, enrichedLines);
+    // Compensation data so the SAGA can roll the order + lines back if a later
+    // (cross-module) step fails — the module-link writes are NOT part of the
+    // create transaction, so this is how we stay consistent across that boundary
+    // (#778 C3).
+    return new StepResponse(created, {
+      orderId: created?.order?.id,
+      lineIds: (created?.orderLines ?? []).map((l: any) => l.id),
+    });
+  },
+  async (compensationData, { container }) => {
+    if (!compensationData?.orderId) return;
+    const service = container.resolve(ORDER_INVENTORY_MODULE) as InventoryOrderService;
+    try {
+      if (compensationData.lineIds?.length) {
+        await (service as any).deleteOrderLines(compensationData.lineIds);
+      }
+      await service.deleteInventoryOrders(compensationData.orderId);
+    } catch {
+      /* best-effort rollback */
+    }
+  }
+);
+
+
+
+export const linkInventoryItemsWithLinesStep = createStep(
+  "link-inventory-items-with-lines-step",
+  async (
+    input: { order_id: string; line_pairs: { order_line_id: string; inventory_item_id: string }[] },
+    { container }
+  ) => {
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link;
+    // Link each line to its inventory item by the explicit pairing computed at
+    // creation time (#778 C3) — never by re-zipping two arrays by index.
+    const links: LinkDefinition[] = (input.line_pairs ?? []).map(({ order_line_id, inventory_item_id }) => ({
+      [ORDER_INVENTORY_MODULE]: {
+        inventory_order_line_id: order_line_id,
+      },
+      [Modules.INVENTORY]: {
+        inventory_item_id,
+      },
+      data: {
+        order_line_id,
+        inventory_item_id,
+      },
+    }));
+    // A sample order can have no lines at all, so there may be nothing to
+    // link. Mirrors the guard in `linkVariantsWithLinesStep` below — an empty
+    // `create` call is not worth making.
+    if (!links.length) {
+      return new StepResponse([], []);
+    }
+    await remoteLink.create(links);
+    return new StepResponse(links, links);
+  },
+  async (links, { container }) => {
+    if (!links?.length) return;
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link;
+    try {
+      await remoteLink.dismiss(links as any);
+    } catch {
+      /* best-effort link cleanup */
+    }
+  }
+);
+
+/**
+ * #1873 — link each line to the product variant it was ordered as.
+ *
+ * Separate from `linkInventoryItemsWithLinesStep` rather than folded into it:
+ * the two links answer different questions (what to stock vs what it was for),
+ * and only some lines have a variant at all. Pairs come from the create step,
+ * never from re-zipping arrays by index (#778 C3).
+ */
+export const linkVariantsWithLinesStep = createStep(
+  "link-variants-with-lines-step",
+  async (
+    input: { order_id: string; variant_pairs: { order_line_id: string; variant_id: string }[] },
+    { container }
+  ) => {
+    const pairs = input.variant_pairs ?? [];
+    if (!pairs.length) {
+      // No line named a variant — a pure raw-material order. Nothing to link,
+      // and an empty `create` call is not worth making.
+      return new StepResponse([], []);
+    }
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link;
+    const links: LinkDefinition[] = pairs.map(({ order_line_id, variant_id }) => ({
+      [ORDER_INVENTORY_MODULE]: {
+        inventory_order_line_id: order_line_id,
+      },
+      [Modules.PRODUCT]: {
+        product_variant_id: variant_id,
+      },
+      data: {
+        order_line_id,
+        variant_id,
+      },
+    }));
+    await remoteLink.create(links);
+    return new StepResponse(links, links);
+  },
+  async (links, { container }) => {
+    if (!links?.length) return;
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link;
+    try {
+      await remoteLink.dismiss(links as any);
+    } catch {
+      /* best-effort link cleanup */
+    }
+  }
+);
+
+export const linkInventoryOrderWithStockLocation = createStep(
+  "link-inventory-order-with-stock-location",
+  async (input: { order_id: string; stock_location_id: string }, { container }) => {
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link;
+    const links: LinkDefinition[] = [];
+    links.push({
+      [ORDER_INVENTORY_MODULE]: {
+        inventory_orders_id: input.order_id,
+      },
+      [Modules.STOCK_LOCATION]: {
+        stock_location_id: input.stock_location_id,
+        
+      },
+      data: {
+        order_id: input.order_id,
+        stock_location_id: input.stock_location_id,
+        // toLocation link
+        from_location: false,
+        to_location: true,
+      },
+    });
+    await remoteLink.create(links);
+    return new StepResponse(links);
+  }
+)
+
+
+export const linkInventoryOrderWithFromStockLocation = createStep(
+  "link-inventory-order-with-from-stock-location",
+  async (
+    input: { order_id: string; from_stock_location_id: string },
+    { container }
+  ) => {
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link;
+    const links: LinkDefinition[] = [];
+    links.push({
+      [ORDER_INVENTORY_MODULE]: {
+        inventory_orders_id: input.order_id,
+      },
+      [Modules.STOCK_LOCATION]: {
+        stock_location_id: input.from_stock_location_id,
+      },
+      data: {
+        order_id: input.order_id,
+        stock_location_id: input.from_stock_location_id,
+        // fromLocation link
+        from_location: true,
+        to_location: false,
+      },
+    });
+    await remoteLink.create(links);
+    return new StepResponse(links);
+  }
+)
+
+
+
+
+
+/**
+ * #1662 — turn any line that names an untracked variant into one that names a
+ * real inventory item, creating the item at our end.
+ *
+ * Runs BEFORE the order is written so no line can ever be persisted pointing at
+ * a variant that has nothing to stock. Not compensated on purpose — see
+ * `ensureLineInventoryItems`.
+ */
+export const ensureOrderLineInventoryItemsStep = createStep(
+  "ensure-order-line-inventory-items-step",
+  async (input: CreateInventoryOrderInput, { container }) => {
+    const { lines, enabled_variant_ids } = await ensureLineInventoryItems(
+      container,
+      input.order_lines ?? [],
+      {
+        stock_location_id:
+          (input as any).to_stock_location_id || input.stock_location_id,
+      }
+    );
+
+    return new StepResponse({
+      // #1873 — `variant_id` is KEPT. It used to be destructured out here, which
+      // is where the association died: the line was written with a real item id
+      // and no record of the variant it was ordered as, so the order could never
+      // say which product it was for. It is not a line column and cannot become
+      // one by accident — `buildOrderLinePayloads` is an allowlist — it rides
+      // along only far enough to build the line↔variant link.
+      order_lines: lines.map(({ enabled_variant_id, actions, ...line }) => ({
+        ...line,
+        inventory_item_id: line.inventory_item_id,
+      })),
+      enabled_variant_ids,
+    });
+  }
+);
+
+export const createInventoryOrderWorkflow = createWorkflow(
+  {
+    name: "create-inventory-order-workflow",
+    store: true,
+  },
+  (input: CreateInventoryOrderInput) => {
+    // (validateInventoryStep removed — it ran independently of this step so Medusa
+    //  could execute the transform before validation completed, causing crashes.
+    //  Invalid inventory items will be caught by linkInventoryItemsWithLinesStep.)
+
+    // Step 0 (#1662): a line may name an untracked partner variant. Establish
+    // its inventory item first, so what gets written is always a real item id.
+    const ensured = ensureOrderLineInventoryItemsStep(input);
+
+    const createInput = transform({ input, ensured }, ({ input, ensured }) => ({
+      ...input,
+      order_lines: ensured.order_lines,
+    }));
+
+    // Step 1: Create inventory order and lines
+    const created = createInventoryOrderWithLinesStep(createInput as any);
+
+    // Step 2: Use transform to shape input for linking step
+    const linkInput = transform(
+      { created, input },
+      ({ created, input }) => {
+        if (!created?.order) {
+          throw new Error(
+            "createInventoryOrderWithLinesStep did not return an order. " +
+            "Check that all order_lines have valid inventory_item_id values and positive quantities."
+          )
+        }
+        return {
+          order_id: created.order.id,
+          // Explicit line→item pairing from the create step (#778 C3) — not a
+          // positional zip of separately-derived id arrays.
+          line_pairs: created.lineItemPairs ?? [],
+          // #1873 — same provenance, for the line→variant link. Empty unless a
+          // line was ordered by naming a variant.
+          variant_pairs: created.lineVariantPairs ?? [],
+          order: created.order,
+          orderLines: created.orderLines,
+        }
+      }
+    );
+    const links = linkInventoryItemsWithLinesStep(linkInput);
+
+    // #1873 — record WHICH product variant each line was ordered as, alongside
+    // the inventory item it resolved to.
+    linkVariantsWithLinesStep({
+      order_id: linkInput.order_id,
+      variant_pairs: linkInput.variant_pairs,
+    });
+
+    // Determine the to-location id from alias or stock_location_id
+    const toLocationId = transform({ input }, ({ input }) => (
+      (input as any).to_stock_location_id || input.stock_location_id
+    ));
+
+    // Always link TO location (required by validator)
+    linkInventoryOrderWithStockLocation({
+      order_id: linkInput.order_id,
+      stock_location_id: toLocationId as any,
+    });
+
+    // Conditionally link FROM location using when()
+    when(input, (i) => Boolean(i.from_stock_location_id)).then(() => {
+      linkInventoryOrderWithFromStockLocation({
+        order_id: linkInput.order_id,
+        from_stock_location_id: input.from_stock_location_id as string,
+      });
+    });
+
+    // #342 T2: best-effort projection onto a core order (kind=inventory,
+    // discriminated by the order↔inventory_order link since Chunk 6). The step
+    // swallows its own errors — a dual-write failure must never fail the legacy
+    // create.
+    dualWriteUnifiedOrderStep({
+      order: linkInput.order,
+      orderLines: linkInput.orderLines,
+      // The RESOLVED input: its lines carry real inventory item ids, so the
+      // projected core order names the same items the legacy one does.
+      input: createInput as any,
+    });
+
+    // Step 3: Use transform to shape the final response
+    const response = transform(
+      { links, linkInput },
+      ({ links, linkInput }) => ({
+        order: linkInput.order,
+        orderLines: linkInput.orderLines,
+        links,
+      })
+    );
+
+    return new WorkflowResponse(response);
+  }
+);
+

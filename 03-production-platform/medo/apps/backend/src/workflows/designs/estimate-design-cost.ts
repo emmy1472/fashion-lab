@@ -1,0 +1,1185 @@
+import {
+  createWorkflow,
+  createStep,
+  StepResponse,
+  WorkflowResponse,
+} from "@medusajs/framework/workflows-sdk";
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { loadCostConfig } from "../../modules/platform-cost-config/read-config";
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+/**
+ * How much the returned figure is worth believing.
+ *
+ * 🔴 `none` is not a weaker estimate — it is the ABSENCE of one, and it is the
+ * only value for which `total_estimated` is null. The estimator used to report
+ * "I found nothing" as `total_estimated: 0` with `confidence: "estimated"`, as
+ * though it had looked and got an answer. `0` is not a small number here; it is
+ * a claim that the work is free, and every downstream reader believed it —
+ * including the storefront checkout, which turned it into a customer-facing
+ * price of zero. #1564
+ */
+type ConfidenceLevel = "exact" | "estimated" | "guesstimate" | "none";
+
+/**
+ * Which rung of the production-cost waterfall produced the figure.
+ *
+ * Surfaced so a reader can tell a settled price from a borrowed one without
+ * re-deriving the precedence. `sample_run` in particular is a real partner rate
+ * for a PROTOTYPE, which usually costs more per unit than a production batch —
+ * useful, but never to be presented as the production price. #1568
+ */
+export type ProductionCostSource =
+  | "partner_entered"
+  | "actual_run"
+  /**
+   * A sample run's MEASURED consumption, stored on the design as
+   * `cost_breakdown.source === "sample_consumption"`. Distinct from
+   * `sample_run` and genuinely strong: it is what the sample actually used,
+   * not what the partner quoted for it — which is why that path alone keeps
+   * confidence "exact".
+   */
+  | "sample_consumption"
+  | "sample_run"
+  | "admin_estimate"
+  | "similar_designs"
+  /**
+   * Comparable HISTORY priced this design because nothing else could: what
+   * designs of this type have actually settled at, and what products
+   * previously created from designs actually sell for.
+   *
+   * 🔴 Opt-in per caller (`allow_historical_basis`), and never a settled
+   * price. `similar_designs` above is deliberately NOT a pricing signal — see
+   * `hasPricingSignal` — because pricing one design off another's number is
+   * the silent substitution #1554 was. This rung is that same evidence used
+   * DELIBERATELY, by a caller that has no bill of materials to work from and
+   * has asked for a starting figure anyway, and it is labelled and capped at
+   * "guesstimate" exactly like the sample-run fallback (#1568).
+   *
+   * The storefront checkout and draft-order paths do not pass the flag, so
+   * their behaviour is unchanged (#1564).
+   */
+  | "historical_comparables"
+  | "default_percent";
+
+export type MaterialCostItem = {
+  inventory_item_id?: string;
+  component_design_id?: string;
+  name: string;
+  cost: number;
+  quantity: number;
+  cost_source: "order_history" | "unit_cost" | "component_design" | "consumption_log" | "estimated" | "default";
+  /** Per-material commission (line cost × platform_fee_percent). Set when a fee applies. */
+  commission?: number;
+};
+
+/**
+ * One piece of evidence about what this KIND of work has cost before.
+ *
+ * `unit_amount` is always per finished unit, in the design's cost currency —
+ * the caller normalises, because a total divided by the wrong quantity is the
+ * #1554 family and must not be re-derived in three places.
+ */
+export type HistoricalComparable = {
+  /** Design id or product id, so a reader can go and look at the evidence. */
+  id: string;
+  name: string | null;
+  unit_amount: number;
+  source: "design_estimate" | "product_price";
+};
+
+type EstimateCostInput = {
+  design_id: string;
+  inventory_item_ids?: string[];
+  /**
+   * Partner-entered production cost per finished unit. When provided it is the
+   * authoritative production figure — it overrides every derived estimate
+   * (including the DEFAULT_PRODUCTION_PERCENT fallback). Partner recalc route.
+   */
+  production_cost_override?: number | null;
+  /**
+   * JYT platform commission as a percentage of material cost. Opt-in per
+   * caller — defaults to 0 so store/admin/draft-order flows are unaffected;
+   * only the partner recalc route passes DEFAULT_PLATFORM_FEE_PERCENT.
+   */
+  platform_fee_percent?: number;
+  /**
+   * Fallback per-unit cost for a material with no resolved cost. Opt-in per
+   * caller — defaults to 0 (off) so store/admin/draft-order flows are
+   * unaffected; the partner recalc route passes DEFAULT_MATERIAL_COST.
+   */
+  default_material_cost?: number;
+  /**
+   * Let comparable history price the design when nothing else can. Opt-in per
+   * caller — defaults to false, so every existing caller is unaffected. The
+   * quote wizard passes it, because a custom design whose production run is in
+   * the future has no run, no sample and often no BOM, and "no answer" is not
+   * a useful thing to show a partner about to send a quote.
+   */
+  allow_historical_basis?: boolean;
+};
+
+export type EstimateCostOutput = {
+  design_id: string;
+  material_cost: number;
+  production_cost: number;
+  /** JYT platform commission (materialCost × platform_fee_percent). 0 when opted out. */
+  platform_fee: number;
+  /**
+   * What one finished unit is estimated to cost — or **null** when there was
+   * nothing to estimate from.
+   *
+   * 🔴 Nullable on purpose, so that "we could not price this" cannot be spelled
+   * the same way as "this is free". Every consumer must branch: a pricing path
+   * (checkout, draft order) has to REFUSE, and a persisting path has to skip
+   * the write rather than store a zero. #1564
+   */
+  total_estimated: number | null;
+  confidence: ConfidenceLevel;
+  breakdown: {
+    materials: MaterialCostItem[];
+    production_percent: number;
+    platform_fee_percent: number;
+    /** Where the production half of the total came from. #1568 */
+    production_cost_source: ProductionCostSource;
+    /**
+     * The comparable work the figure was derived from. Present only when
+     * `production_cost_source === "historical_comparables"`, so its presence is
+     * itself the signal that nothing about THIS design priced it.
+     */
+    historical?: HistoricalComparable[];
+  };
+  similar_designs?: Array<{
+    id: string;
+    name: string;
+    estimated_cost: number;
+  }>;
+};
+
+// Default production overhead as percentage of material cost
+const DEFAULT_PRODUCTION_PERCENT = 30;
+
+// Default JYT platform commission on partner production work, as a percentage
+// of material cost. Only applied when a caller opts in (partner recalc route).
+export const DEFAULT_PLATFORM_FEE_PERCENT = 10;
+
+// Fallback per-material cost (INR) when a BOM material has no resolved price
+// (no order history, no unit_cost, no consumption log). Only applied when a
+// caller opts in (partner recalc route) via default_material_cost.
+export const DEFAULT_MATERIAL_COST = 600;
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/** PURE: the middle value, averaging the two middles for an even count. */
+export function medianOf(values: number[]): number {
+  const sorted = (values ?? [])
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+// ─── Pure functions (exported for unit testing) ───────────────────────────────
+
+/**
+ * Resolve the cost and source for a single inventory item given its order history.
+ */
+export function resolveItemCost(
+  item: { id: string; title?: string; sku?: string; unit_cost?: number | null },
+  orderLineLinks: Array<{
+    inventory_order_line?: {
+      price?: number;
+      inventory_orders?: { order_date?: string; status?: string };
+    };
+  }>
+): Pick<MaterialCostItem, "cost" | "cost_source"> {
+  let latestPrice: number | null = null;
+  let latestDate: Date | null = null;
+
+  for (const link of orderLineLinks) {
+    const orderLine = link.inventory_order_line;
+    if (!orderLine) continue;
+    const order = orderLine.inventory_orders;
+    if (!order || order.status === "Cancelled") continue;
+    const orderDate = order.order_date ? new Date(order.order_date) : new Date(0);
+    if (!latestDate || orderDate > latestDate) {
+      latestDate = orderDate;
+      latestPrice = Number(orderLine.price) || 0;
+    }
+  }
+
+  if (latestPrice !== null && latestPrice > 0) {
+    return { cost: latestPrice, cost_source: "order_history" };
+  }
+  if (item.unit_cost != null && Number(item.unit_cost) > 0) {
+    return { cost: Number(item.unit_cost), cost_source: "unit_cost" };
+  }
+  return { cost: 0, cost_source: "estimated" };
+}
+
+/**
+ * Core cost calculation — pure function with no I/O.
+ * Exported for unit testing.
+ */
+export function computeCostBreakdown(input: {
+  designId: string;
+  adminEstimate: number | null;
+  materials: MaterialCostItem[];
+  hasExactMaterialCosts: boolean;
+  similarDesigns: Array<{ id: string; name: string; estimated_cost: number }>;
+  /**
+   * Per-unit production cost taken from the latest completed production run
+   * (the partner's actual submitted cost). When present it wins over any
+   * derived figure — an actual cost is more authoritative than an estimate
+   * residual. #456
+   */
+  actualProductionCost?: number | null;
+  /**
+   * Whether `actualProductionCost` came from a SAMPLE run rather than a
+   * production one. A sample is used only when no production run priced the
+   * design, and it caps confidence at "guesstimate" — see #1568.
+   */
+  actualProductionCostFromSample?: boolean;
+  /**
+   * Partner-entered production cost per finished unit. Highest precedence — a
+   * value the partner typed is authoritative, so it beats even a completed
+   * run's actual cost. A value of 0 is respected (explicitly "no production
+   * cost"); only null/undefined falls through to the derived waterfall.
+   */
+  productionCostOverride?: number | null;
+  /** JYT platform commission as a percentage of material cost. Default 0. */
+  platformFeePercent?: number;
+  /** Fallback per-unit cost for a material with no resolved cost. Default 0 (off). */
+  defaultMaterialCost?: number;
+  /**
+   * Production overhead as a percentage of material cost, used by the rungs of
+   * the waterfall that have no better figure.
+   *
+   * #1939 — was the compiled `DEFAULT_PRODUCTION_PERCENT` in four places.
+   * Passed in so the platform's economic policy can come from the
+   * effective-dated config table; the constant remains the fallback, so a
+   * platform with no policy row prices exactly as before.
+   */
+  productionOverheadPercent?: number;
+  /**
+   * What comparable work has actually cost — settled costs of designs of this
+   * type, and prices of products previously created from designs. Gathered
+   * regardless; it only PRICES anything under `allowHistoricalBasis`.
+   */
+  historical?: HistoricalComparable[];
+  /** Opt-in: let `historical` produce a figure when nothing else can. */
+  allowHistoricalBasis?: boolean;
+}): EstimateCostOutput {
+  const { adminEstimate, similarDesigns } = input;
+  const platformFeePercent = input.platformFeePercent ?? 0;
+  const defaultMaterialCost = input.defaultMaterialCost ?? 0;
+  const historical = input.historical ?? [];
+  const allowHistoricalBasis = !!input.allowHistoricalBasis;
+
+  // Resolve each BOM material: fall back to defaultMaterialCost when it has no
+  // resolved price, and attach the per-material commission (its share of the
+  // platform fee). The resolved list — not the raw input — drives material cost
+  // and the persisted breakdown.
+  const materials: MaterialCostItem[] = input.materials.map((m) => {
+    const useDefault = (!m.cost || m.cost <= 0) && defaultMaterialCost > 0;
+    const cost = useDefault ? defaultMaterialCost : m.cost;
+    const cost_source = useDefault ? "default" : m.cost_source;
+    const commission = round2(cost * m.quantity * (platformFeePercent / 100));
+    return { ...m, cost, cost_source, commission };
+  });
+  const materialCost = materials.reduce((sum, m) => sum + m.cost * m.quantity, 0);
+
+  const overheadPercent =
+    Number.isFinite(Number(input.productionOverheadPercent)) &&
+    Number(input.productionOverheadPercent) >= 0
+      ? Number(input.productionOverheadPercent)
+      : DEFAULT_PRODUCTION_PERCENT;
+
+  let productionCost: number;
+  let productionPercent: number;
+  let productionIsEstimated = true;
+  /** Which rung of the waterfall below actually set `productionCost`. */
+  let productionSource: ProductionCostSource = "default_percent";
+
+  /**
+   * The material half of a WHOLE-UNIT figure that did not come from the BOM.
+   *
+   * 🔴 This exists because the total was silently losing it. Some rungs below
+   * know a whole per-unit cost and split it into a material share and a
+   * production share for the breakdown — but the total was assembled as
+   * `materialCost + productionCost`, and `materialCost` is the sum of the BOM
+   * LINES, which is 0 when there is no bill of materials. So the material share
+   * was computed, shown, and then dropped out of the number that gets
+   * persisted, quoted and charged: an admin estimate of 1000 on a design with
+   * no BOM came back as `total_estimated: 230.77`, discarding 77% of the figure
+   * a human had typed in. A design whose production run is in the future is
+   * exactly the no-BOM case, so this had to be fixed before that case could be
+   * priced at all.
+   *
+   * It is folded into `material_cost` on the way out rather than kept separate,
+   * so that `material_cost + production_cost + platform_fee === total_estimated`
+   * stays true — the breakdown's empty `materials` list is what tells a reader
+   * the share was implied rather than counted.
+   */
+  let impliedMaterialCost = 0;
+
+  if (input.productionCostOverride != null && input.productionCostOverride >= 0) {
+    // Partner typed their production cost — authoritative, wins over everything.
+    productionCost = input.productionCostOverride;
+    productionPercent = materialCost > 0 ? (productionCost / materialCost) * 100 : 0;
+    productionSource = "partner_entered";
+    productionIsEstimated = false;
+  } else if (input.actualProductionCost != null && input.actualProductionCost > 0) {
+    // A real, partner-submitted production cost from a completed run wins.
+    productionCost = input.actualProductionCost;
+    productionPercent = materialCost > 0 ? (productionCost / materialCost) * 100 : 0;
+    productionSource = input.actualProductionCostFromSample
+      ? "sample_run"
+      : "actual_run";
+    // ⚠️ A sample-sourced figure is still an ESTIMATE. Marking it settled would
+    // let confidence reach "exact" on the strength of a prototype's price.
+    productionIsEstimated = !!input.actualProductionCostFromSample;
+  } else if (adminEstimate != null && adminEstimate > 0 && materialCost > 0) {
+    productionCost = Math.max(0, adminEstimate - materialCost);
+    productionPercent = (productionCost / materialCost) * 100;
+    productionSource = "admin_estimate";
+    productionIsEstimated = false; // admin set a concrete estimate
+  } else if (adminEstimate != null && adminEstimate > 0 && materialCost === 0) {
+    const materialShare = adminEstimate / (1 + overheadPercent / 100);
+    impliedMaterialCost = materialShare;
+    productionCost = adminEstimate - materialShare;
+    productionPercent = overheadPercent;
+    productionSource = "admin_estimate";
+  } else if (similarDesigns.length > 0 && materialCost > 0) {
+    const avgSimilarCost =
+      similarDesigns.reduce((s, d) => s + d.estimated_cost, 0) / similarDesigns.length;
+    const impliedProduction = Math.max(avgSimilarCost - materialCost, materialCost * 0.1);
+    productionCost = Math.min(impliedProduction, materialCost * 0.6);
+    productionPercent = (productionCost / materialCost) * 100;
+    productionSource = "similar_designs";
+  } else if (allowHistoricalBasis && historical.length > 0) {
+    /**
+     * Nothing priced this design, and the caller asked for history anyway.
+     *
+     * The MEDIAN, not the mean: one archive piece or one sample-priced outlier
+     * in a handful of comparables drags an average somewhere no real garment
+     * sits, and this figure is the starting point for a number a buyer signs.
+     *
+     * When there IS a bill of materials, history only supplies the production
+     * half — the materials are counted, not guessed. With no BOM the comparable
+     * is a whole-unit cost, so it is split on the same 30% rule of thumb the
+     * admin-estimate rung uses, with the material share carried in
+     * `impliedMaterialCost` so the total still equals the figure.
+     */
+    const basis = medianOf(historical.map((h) => h.unit_amount));
+    if (materialCost > 0) {
+      productionCost = Math.max(basis - materialCost, materialCost * 0.1);
+      productionPercent = (productionCost / materialCost) * 100;
+    } else {
+      const materialShare = basis / (1 + overheadPercent / 100);
+      impliedMaterialCost = materialShare;
+      productionCost = basis - materialShare;
+      productionPercent = overheadPercent;
+    }
+    productionSource = "historical_comparables";
+  } else {
+    productionCost = materialCost * (overheadPercent / 100);
+    productionPercent = overheadPercent;
+  }
+
+  // JYT platform commission — the sum of the per-material commissions (each is
+  // that line's share of the fee), which equals materialCost × fee%.
+  const platformFee = round2(
+    materials.reduce((sum, m) => sum + (m.commission ?? 0), 0)
+  );
+  const effectiveMaterialCost = materialCost + impliedMaterialCost;
+  const totalEstimated = effectiveMaterialCost + productionCost + platformFee;
+
+  const hasAnyRealData = materials.some(
+    (m) =>
+      m.cost_source === "order_history" ||
+      m.cost_source === "unit_cost" ||
+      m.cost_source === "component_design" ||
+      m.cost_source === "consumption_log"
+  );
+
+  /**
+   * Did ANY input actually price something?
+   *
+   * 🔴 Note what is deliberately absent from this list: `similarDesigns`.
+   * Comparable designs are a hint for a human, not a price for this one —
+   * pricing from them is the silent substitution that #1554 was. They are still
+   * returned below so the caller can show them; they just do not manufacture a
+   * number. Before this, their mere existence flipped confidence to "estimated"
+   * while the total stayed 0, which is how prod ended up with designs stating
+   * that they cost nothing.
+   */
+  /**
+   * ⚠️ The fallback counts only where it was actually APPLIED, not merely
+   * offered. The partner recalc route always passes `default_material_cost`, so
+   * testing `defaultMaterialCost > 0` would call every partner estimate
+   * "priced" — including one for a design with an empty bill of materials,
+   * where the fallback has no line to attach to and the total is still 0.
+   */
+  const usedDefaultMaterialCost = materials.some(
+    (m) => m.cost_source === "default"
+  );
+
+  /**
+   * ⚠️ `allowHistoricalBasis` is required, not merely `historical.length`.
+   * Comparables are gathered for every caller so the breakdown can show them;
+   * only a caller that has explicitly asked to be priced from history gets a
+   * NUMBER out of them. Without that gate this would quietly re-price the
+   * storefront checkout off other designs — which is #1554 wearing #1564's
+   * clothes.
+   */
+  const hasHistoricalSignal = allowHistoricalBasis && historical.length > 0;
+
+  const hasPricingSignal =
+    hasAnyRealData ||
+    usedDefaultMaterialCost ||
+    adminEstimate != null ||
+    input.actualProductionCost != null ||
+    input.productionCostOverride != null ||
+    hasHistoricalSignal;
+
+  let confidence: ConfidenceLevel;
+  if (!hasPricingSignal) {
+    confidence = "none";
+  } else if (productionSource === "historical_comparables") {
+    /**
+     * Capped, whatever the materials look like — the same treatment a sample
+     * rate gets (#1568), and for the same reason. This is what OTHER work cost;
+     * nothing here has been priced by anyone who looked at this design.
+     */
+    confidence = "guesstimate";
+  } else if (productionSource === "sample_run") {
+    /**
+     * 🔴 Capped, whatever the materials look like.
+     *
+     * A sample rate is a real number a partner charged — for ONE PROTOTYPE,
+     * which usually costs more per unit than a production batch. Exact material
+     * costs beside it would otherwise carry the whole estimate to "exact", and
+     * this figure reaches quotes and the storefront. It is the best guess
+     * available, and it must present as a guess. #1568
+     */
+    confidence = "guesstimate";
+  } else if (input.hasExactMaterialCosts && !productionIsEstimated) {
+    confidence = "exact";
+  } else if (hasAnyRealData || similarDesigns.length > 0 || adminEstimate != null) {
+    confidence = "estimated";
+  } else {
+    confidence = "guesstimate";
+  }
+
+  return {
+    design_id: input.designId,
+    material_cost: round2(effectiveMaterialCost),
+    production_cost: round2(productionCost),
+    platform_fee: platformFee,
+    /**
+     * null, not 0, when nothing priced this. The component figures above stay
+     * numeric — they are genuine sums of nothing — but the field that gets
+     * persisted, quoted and charged has to be able to say "no answer".
+     */
+    total_estimated: hasPricingSignal ? round2(totalEstimated) : null,
+    confidence,
+    breakdown: {
+      materials,
+      production_percent: Math.round(productionPercent),
+      platform_fee_percent: platformFeePercent,
+      production_cost_source: productionSource,
+      /** The evidence, when it is what produced the figure. */
+      historical: productionSource === "historical_comparables" ? historical : undefined,
+    },
+    similar_designs: similarDesigns.length > 0 ? similarDesigns : undefined,
+  };
+}
+
+// ─── Step 1: Get design, linked inventory items, and components ───────────────
+
+const getDesignWithInventoryStep = createStep(
+  "get-design-with-inventory-step",
+  async (input: EstimateCostInput, { container }) => {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY) as any;
+
+    const { data: designs } = await query.graph({
+      entity: "design",
+      filters: { id: input.design_id },
+      fields: [
+        "id",
+        "name",
+        "design_type",
+        "estimated_cost",
+        "material_cost",
+        "production_cost",
+        // Needed to currency-match comparable variant prices — a median over
+        // mixed currencies is not a number.
+        "cost_currency",
+        "cost_breakdown",
+        "tags",
+        "inventory_items.*",
+        // Pull component links with the sub-design's cost
+        "components.id",
+        "components.quantity",
+        "components.role",
+        "components.component_design.id",
+        "components.component_design.name",
+        "components.component_design.estimated_cost",
+      ],
+    });
+
+    if (!designs || designs.length === 0) {
+      throw new Error(`Design not found: ${input.design_id}`);
+    }
+
+    const design = designs[0];
+
+    // Resolve inventory item IDs: explicit override → linked items
+    let inventoryItemIds = input.inventory_item_ids
+      ? [...input.inventory_item_ids]
+      : (design.inventory_items || []).map((item: any) => item.id);
+
+    // Build quantity map: start with planned quantities, then override
+    // with actual consumed quantities from committed consumption logs.
+    // Actual usage from production always trumps planned estimates.
+    const plannedQuantityMap: Record<string, number> = {};
+    try {
+      const { data: designInventoryLinks } = await query.graph({
+        entity: "design_inventory_item",
+        filters: { design_id: input.design_id },
+        fields: ["inventory_item_id", "planned_quantity"],
+      });
+      for (const link of designInventoryLinks || []) {
+        if (link.inventory_item_id && link.planned_quantity != null) {
+          plannedQuantityMap[link.inventory_item_id] = Number(link.planned_quantity) || 1;
+        }
+      }
+    } catch {
+      // Link table may not exist yet — fall back to quantity 1 per item
+    }
+
+    // Override with actual consumption from committed logs
+    try {
+      const consumptionLogService = container.resolve("consumption_log") as any;
+      const [committedLogs] = await consumptionLogService.listAndCountConsumptionLogs(
+        { design_id: input.design_id, is_committed: true },
+        { take: 500 }
+      );
+      if (committedLogs?.length) {
+        // Sum consumed quantity per inventory item across all committed logs
+        const actualQuantityMap: Record<string, number> = {};
+        for (const log of committedLogs) {
+          if (!log.inventory_item_id) continue;
+          actualQuantityMap[log.inventory_item_id] =
+            (actualQuantityMap[log.inventory_item_id] || 0) + Number(log.quantity);
+        }
+        // Override planned with actual where we have consumption data
+        for (const [itemId, qty] of Object.entries(actualQuantityMap)) {
+          if (qty > 0) {
+            plannedQuantityMap[itemId] = qty;
+          }
+        }
+        // Also add any consumed items not in the planned list
+        for (const itemId of Object.keys(actualQuantityMap)) {
+          if (!inventoryItemIds.includes(itemId) && actualQuantityMap[itemId] > 0) {
+            inventoryItemIds.push(itemId);
+          }
+        }
+      }
+    } catch {
+      // Non-fatal — consumption log module may not be available
+    }
+
+    // Collect component designs with their costs
+    const componentItems: Array<{
+      component_design_id: string;
+      name: string;
+      estimated_cost: number | null;
+      quantity: number;
+    }> = (design.components || []).map((link: any) => ({
+      component_design_id: link.component_design?.id ?? link.component_design_id,
+      name: link.component_design?.name ?? link.component_design_id,
+      estimated_cost: link.component_design?.estimated_cost != null
+        ? Number(link.component_design.estimated_cost)
+        : null,
+      quantity: link.quantity ?? 1,
+    }));
+
+    return new StepResponse({
+      design,
+      inventoryItemIds,
+      plannedQuantityMap,
+      componentItems,
+    });
+  }
+);
+
+// ─── Step 2: Get material costs from inventory order history + component costs ─
+
+const getMaterialCostsStep = createStep(
+  "get-material-costs-step",
+  async (
+    input: {
+      design_id: string;
+      inventoryItemIds: string[];
+      plannedQuantityMap: Record<string, number>;
+      componentItems: Array<{
+        component_design_id: string;
+        name: string;
+        estimated_cost: number | null;
+        quantity: number;
+      }>;
+    },
+    { container }
+  ) => {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY) as any;
+    const consumptionLogService = container.resolve("consumption_log") as any;
+    const materials: MaterialCostItem[] = [];
+    let allExact = true;
+
+    // ── Inventory item costs ──────────────────────────────────────────────────
+    if (input.inventoryItemIds && input.inventoryItemIds.length > 0) {
+      const { data: inventoryItems } = await query.graph({
+        entity: "inventory_item",
+        filters: { id: input.inventoryItemIds },
+        fields: ["id", "title", "sku", "unit_cost"],
+      });
+
+      for (const item of inventoryItems || []) {
+        // Find most recent non-cancelled order line price
+        let latestPrice: number | null = null;
+        let latestDate: Date | null = null;
+
+        const { data: orderLineLinks } = await query.graph({
+          entity: "inventory_order_line_inventory_item",
+          filters: { inventory_item_id: item.id },
+          fields: [
+            "inventory_order_line.id",
+            "inventory_order_line.price",
+            "inventory_order_line.inventory_orders.order_date",
+            "inventory_order_line.inventory_orders.status",
+          ],
+        });
+
+        for (const link of orderLineLinks || []) {
+          const orderLine = (link as any).inventory_order_line;
+          if (!orderLine) continue;
+          const order = orderLine.inventory_orders;
+          if (!order || order.status === "Cancelled") continue;
+          const orderDate = order.order_date ? new Date(order.order_date) : new Date(0);
+          if (!latestDate || orderDate > latestDate) {
+            latestDate = orderDate;
+            latestPrice = Number(orderLine.price) || 0;
+          }
+        }
+
+        let cost: number;
+        let cost_source: MaterialCostItem["cost_source"];
+        if (latestPrice !== null && latestPrice > 0) {
+          cost = latestPrice;
+          cost_source = "order_history";
+        } else if (item.unit_cost != null && Number(item.unit_cost) > 0) {
+          cost = Number(item.unit_cost);
+          cost_source = "unit_cost";
+          allExact = false;
+        } else {
+          // Fallback chain: raw material unit_cost → consumption logs → estimated (0)
+          let resolvedCost = 0;
+          let resolvedSource: MaterialCostItem["cost_source"] = "estimated";
+
+          // Check linked raw material's unit_cost
+          try {
+            const { data: rmLinks } = await query.graph({
+              entity: "inventory_item_raw_materials",
+              filters: { inventory_item_id: item.id },
+              fields: ["raw_materials.unit_cost"],
+            });
+            const rmCost = Number(rmLinks?.[0]?.raw_materials?.unit_cost) || 0;
+            if (rmCost > 0) {
+              resolvedCost = rmCost;
+              resolvedSource = "unit_cost";
+            }
+          } catch {
+            // Link may not exist
+          }
+
+          // If still no cost, check committed consumption logs for this design + item
+          if (resolvedCost <= 0) {
+            try {
+              const [logs] = await consumptionLogService.listAndCountConsumptionLogs(
+                {
+                  design_id: input.design_id,
+                  inventory_item_id: item.id,
+                  is_committed: true,
+                },
+                { take: 1, order: { consumed_at: "DESC" } }
+              );
+              const latestLog = logs?.[0];
+              if (latestLog?.unit_cost && Number(latestLog.unit_cost) > 0) {
+                resolvedCost = Number(latestLog.unit_cost);
+                resolvedSource = "consumption_log";
+              }
+            } catch {
+              // Non-fatal
+            }
+          }
+
+          cost = resolvedCost;
+          cost_source = resolvedSource;
+          allExact = false;
+        }
+
+        const quantity = input.plannedQuantityMap[item.id] ?? 1;
+        materials.push({
+          inventory_item_id: item.id,
+          name: item.title || item.sku || item.id,
+          cost,
+          quantity,
+          cost_source,
+        });
+      }
+    }
+
+    // ── Component design costs ────────────────────────────────────────────────
+    // Each bundled sub-design contributes its estimated_cost × quantity
+    for (const comp of input.componentItems || []) {
+      if (comp.estimated_cost != null && comp.estimated_cost > 0) {
+        materials.push({
+          component_design_id: comp.component_design_id,
+          name: comp.name,
+          cost: comp.estimated_cost,
+          quantity: comp.quantity,
+          cost_source: "component_design",
+        });
+        // Component costs are always "estimated" unless we recursively resolve them
+        allExact = false;
+      } else {
+        // Component has no cost set — include at 0 so caller knows it exists
+        materials.push({
+          component_design_id: comp.component_design_id,
+          name: comp.name,
+          cost: 0,
+          quantity: comp.quantity,
+          cost_source: "estimated",
+        });
+        allExact = false;
+      }
+    }
+
+    return new StepResponse({ materials, hasExactCosts: allExact && materials.length > 0 });
+  }
+);
+
+// ─── Step 3: Find similar designs for production overhead reference ───────────
+
+const findSimilarDesignsStep = createStep(
+  "find-similar-designs-step",
+  async (input: { design: any }, { container }) => {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY) as any;
+
+    const filters: any = {
+      id: { $ne: input.design.id },
+      estimated_cost: { $ne: null },
+    };
+    if (input.design.design_type) {
+      filters.design_type = input.design.design_type;
+    }
+
+    const { data: similarDesigns } = await query.graph({
+      entity: "design",
+      filters,
+      fields: ["id", "name", "estimated_cost", "design_type"],
+      pagination: { take: 5 },
+    });
+
+    return new StepResponse({
+      similarDesigns: (similarDesigns || []).map((d: any) => ({
+        id: d.id,
+        name: d.name,
+        estimated_cost: Number(d.estimated_cost) || 0,
+      })),
+    });
+  }
+);
+
+// ─── Step 3b: Resolve actual production cost from the latest completed run ─────
+// The partner's submitted cost on a completed (non-sample) run is the most
+// authoritative production-cost signal — prefer it over any derived estimate.
+// partner_cost_estimate is stored raw + paired with cost_type, so a "total"
+// is divided back to a per-unit figure (the estimate works per finished unit).
+const getActualProductionCostStep = createStep(
+  "get-actual-production-cost-step",
+  async (input: { design_id: string }, { container }) => {
+    let perUnit: number | null = null;
+    /** Whether `perUnit` came from a sample rather than a production run. */
+    let fromSample = false;
+    try {
+      // Resolve by registration key (string) to avoid importing the module
+      // entrypoint into this file — its pure functions are unit-tested without
+      // a Medusa runtime, and the module import would pull in model.define().
+      const service = container.resolve("production_runs") as any;
+      const runs = await service.listProductionRuns(
+        { design_id: input.design_id, status: "completed" },
+        { order: { completed_at: "DESC" }, take: 50 }
+      );
+
+      /**
+       * The per-unit cost a completed run says the partner charged, or null if
+       * this run carries no money. A PARENT run never does — runs come in
+       * parent/child pairs and the child holds the partner and the rate — so
+       * the `est <= 0` test also filters parents out without a rule of its own.
+       */
+      const rateOf = (r: any): number | null => {
+        const est = Number(r.partner_cost_estimate);
+        if (!est || est <= 0) return null;
+        const qty = Number(r.produced_quantity) || Number(r.quantity) || 1;
+        return r.cost_type === "per_unit" ? est : qty > 0 ? est / qty : est;
+      };
+
+      // Pass 1 — a real production run. Unchanged, and still wins outright.
+      for (const r of runs || []) {
+        if (r.run_type === "sample") continue;
+        const rate = rateOf(r);
+        if (rate == null) continue;
+        perUnit = rate;
+        break;
+      }
+
+      /**
+       * Pass 2 — a SAMPLE run, only when no production run priced this design.
+       *
+       * 🔴 The sample skip used to be absolute, which meant a design whose only
+       * production is a sample could never be priced by recalculation, ever.
+       * Three designs on prod sat at 0 for exactly this reason while a real
+       * partner rate sat on their sample run: Jacket With Embroidery (1250),
+       * Jaam Dani Modern Touch (1100 over 2), Ketiya Silk (1100).
+       *
+       * ⚠️ It is a weaker figure and is labelled as one — `fromSample` caps
+       * confidence at "guesstimate" and the breakdown records
+       * `production_cost_source: "sample_run"`. Sampling one prototype usually
+       * costs more per unit than a production batch, and this number reaches
+       * quotes and the storefront, so it must never present as a settled price.
+       * A production run, an admin estimate or a partner override all beat it.
+       */
+      if (perUnit == null) {
+        for (const r of runs || []) {
+          if (r.run_type !== "sample") continue;
+          const rate = rateOf(r);
+          if (rate == null) continue;
+          perUnit = rate;
+          fromSample = true;
+          break;
+        }
+      }
+    } catch {
+      // Non-fatal — production runs module may be unavailable or none exist.
+    }
+    return new StepResponse({
+      actualProductionCostPerUnit: perUnit,
+      actualProductionCostFromSample: fromSample,
+    });
+  }
+);
+
+
+// ─── Step 3c: What comparable work has actually cost ──────────────────────────
+
+/**
+ * PURE: fold the two evidence sources into one comparable list.
+ *
+ * 🔑 A design's `estimated_cost` is per finished UNIT (#1554) and a variant
+ * price is per unit by construction, so neither needs dividing — but both are
+ * filtered to strictly positive. A stored `0` on a design means "the estimator
+ * found nothing" (#1563), not "this is free", and averaging it in would drag
+ * every comparable figure toward zero while looking like more evidence.
+ */
+export function buildHistoricalComparables(input: {
+  designs: Array<{ id: string; name?: string | null; estimated_cost?: number | null }>;
+  productPrices: Array<{ id: string; title?: string | null; amount?: number | null }>;
+}): HistoricalComparable[] {
+  const fromDesigns: HistoricalComparable[] = (input.designs ?? [])
+    .filter((d) => d?.id && Number(d.estimated_cost) > 0)
+    .map((d) => ({
+      id: d.id,
+      name: d.name ?? null,
+      unit_amount: Number(d.estimated_cost),
+      source: "design_estimate" as const,
+    }));
+
+  const fromProducts: HistoricalComparable[] = (input.productPrices ?? [])
+    .filter((p) => p?.id && Number(p.amount) > 0)
+    .map((p) => ({
+      id: p.id,
+      name: p.title ?? null,
+      unit_amount: Number(p.amount),
+      source: "product_price" as const,
+    }));
+
+  return [...fromDesigns, ...fromProducts];
+}
+
+/**
+ * Gather what this KIND of work has cost before.
+ *
+ * Two sources, deliberately:
+ * - designs of the same `design_type` that carry a settled cost;
+ * - variants of products PREVIOUSLY CREATED FROM DESIGNS, which is a price a
+ *   buyer has actually been asked to pay rather than an internal cost.
+ *
+ * The second is the one worth having. A design's `estimated_cost` is our own
+ * estimate — averaging our estimates produces a very confident average of
+ * guesses — whereas a product minted from a design was priced, listed and in
+ * some cases sold. It is scoped to design-backed products for exactly that
+ * reason: the catalogue at large includes bought-in goods that say nothing
+ * about what making something costs.
+ */
+const getHistoricalComparablesStep = createStep(
+  "get-historical-comparables-step",
+  async (input: { design: any; currencyCode?: string | null }, { container }) => {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY) as any;
+    const design = input.design;
+
+    let designs: any[] = [];
+    let productPrices: Array<{ id: string; title: string | null; amount: number | null }> = [];
+
+    try {
+      const filters: any = {
+        id: { $ne: design.id },
+        estimated_cost: { $ne: null },
+      };
+      // Same KIND of work, when we know what kind it is. Without this the
+      // comparables are "any design at all", which is not evidence.
+      if (design.design_type) filters.design_type = design.design_type;
+
+      const { data } = await query.graph({
+        entity: "design",
+        filters,
+        fields: ["id", "name", "estimated_cost"],
+        pagination: { take: 10 },
+      });
+      designs = data || [];
+    } catch {
+      // Non-fatal — comparables are a fallback, never a requirement.
+    }
+
+    try {
+      /**
+       * Every design-backed variant, via the same one-to-one link the quote
+       * resolver reads. Two hops rather than one: the link table holds ids
+       * only, so the prices come from a second query over those variants.
+       */
+      const { data: links = [] } = await query.graph({
+        entity: "design_product_variant",
+        fields: ["design_id", "product_variant_id"],
+        pagination: { take: 100 },
+      });
+
+      const variantIds = Array.from(
+        new Set(
+          (links as any[])
+            .filter((l) => l?.product_variant_id && l.design_id !== design.id)
+            .map((l) => String(l.product_variant_id))
+        )
+      ).slice(0, 50);
+
+      if (variantIds.length) {
+        const { data: variants = [] } = await query.graph({
+          entity: "product_variant",
+          fields: ["id", "title", "prices.amount", "prices.currency_code"],
+          filters: { id: variantIds },
+        });
+
+        const wanted = input.currencyCode ? String(input.currencyCode).toLowerCase() : null;
+
+        productPrices = (variants as any[]).map((v) => {
+          const prices = (v?.prices ?? []) as any[];
+          /**
+           * 🔴 Currency-matched, never "the first price". A variant carries a
+           * row per currency, so taking prices[0] mixes 1200 INR with 1200 USD
+           * into one median — the freight picker was wrong in precisely this
+           * way. When the design's currency has no row, the variant simply does
+           * not count as evidence.
+           */
+          const match = wanted
+            ? prices.find((pr) => String(pr?.currency_code ?? "").toLowerCase() === wanted)
+            : null;
+          return {
+            id: v.id,
+            title: v.title ?? null,
+            amount: match?.amount != null ? Number(match.amount) : null,
+          };
+        });
+      }
+    } catch {
+      // Non-fatal.
+    }
+
+    return new StepResponse({
+      historical: buildHistoricalComparables({ designs, productPrices }),
+    });
+  }
+);
+
+// ─── Step 4: Calculate total cost estimate ────────────────────────────────────
+
+const calculateTotalCostStep = createStep(
+  "calculate-total-cost-step",
+  async (input: {
+    design: any;
+    materials: MaterialCostItem[];
+    hasExactMaterialCosts: boolean;
+    similarDesigns: Array<{ id: string; name: string; estimated_cost: number }>;
+    actualProductionCostPerUnit?: number | null;
+    actualProductionCostFromSample?: boolean;
+    productionCostOverride?: number | null;
+    platformFeePercent?: number;
+    defaultMaterialCost?: number;
+    historical?: HistoricalComparable[];
+    allowHistoricalBasis?: boolean;
+  }, { container }) => {
+    const design = input.design;
+
+    /**
+     * #1939 — the platform's economic policy, read rather than compiled.
+     *
+     * ONLY the production overhead is taken from config here. `platformFeePercent`
+     * and `defaultMaterialCost` are deliberately OPT-IN per caller (they default
+     * to 0/off so store, admin and draft-order flows are unaffected), and
+     * reading them from config here would switch them on for every caller —
+     * a price change wearing a refactor's clothes. The one caller that opts in
+     * reads config itself.
+     *
+     * `loadCostConfig` never throws and never returns zeros: an unconfigured
+     * platform yields nulls, and the compiled constant answers.
+     */
+    const costConfig = await loadCostConfig(container as any);
+    const platformFeePercent = input.platformFeePercent ?? 0;
+    const hasOverride =
+      input.productionCostOverride != null && input.productionCostOverride >= 0;
+
+    // If a sample run has already calculated costs, use the stored breakdown —
+    // it's more accurate than re-estimating. Skipped when the partner supplied
+    // an explicit override (a typed value is authoritative even over samples).
+    const costBreakdown = design.cost_breakdown as any;
+    if (
+      !hasOverride &&
+      costBreakdown?.source === "sample_consumption" &&
+      design.material_cost != null &&
+      design.production_cost != null
+    ) {
+      const materialCost = Number(design.material_cost) || 0;
+      const productionCost = Number(design.production_cost) || 0;
+      const serviceCostTotal = Number(costBreakdown.service_cost_total) || 0;
+      // Platform fee is charged on material cost (opt-in per caller).
+      const platformFee = round2(materialCost * (platformFeePercent / 100));
+      const baseTotal =
+        Number(design.estimated_cost) || (materialCost + productionCost);
+      const totalEstimated = baseTotal + platformFee;
+
+      return new StepResponse({
+        design_id: design.id,
+        material_cost: round2(materialCost),
+        production_cost: round2(productionCost),
+        platform_fee: platformFee,
+        total_estimated: round2(totalEstimated),
+        confidence: "exact" as ConfidenceLevel,
+        breakdown: {
+          production_cost_source: "sample_consumption" as ProductionCostSource,
+          materials: costBreakdown.items || input.materials,
+          production_percent: materialCost > 0
+            ? Math.round((productionCost / materialCost) * 100)
+            : 0,
+          platform_fee_percent: platformFeePercent,
+          service_costs: costBreakdown.service_costs,
+          service_cost_total: serviceCostTotal > 0 ? round2(serviceCostTotal) : undefined,
+          source: "sample_consumption",
+        },
+      } as EstimateCostOutput);
+    }
+
+    // No sample data (or a partner override) — estimate from scratch.
+    const result = computeCostBreakdown({
+      designId: design.id,
+      adminEstimate: design.estimated_cost ? Number(design.estimated_cost) : null,
+      materials: input.materials,
+      hasExactMaterialCosts: input.hasExactMaterialCosts,
+      similarDesigns: input.similarDesigns,
+      actualProductionCost: input.actualProductionCostPerUnit ?? null,
+      actualProductionCostFromSample: !!input.actualProductionCostFromSample,
+      productionCostOverride: input.productionCostOverride ?? null,
+      platformFeePercent,
+      defaultMaterialCost: input.defaultMaterialCost ?? 0,
+      productionOverheadPercent:
+        costConfig.production_overhead_percent ?? undefined,
+      historical: input.historical ?? [],
+      allowHistoricalBasis: !!input.allowHistoricalBasis,
+    });
+    return new StepResponse(result);
+  }
+);
+
+// ─── Workflow ─────────────────────────────────────────────────────────────────
+
+export const estimateDesignCostWorkflow = createWorkflow(
+  "estimate-design-cost",
+  (input: EstimateCostInput) => {
+    const designResult = getDesignWithInventoryStep(input);
+
+    const materialsResult = getMaterialCostsStep({
+      design_id: input.design_id,
+      inventoryItemIds: designResult.inventoryItemIds as unknown as string[],
+      plannedQuantityMap: designResult.plannedQuantityMap as unknown as Record<string, number>,
+      componentItems: designResult.componentItems as unknown as Array<{
+        component_design_id: string;
+        name: string;
+        estimated_cost: number | null;
+        quantity: number;
+      }>,
+    });
+
+    const similarResult = findSimilarDesignsStep({
+      design: designResult.design,
+    });
+
+    const actualCostResult = getActualProductionCostStep({
+      design_id: input.design_id,
+    });
+
+    const historicalResult = getHistoricalComparablesStep({
+      design: designResult.design,
+      currencyCode: designResult.design.cost_currency,
+    });
+
+    const result = calculateTotalCostStep({
+      design: designResult.design,
+      materials: materialsResult.materials as unknown as MaterialCostItem[],
+      hasExactMaterialCosts: materialsResult.hasExactCosts as unknown as boolean,
+      similarDesigns: similarResult.similarDesigns as unknown as Array<{
+        id: string;
+        name: string;
+        estimated_cost: number;
+      }>,
+      actualProductionCostPerUnit:
+        actualCostResult.actualProductionCostPerUnit as unknown as number | null,
+      actualProductionCostFromSample:
+        actualCostResult.actualProductionCostFromSample as unknown as boolean,
+      productionCostOverride:
+        input.production_cost_override as unknown as number | null,
+      platformFeePercent: input.platform_fee_percent as unknown as number,
+      defaultMaterialCost: input.default_material_cost as unknown as number,
+      historical: historicalResult.historical as unknown as HistoricalComparable[],
+      allowHistoricalBasis:
+        input.allow_historical_basis as unknown as boolean,
+    });
+
+    return new WorkflowResponse(result);
+  }
+);
+
+export default estimateDesignCostWorkflow;

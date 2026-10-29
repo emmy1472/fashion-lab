@@ -1,0 +1,31 @@
+import { Design } from '@freesewing/core'
+import { i18n } from '../i18n/index.mjs'
+import { annotations } from './plugin-annotations.mjs'
+import { flip } from './plugin-flip.mjs'
+import { gore } from './plugin-gore.mjs'
+import { i18n as i18nStack } from './plugin-i18n.mjs'
+import { measurements } from './plugin-measurements.mjs'
+import { mirror } from './plugin-mirror.mjs'
+import { round } from './plugin-round.mjs'
+import { sprinkle } from './plugin-sprinkle.mjs'
+import { ringsector } from './plugin-ringsector.mjs'
+
+// Setup our new design
+const Plugintest = new Design({
+  parts: [annotations, flip, gore, i18nStack, measurements, mirror, round, sprinkle, ringsector],
+})
+
+// Named exports
+export {
+  annotations,
+  flip,
+  gore,
+  i18nStack,
+  measurements,
+  mirror,
+  round,
+  sprinkle,
+  ringsector,
+  Plugintest,
+  i18n,
+}

@@ -1,0 +1,107 @@
+import { MedusaError } from "@medusajs/framework/utils"
+import { StepResponse, createStep } from "@medusajs/framework/workflows-sdk"
+import { SendBlogSubscribersInput } from "../types"
+import { WEBSITE_MODULE } from "../../../../modules/website"
+import WebsiteService from "../../../../modules/website/service"
+
+export const fetchBlogDataStepId = "fetch-blog-data"
+
+/**
+ * A blog or newsletter page, Published — except for a TEST send, which may go
+ * out from a draft so the founder can check the email before publishing.
+ */
+export const assertBlogSendable = (
+  page: { page_type?: string | null; status?: string | null },
+  options: { allowUnpublished?: boolean } = {}
+) => {
+  if (page.page_type !== "Blog" && page.page_type !== "Newsletter") {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "Only blog or newsletter pages can be sent to subscribers"
+    )
+  }
+  if (page.status !== "Published" && !options.allowUnpublished) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "Only published blogs can be sent to subscribers"
+    )
+  }
+}
+
+/**
+ * This step fetches the blog data that will be sent to subscribers.
+ * It validates that the blog exists, is of type Blog, and is published
+ * (a test send may skip the last check — see assertBlogSendable).
+ *
+ * @example
+ * const blogData = fetchBlogDataStep({ page_id: "blog_123", subject: "New Blog Post" })
+ */
+export const fetchBlogDataStep = createStep(
+  fetchBlogDataStepId,
+  async (input: SendBlogSubscribersInput, { container }) => {
+      const pageService: WebsiteService = container.resolve(WEBSITE_MODULE)
+      
+      // Retrieve the page with necessary relations
+      const page = await pageService.retrievePage(input.page_id, {
+        relations: ["blocks"]
+      })
+      
+      if (!page) {
+        throw new MedusaError(
+          MedusaError.Types.NOT_FOUND,
+          `Blog with id ${input.page_id} not found`
+        )
+      }
+      
+      assertBlogSendable(page, { allowUnpublished: input.allow_unpublished })
+      
+      console.log(`Successfully fetched blog: ${page.title}`)
+      
+      // Extract the TipTap JSON content from the blog blocks
+      let blogContent: any = null
+      
+      // Find the blog content block which contains the TipTap JSON
+      if (page.blocks && page.blocks.length > 0) {
+        // Look for a block with content.text that contains TipTap JSON
+        const contentBlock = page.blocks.find(block => 
+          block.content && 
+          block.content.text && 
+          (typeof block.content.text === 'object' || 
+           (typeof block.content.text === 'string' && 
+            (block.content.text.includes('"type":"doc"') || block.content.text.startsWith('{'))))
+        )
+        
+        if (contentBlock) {
+          blogContent = contentBlock.content.text
+          console.log('Found TipTap content block')
+        }
+      }
+      
+      // #2349 — the email version built in the Email tab, if any. It lives on the
+      // same main block as the TipTap text; the send prefers it when present.
+      const emailBlock: any = (page.blocks || []).find(
+        (block: any) => typeof block?.content?.email_html === "string" && block.content.email_html.trim()
+      )
+      const emailHtml: string | null = emailBlock ? String(emailBlock.content.email_html) : null
+
+      // If no specific block with TipTap content is found, use the page content as fallback
+      if (!blogContent) {
+        blogContent = page.content
+        console.log('Using page content as fallback')
+      }
+      
+      return new StepResponse({
+        id: page.id,
+        title: page.title,
+        slug: page.slug,
+        content: blogContent, // Use the extracted TipTap content
+        email_html: emailHtml,
+        status: page.status,
+        blocks: page.blocks,
+        created_at: page.created_at,
+        updated_at: page.updated_at,
+        subscriber_count: page.subscriber_count,
+        url: `/blog/${page.slug}`
+      })
+  }
+)

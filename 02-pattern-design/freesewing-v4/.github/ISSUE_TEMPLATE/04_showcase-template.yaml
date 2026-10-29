@@ -1,0 +1,104 @@
+---
+name: 📸 (request to) add a new Showcase post
+description: Add a new showcase on FreeSewing.org
+title: '[showcase]: Found a great project to showcase'
+labels: [':+1: good first issue, :camera_flash: showcase, :hugs: community']
+body:
+  - type: markdown
+    attributes:
+      value: 'Found a great project/make to showcase? Awesome :tada: Please complete the information below so we can add it to our showcases :point_down:'
+  - type: input
+    id: url
+    attributes:
+      label: 'Where can we find the awesomeness? 🤔'
+      description: Provide a link here to where we can find the pictures/description. Like a blog post or Instagram post, or something on Discord or ...
+      placeholder: 'https://www.instagram.com/p/CgRPJCqjgTw/'
+  - type: dropdown
+    id: design
+    attributes:
+      label: 'Do you know what FreeSewing design was used? 🧐'
+      description: If you know which of our patterns was used, please select one of more from the list below
+      multiple: true
+      options:
+        - Aaron
+        - Albert
+        - Bee
+        - Bella
+        - Benjamin
+        - Bent
+        - Bob
+        - Breanna
+        - Brian
+        - Bruce
+        - Carlita
+        - Carlton
+        - Cathrin
+        - Charlie
+        - Cornelius
+        - Diana
+        - Examples
+        - Florence
+        - Florent
+        - Gozer
+        - Hi
+        - Holmes
+        - Hortensia
+        - Huey
+        - Hugo
+        - Jaeger
+        - Legend
+        - Lucy
+        - Lumina
+        - Lumira
+        - Lunetius
+        - Magde
+        - Naomiwu
+        - Noble
+        - Octoplushy
+        - Onyx
+        - Otis
+        - Paco
+        - Penelope
+        - Plugintest
+        - Rendertest
+        - Sandy
+        - Shelly
+        - Shin
+        - Simon
+        - Simone
+        - Skully
+        - Sven
+        - Tamiko
+        - Teagan
+        - Tiberius
+        - Titan
+        - Trayvon
+        - Tristan
+        - Uma
+        - Wahid
+        - Walburga
+        - Waralee
+        - Yuri
+  - type: dropdown
+    id: permission
+    attributes:
+      label: 'Do we have permission to (re)post this? ✅'
+      description: We only post showcases with permission from the original author. Please indicate whether or not permission was granted by choosing the relevant option in the list below
+      options:
+        - ✅ I am the original author, and hereby grant permission to repost this content
+        - ✅ I am not the original author, but I have asked for permission on behalf of FreeSewing and the original author granted it
+        - ❌ Please ask permission from the original author
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: If there is any other info or pictures you'd like to add you can do so here
+  - type: markdown
+    attributes:
+      value: Looking to tackle this issue? We have [a how-to that shows how to add a showcase to the site](https://freesewing.dev/howtos/editors/showcase/).
+  - type: markdown
+    attributes:
+      value: |
+        Please keep in mind that **FreeSewing is a non-profit project** that depends on **[your support](https://freesewing.org/patrons/join/)**.
+---
+

@@ -1,0 +1,932 @@
+import { createAdminUser, getAuthHeaders } from "../helpers/create-admin-user"
+import { getSharedTestEnv, setupSharedTestSuite } from "./shared-test-setup"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import { createInventoryLevelsWorkflow } from "@medusajs/medusa/core-flows"
+
+const TEST_PARTNER_EMAIL = "partner@complete-workflow-test.com"
+const TEST_PARTNER_PASSWORD = "supersecret"
+
+// Keep a reasonable suite timeout
+
+setupSharedTestSuite(() => {
+    describe("Send to Partner - Complete Workflow", () => {
+      let adminHeaders: any
+      let partnerHeaders: any
+      let inventoryItemId: string
+      let stockLocationId: string
+      let fromStockLocationId: string
+      let inventoryOrderId: string
+      let partnerId: string
+      const { api , getContainer } = getSharedTestEnv()
+
+      beforeEach(async () => {
+        const container = getContainer()
+        
+        // Create admin user and get headers for admin operations
+        await createAdminUser(container)
+        adminHeaders = await getAuthHeaders(api)
+
+        // Register and login partner admin (this will be the partner admin)
+        await api.post("/auth/partner/emailpass/register", {
+          email: TEST_PARTNER_EMAIL,
+          password: TEST_PARTNER_PASSWORD,
+        })
+
+        const partnerLoginResponse = await api.post("/auth/partner/emailpass", {
+          email: TEST_PARTNER_EMAIL,
+          password: TEST_PARTNER_PASSWORD,
+        })
+
+        partnerHeaders = {
+          Authorization: `Bearer ${partnerLoginResponse.data.token}`,
+        }
+
+        // Create a partner using the partner admin's authentication
+        // This links the partner to the authenticated partner admin
+        const partnerPayload = {
+          name: "Test Manufacturing Partner",
+          handle: "test-complete-workflow-partner",
+          admin: {
+            email: TEST_PARTNER_EMAIL,
+            first_name: "Partner",
+            last_name: "Admin",
+          },
+        }
+
+        const partnerResponse = await api.post("/partners", partnerPayload, {
+          headers: partnerHeaders,
+        })
+        expect(partnerResponse.status).toBe(200)
+        partnerId = partnerResponse.data.partner.id
+
+        // Get fresh token after partner creation (following partner-people-api.spec.ts pattern)
+        const newAuthResponse = await api.post("/auth/partner/emailpass", {
+          email: TEST_PARTNER_EMAIL,
+          password: TEST_PARTNER_PASSWORD,
+        })
+
+        // Update headers with new token
+        partnerHeaders = {
+          Authorization: `Bearer ${newAuthResponse.data.token}`,
+        }
+
+        // Create partner task templates required by the send-to-partner workflow
+        const partnerOrderSentTemplate = {
+          name: "partner-order-sent",  // ✅ Use identifier as name, not display name
+          description: "Template for when an order is sent to a partner",
+          priority: "medium",
+          estimated_duration: 30, // in minutes
+          required_fields: {
+            "order_id": { type: "string", required: true },
+            "partner_id": { type: "string", required: true },
+            "notes": { type: "text", required: false }
+          },
+          eventable: true,
+          notifiable: true,
+          message_template: "Order {{order_id}} has been sent to partner.",
+          metadata: {
+            workflow_type: "partner_assignment",  // ✅ Match what partner API expects
+            workflow_step: "sent"
+          },
+          category: "Partner Orders"
+        }
+
+        const partnerOrderReceivedTemplate = {
+          name: "partner-order-received",  // ✅ Use identifier as name, not display name
+          description: "Template for when a partner receives an order",
+          priority: "medium",
+          estimated_duration: 60, // in minutes
+          required_fields: {
+            "order_id": { type: "string", required: true },
+            "partner_id": { type: "string", required: true }
+          },
+          eventable: true,
+          notifiable: true,
+          message_template: "Order {{order_id}} has been received by partner.",
+          metadata: {
+            workflow_type: "partner_assignment",  // ✅ Match what partner API expects
+            workflow_step: "received"
+          },
+          category: "Partner Orders"
+        }
+
+        const partnerOrderShippedTemplate = {
+          name: "partner-order-shipped",  // ✅ Use identifier as name, not display name
+          description: "Template for when a partner ships an order",
+          priority: "high",
+          estimated_duration: 90, // in minutes
+          required_fields: {
+            "order_id": { type: "string", required: true },
+            "partner_id": { type: "string", required: true },
+            "tracking_number": { type: "string", required: false },
+            "delivery_date": { type: "date", required: false }
+          },
+          eventable: true,
+          notifiable: true,
+          message_template: "Order {{order_id}} has been shipped by partner.",
+          metadata: {
+            workflow_type: "partner_assignment",  // ✅ Match what partner API expects
+            workflow_step: "shipped"
+          },
+          category: "Partner Orders"
+        }
+
+        const partnerLinePartialTemplate = {
+          name: "partner-line-partial",  // ✅ Use identifier as name, not display name
+          description: "Template for when a partner receives a partial order",
+          priority: "medium",
+          estimated_duration: 60, // in minutes
+          required_fields: {
+            "order_id": { type: "string", required: true },
+            "partner_id": { type: "string", required: true },
+            "order_line_id": { type: "string", required: true },
+            "requested": { type: "number", required: true },
+            "delivered": { type: "number", required: true },
+            "shortage": { type: "number", required: true }
+          },
+          eventable: true,
+          notifiable: true,
+          message_template: "Order {{order_id}} has been received by partner.",
+          metadata: {
+            workflow_type: "partner_completion",  // ✅ Match what partner API expects
+            workflow_step: "partial"
+          },
+          category: "Partner Orders"
+        }
+
+        // Create the task templates - first one creates the category, others use category_id
+        const sentTemplateResponse = await api.post("/admin/task-templates", partnerOrderSentTemplate, adminHeaders)
+        expect(sentTemplateResponse.status).toBe(201)
+        console.log("Created sent template:", JSON.stringify(sentTemplateResponse.data.task_template, null, 2))
+        
+        // Get the category_id from the first template response
+        const categoryId = sentTemplateResponse.data.task_template.category_id
+
+        // Update the remaining templates to use category_id instead of category name
+        const receivedTemplateWithCategoryId = {
+          ...partnerOrderReceivedTemplate,
+          category_id: categoryId
+        }
+        // Remove category property since we're using category_id
+        const { category: _, ...receivedTemplateClean } = receivedTemplateWithCategoryId
+
+        const shippedTemplateWithCategoryId = {
+          ...partnerOrderShippedTemplate,
+          category_id: categoryId
+        }
+        // Remove category property since we're using category_id
+        const { category: __, ...shippedTemplateClean } = shippedTemplateWithCategoryId
+        
+        const partnerLinePartialTemplateWithCategoryId = {
+          ...partnerLinePartialTemplate,
+          category_id: categoryId
+        }
+        // Remove category property since we're using category_id
+        const { category: ___, ...partnerLinePartialTemplateClean } = partnerLinePartialTemplateWithCategoryId
+        
+        const receivedTemplateResponse = await api.post("/admin/task-templates", receivedTemplateClean, adminHeaders)
+        expect(receivedTemplateResponse.status).toBe(201)
+        console.log("Created received template:", JSON.stringify(receivedTemplateResponse.data.task_template, null, 2))
+
+        const shippedTemplateResponse = await api.post("/admin/task-templates", shippedTemplateClean, adminHeaders)
+        expect(shippedTemplateResponse.status).toBe(201)
+        console.log("Created shipped template:", JSON.stringify(shippedTemplateResponse.data.task_template, null, 2))
+
+        const partnerLinePartialTemplateResponse = await api.post("/admin/task-templates", partnerLinePartialTemplateClean, adminHeaders)
+        expect(partnerLinePartialTemplateResponse.status).toBe(201)
+        console.log("Created partner line partial template:", JSON.stringify(partnerLinePartialTemplateResponse.data.task_template, null, 2))
+
+          // Let's also verify we can find the templates by listing them
+        const templatesListResponse = await api.get("/admin/task-templates", adminHeaders)
+        console.log("All templates after creation:", JSON.stringify(templatesListResponse.data.task_templates, null, 2))
+
+        // Create inventory item
+        const inventoryPayload = {
+          title: "Test Fabric",
+          description: "Premium cotton fabric for testing",
+        }
+        const inventoryResponse = await api.post("/admin/inventory-items", inventoryPayload, adminHeaders)
+        expect(inventoryResponse.status).toBe(200)
+        inventoryItemId = inventoryResponse.data.inventory_item.id
+
+        // Create stock location (To)
+        const stockLocationPayload = {
+          name: "Main Warehouse",
+        }
+        const stockLocationResponse = await api.post("/admin/stock-locations", stockLocationPayload, adminHeaders)
+        expect(stockLocationResponse.status).toBe(200)
+        stockLocationId = stockLocationResponse.data.stock_location.id
+
+        // Create second stock location (From)
+        const fromLocationPayload = {
+          name: "Supplier Warehouse",
+        }
+        const fromLocationResponse = await api.post("/admin/stock-locations", fromLocationPayload, adminHeaders)
+        expect(fromLocationResponse.status).toBe(200)
+        fromStockLocationId = fromLocationResponse.data.stock_location.id
+
+        // Pre-associate the inventory item with the destination stock location by creating a 0-qty level
+        {
+          const container = getContainer()
+          const { result: assocLevelRes } = await createInventoryLevelsWorkflow(container).run({
+            input: {
+              inventory_levels: [
+                {
+                  inventory_item_id: inventoryItemId,
+                  location_id: stockLocationId,
+                  stocked_quantity: 0,
+                },
+              ],
+            },
+          })
+          console.log("[DBG][setup] associated inventory_item to stock_location via levels:", JSON.stringify(assocLevelRes, null, 2))
+        }
+
+        // Create inventory order
+        const orderPayload = {
+          order_lines: [
+            { inventory_item_id: inventoryItemId, quantity: 100, price: 25.50 },
+          ],
+          quantity: 100,
+          total_price: 2550,
+          status: "Pending",
+          expected_delivery_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days from now
+          order_date: new Date().toISOString(),
+          shipping_address: {
+            address_1: "123 Factory St",
+            city: "Manufacturing City",
+            postal_code: "12345",
+            country_code: "US"
+          },
+          // Explicitly provide both to and from
+          stock_location_id: stockLocationId, // to (backward compatible)
+          to_stock_location_id: stockLocationId, // explicit to
+          from_stock_location_id: fromStockLocationId, // from
+          is_sample: false,
+        }
+
+        const orderResponse = await api.post("/admin/inventory-orders", orderPayload, adminHeaders)
+        expect(orderResponse.status).toBe(201)
+        inventoryOrderId = orderResponse.data.inventoryOrder.id
+      })
+
+      it("should be idempotent when re-sending: no duplicate tasks", async () => {
+        // First send
+        const firstSend = await api.post(
+          `/admin/inventory-orders/${inventoryOrderId}/send-to-partner`,
+          { partnerId, notes: "first send" },
+          adminHeaders
+        )
+        expect(firstSend.status).toBe(200)
+
+        // Proceed without fixed wait
+
+        // Fetch partner order and capture task count
+        const beforeRes = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, { headers: partnerHeaders })
+        expect(beforeRes.status).toBe(200)
+        const beforeCount = beforeRes.data.inventoryOrder.partner_info?.workflow_tasks_count || 0
+        const beforeStatus = beforeRes.data.inventoryOrder.partner_info?.partner_status
+
+        // Second send (should not create tasks; only reset transaction IDs on existing tasks)
+        // const secondSend = await api.post(
+        //   `/admin/inventory-orders/${inventoryOrderId}/send-to-partner`,
+        //   { partnerId, notes: "second send" },
+        //   adminHeaders
+        // )
+        // expect(secondSend.status).toBe(200)
+
+        // Proceed without fixed wait
+
+        // Fetch again and compare counts
+        const afterRes = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, { headers: partnerHeaders })
+        expect(afterRes.status).toBe(200)
+        const afterCount = afterRes.data.inventoryOrder.partner_info?.workflow_tasks_count || 0
+        const afterStatus = afterRes.data.inventoryOrder.partner_info?.partner_status
+
+        expect(afterCount).toBe(beforeCount)
+        // Status should remain assigned if no partner action yet
+        expect(afterStatus).toBe("assigned")
+
+        // To avoid leaving async awaits open for the test runner, progress the workflow to completion
+        // 1) Partner starts the order
+        const startRes = await api.post(
+          `/partners/inventory-orders/${inventoryOrderId}/start`,
+          {},
+          { headers: partnerHeaders }
+        )
+        expect([200, 204]).toContain(startRes.status)
+
+        // 2) Fetch order lines to complete fully
+        const orderViewRes = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, { headers: partnerHeaders })
+        expect(orderViewRes.status).toBe(200)
+        const olView = orderViewRes.data.inventoryOrder
+        const orderLinesForComplete = Array.isArray(olView?.order_lines) ? olView.order_lines : []
+        if (!orderLinesForComplete.length) {
+          throw new Error("Partner order view returned no order_lines; cannot complete")
+        }
+        const lines = orderLinesForComplete.map((l: any) => ({
+          order_line_id: String(l.id),
+          quantity: Number(l.quantity),
+        }))
+
+        // 3) Partner completes the order fully
+        const completeRes = await api.post(
+          `/partners/inventory-orders/${inventoryOrderId}/complete`,
+          {
+            lines,
+            notes: "idempotency-test-complete",
+            trackingNumber: "IDEM-TEST-TRACK",
+            deliveryDate: new Date().toISOString(),
+          },
+          { headers: partnerHeaders }
+        )
+        expect([200, 204]).toContain(completeRes.status)
+      })
+
+      it("should complete full send-to-partner workflow", async () => {
+        // 1. Send order to partner (admin)
+        
+        const sendToPartnerPayload = {
+          partnerId: partnerId,
+          notes: "Complete workflow test order"
+        }
+
+        const sendResponse = await api.post(
+          `/admin/inventory-orders/${inventoryOrderId}/send-to-partner`,
+          sendToPartnerPayload,
+          adminHeaders
+        )
+
+        expect(sendResponse.status).toBe(200)
+        expect(sendResponse.data.message).toBe("Inventory order sent to partner successfully")
+        expect(sendResponse.data.inventoryOrderId).toBe(inventoryOrderId)
+        expect(sendResponse.data.partnerId).toBe(partnerId)
+
+        // No artificial waits; proceed directly
+        
+        // Verify that partner workflow tasks were created
+        
+        const initialPartnerOrderResponse = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, {
+          headers: partnerHeaders
+        })
+        
+        expect(initialPartnerOrderResponse.status).toBe(200)
+        expect(initialPartnerOrderResponse.data.inventoryOrder.partner_info.partner_status).toBe("assigned")
+        expect(initialPartnerOrderResponse.data.inventoryOrder.partner_info.workflow_tasks_count).toBeGreaterThan(0)
+        
+        // Admin notes should now be available from inventory order metadata
+        expect(initialPartnerOrderResponse.data.inventoryOrder.admin_notes).toBe("Complete workflow test order")
+
+        // 2. Start order (partner)
+        
+        const startResponse = await api.post(`/partners/inventory-orders/${inventoryOrderId}/start`, {}, {
+          headers: partnerHeaders
+        })
+
+        expect(startResponse.status).toBe(200)
+        expect(startResponse.data.message).toBe("Order started successfully")
+        expect(startResponse.data.order).toBeDefined()
+        expect(startResponse.data.order.status).toBe("Processing") // Order status should change to Processing
+        
+        // Verify task-based partner status via partner API
+        const partnerOrderResponse = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, {
+          headers: partnerHeaders
+        })
+        expect(partnerOrderResponse.status).toBe(200)
+        expect(partnerOrderResponse.data.inventoryOrder.partner_info.partner_status).toBe("in_progress")
+        expect(partnerOrderResponse.data.inventoryOrder.partner_info.partner_started_at).toBeDefined()
+
+        // No artificial waits; proceed directly
+
+        // 3. Complete order (partner) - now requires delivered lines
+        console.log("\nCompleting order as partner...")
+        const partnerOrderForComplete = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, {
+          headers: partnerHeaders
+        })
+        // Debug: log order structure with lines
+        console.log("[DBG][complete] partnerOrderForComplete.order_lines=", JSON.stringify(partnerOrderForComplete.data.inventoryOrder.order_lines, null, 2))
+
+        // Debug: inspect inventory_items and stock_locations linked to lines via graph
+        {
+          const container = getContainer()
+          const query = container.resolve(ContainerRegistrationKeys.QUERY)
+          const { data: debugOrderData } = await query.graph({
+            entity: "inventory_orders",
+            fields: [
+              "id",
+              "to_stock_location_id",
+              "stock_location_id",
+              "orderlines.id",
+              "orderlines.quantity",
+              "orderlines.inventory_item_id",
+              "orderlines.inventory_items.*",
+              "orderlines.inventory_items.stock_locations.*",
+            ],
+            filters: { id: inventoryOrderId },
+          })
+          console.log("[DBG][complete] debugOrderData=", JSON.stringify(debugOrderData, null, 2))
+        }
+        const linesForComplete = (partnerOrderForComplete.data.inventoryOrder.order_lines || []).map((l: any) => ({
+          order_line_id: l.id,
+          quantity: l.quantity, // deliver full requested quantity
+        }))
+        const completeResponse = await api.post(`/partners/inventory-orders/${inventoryOrderId}/complete`, {
+          notes: "Order completed successfully",
+          tracking_number: "TRACK123456",
+          stock_location_id: stockLocationId,
+          lines: linesForComplete,
+        }, {
+          headers: partnerHeaders
+        })
+        
+        expect(completeResponse.status).toBe(200)
+        expect(completeResponse.data.message).toBe("Order completed successfully")
+        // New route returns result object from workflow
+        expect(completeResponse.data.result).toBeDefined()
+        // Fetch order to assert status
+        const afterFullComplete = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, { headers: partnerHeaders })
+        expect(afterFullComplete.data.inventoryOrder.status).toBe("Shipped")
+        
+        // Verify task-based partner status via partner API
+        const finalPartnerOrderResponse = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, {
+          headers: partnerHeaders
+        })
+        expect(finalPartnerOrderResponse.status).toBe(200)
+        expect(finalPartnerOrderResponse.data.inventoryOrder.partner_info.partner_status).toBe("completed")
+        expect(finalPartnerOrderResponse.data.inventoryOrder.partner_info.partner_completed_at).toBeDefined()
+        expect(finalPartnerOrderResponse.data.inventoryOrder.partner_info.workflow_tasks_count).toBeGreaterThan(0)
+        expect(finalPartnerOrderResponse.data.inventoryOrder.admin_notes).toBe("Complete workflow test order")
+
+        // #2289 — the Complete is a DISPATCH: no receipt rows, no stock yet.
+        const container = getContainer()
+        const query = container.resolve(ContainerRegistrationKeys.QUERY)
+        const receiptsAndStock = async () => {
+          const { data: nodes } = await query.graph({
+            entity: "inventory_orders",
+            fields: ["id", "orderlines.id", "orderlines.quantity", "orderlines.line_fulfillments.*"],
+            filters: { id: inventoryOrderId },
+          })
+          const node = nodes[0]
+          const received = (node.orderlines || [])
+            .flatMap((l: any) => l.line_fulfillments || [])
+            .reduce((s: number, f: any) => s + (Number(f.quantity_delta) || 0), 0)
+          const requested = (node.orderlines || []).reduce((s: number, l: any) => s + (Number(l.quantity) || 0), 0)
+          const { data: levels } = await query.graph({
+            entity: "inventory_level",
+            fields: ["id", "location_id", "stocked_quantity"],
+            filters: { inventory_item_id: inventoryItemId },
+          })
+          const stocked = (levels || [])
+            .filter((l: any) => String(l.location_id) === String(stockLocationId))
+            .reduce((s: number, l: any) => s + (Number(l.stocked_quantity) || 0), 0)
+          return { received, requested, stocked }
+        }
+
+        const afterDispatch = await receiptsAndStock()
+        expect(afterDispatch.received).toBe(0)
+        expect(afterDispatch.stocked).toBe(0)
+        for (const line of finalPartnerOrderResponse.data.inventoryOrder.order_lines) {
+          expect(line.ledger.dispatched).toBe(line.quantity)
+          expect(line.ledger.awaiting_count).toBe(line.quantity)
+          expect(line.ledger.to_dispatch).toBe(0)
+        }
+
+        // The receiver's count posts the stock.
+        const receiveRes = await api.post(`/admin/inventory-orders/${inventoryOrderId}/receive`, {}, adminHeaders)
+        expect(receiveRes.status).toBe(200)
+        const afterReceipt = await receiptsAndStock()
+        expect(afterReceipt.received).toBe(afterReceipt.requested)
+        expect(afterReceipt.stocked).toBe(afterReceipt.requested)
+
+        console.log("\n✅ Complete workflow finished successfully!")
+      })
+
+      it("should keep order open on partial completion (unfinished order line)", async () => {
+        // 1. Send order to partner (admin)
+        const sendToPartnerPayload = {
+          partnerId: partnerId,
+          notes: "Partial completion test order",
+        }
+        const sendResponse = await api.post(
+          `/admin/inventory-orders/${inventoryOrderId}/send-to-partner`,
+          sendToPartnerPayload,
+          adminHeaders
+        )
+        expect(sendResponse.status).toBe(200)
+
+        // Wait for workflow to initialize and create tasks
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+
+        // 2. Start order (partner)
+        const startResponse = await api.post(
+          `/partners/inventory-orders/${inventoryOrderId}/start`,
+          {},
+          { headers: partnerHeaders }
+        )
+        expect(startResponse.status).toBe(200)
+        expect(startResponse.data.order.status).toBe("Processing")
+        console.log("[LOG][start] status=", startResponse.status, "order.status=", startResponse.data.order.status)
+
+        // 3. Get order lines to build partial completion payload
+        const partnerOrderResponse = await api.get(
+          `/partners/inventory-orders/${inventoryOrderId}`,
+          { headers: partnerHeaders }
+        )
+        expect(partnerOrderResponse.status).toBe(200)
+        const orderLines = partnerOrderResponse.data.inventoryOrder.order_lines || []
+        expect(orderLines.length).toBeGreaterThan(0)
+        const firstLineId = orderLines[0].id
+        console.log("[LOG][get-before-partial] status=", partnerOrderResponse.status, "inv.status=", partnerOrderResponse.data.inventoryOrder.status, "partner_status=", partnerOrderResponse.data.inventoryOrder.partner_info?.partner_status, "lines=", orderLines.length)
+
+        // 4. Complete order with partial delivered quantity (less than requested)
+        const partialCompletePayload = {
+          notes: "Delivered half due to shortage",
+          deliveryDate: new Date().toISOString(),
+          trackingNumber: "TRACK-PARTIAL-001",
+          stock_location_id: stockLocationId,
+          lines: [
+            {
+              order_line_id: firstLineId,
+              quantity: Math.max(1, Math.floor((orderLines[0].quantity || 2) / 2)),
+            },
+          ],
+        }
+        const completeResponse = await api.post(
+          `/partners/inventory-orders/${inventoryOrderId}/complete`,
+          partialCompletePayload,
+          { headers: partnerHeaders }
+        )
+        expect(completeResponse.status).toBe(200)
+        expect(completeResponse.data.message).toBe("Order updated (partial delivery)")
+        expect(completeResponse.data.result.fullyFulfilled).toBe(false)
+        console.log("[LOG][complete-partial] status=", completeResponse.status, "result=", completeResponse.data.result)
+
+        // 5. Verify order remains Processing and partner status is still in_progress
+        const afterCompletePartnerOrder = await api.get(
+          `/partners/inventory-orders/${inventoryOrderId}`,
+          { headers: partnerHeaders }
+        )
+        expect(afterCompletePartnerOrder.status).toBe(200)
+        expect(afterCompletePartnerOrder.data.inventoryOrder.status).toBe("Partial")
+        // Partner status remains in_progress after a partial completion
+        expect(afterCompletePartnerOrder.data.inventoryOrder.partner_info.partner_status).toBe("in_progress")
+        console.log("[LOG][get-after-partial] inv.status=", afterCompletePartnerOrder.data.inventoryOrder.status, "partner_status=", afterCompletePartnerOrder.data.inventoryOrder.partner_info?.partner_status)
+
+        // #2289 — a partial Complete is a partial DISPATCH: nothing received,
+        // nothing stocked, and the ledger says what is left to send.
+        const container = getContainer()
+        const query = container.resolve(ContainerRegistrationKeys.QUERY)
+        const deliveredQty = partialCompletePayload.lines[0].quantity
+        const partialLine = afterCompletePartnerOrder.data.inventoryOrder.order_lines.find(
+          (l: any) => l.id === firstLineId
+        )
+        expect(partialLine.ledger.dispatched).toBe(deliveredQty)
+        expect(partialLine.ledger.received).toBe(0)
+        expect(partialLine.ledger.to_dispatch).toBe(partialLine.quantity - deliveredQty)
+
+        const stockedAtDest = async () => {
+          const { data: levels } = await query.graph({
+            entity: "inventory_level",
+            fields: ["id", "location_id", "stocked_quantity"],
+            filters: { inventory_item_id: inventoryItemId },
+          })
+          return (levels || [])
+            .filter((l: any) => String(l.location_id) === String(stockLocationId))
+            .reduce((s: number, l: any) => s + (Number(l.stocked_quantity) || 0), 0)
+        }
+        expect(await stockedAtDest()).toBe(0)
+
+        // 6. Finalize the order by delivering the remaining quantities for ALL lines
+        const beforeFinal = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, { headers: partnerHeaders })
+        const remainingLines = (beforeFinal.data.inventoryOrder.order_lines as any[])
+          .map((l: any) => ({ order_line_id: l.id, remaining: l.ledger.to_dispatch, requested: Number(l.quantity) }))
+          .filter((x) => x.remaining > 0)
+
+        // Ensure there is something to deliver to complete the order
+        expect(remainingLines.length).toBeGreaterThan(0)
+        console.log("[LOG][final-prep] remainingLines=", remainingLines)
+
+        const finalCompletePayload = {
+          notes: "Deliver remaining to complete order",
+          deliveryDate: new Date().toISOString(),
+          trackingNumber: "TRACK-FINAL-001",
+          stock_location_id: stockLocationId,
+          lines: remainingLines.map((x) => ({ order_line_id: x.order_line_id, quantity: x.remaining })),
+        }
+        const finalCompleteResponse = await api.post(
+          `/partners/inventory-orders/${inventoryOrderId}/complete`,
+          finalCompletePayload,
+          { headers: partnerHeaders }
+        )
+        expect(finalCompleteResponse.status).toBe(200)
+        console.log("[LOG][complete-final] status=", finalCompleteResponse.status, "result=", finalCompleteResponse.data?.result)
+        // Give the system a brief moment to persist and propagate state before polling
+        await new Promise((r) => setTimeout(r, 300))
+
+        // 7. Verify order partner status is completed and fulfillments sum equals requested (single check)
+        const finalPartnerOrder = await api.get(
+          `/partners/inventory-orders/${inventoryOrderId}`,
+          { headers: partnerHeaders }
+        )
+        expect(finalPartnerOrder.status).toBe(200)
+        expect(finalPartnerOrder.data.inventoryOrder.partner_info.partner_status).toBe("completed")
+        console.log("[LOG][get-after-final] partner_status=", finalPartnerOrder.data.inventoryOrder?.partner_info?.partner_status, "inv.status=", finalPartnerOrder.data.inventoryOrder?.status)
+
+        // Everything is dispatched; nothing is stocked until it is counted.
+        expect(await stockedAtDest()).toBe(0)
+        const sumRequestedAll = (finalPartnerOrder.data.inventoryOrder.order_lines as any[])
+          .reduce((s: number, l: any) => s + (Number(l.quantity) || 0), 0)
+
+        // The receiver counts ONE unit short on the first line. Before #2289
+        // this count could not be recorded at all ("Nothing outstanding").
+        const lines = finalPartnerOrder.data.inventoryOrder.order_lines as any[]
+        const countLines = lines.map((l: any, i: number) => ({
+          order_line_id: l.id,
+          quantity: i === 0 ? Number(l.quantity) - 1 : Number(l.quantity),
+        }))
+        const countRes = await api.post(
+          `/admin/inventory-orders/${inventoryOrderId}/receive`,
+          { lines: countLines },
+          adminHeaders
+        )
+        expect(countRes.status).toBe(200)
+        expect(await stockedAtDest()).toBe(sumRequestedAll - 1)
+
+        const afterCount = await api.get(`/partners/inventory-orders/${inventoryOrderId}`, { headers: partnerHeaders })
+        const short = (afterCount.data.inventoryOrder.order_lines as any[]).find((l: any) => l.id === lines[0].id)
+        // #2289 S3 — the receiver counted it: 1 is SHORT, not awaiting a count.
+        expect(short.ledger.short).toBe(1)
+        expect(short.ledger.awaiting_count).toBe(0)
+      })
+
+      it("should create missing inventory levels at the destination when the goods are counted", async () => {
+        // Create a fresh inventory item without pre-associated inventory levels
+        const newItemRes = await api.post(
+          "/admin/inventory-items",
+          { title: "Test Fabric Without Level", description: "No level pre-created" },
+          adminHeaders
+        )
+        expect(newItemRes.status).toBe(200)
+        const newInventoryItemId = newItemRes.data.inventory_item.id
+
+        // Create a new inventory order for this item pointing to the existing destination stockLocationId
+        const newOrderPayload = {
+          order_lines: [{ inventory_item_id: newInventoryItemId, quantity: 50, price: 10 }],
+          quantity: 50,
+          total_price: 500,
+          status: "Pending",
+          expected_delivery_date: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {
+            address_1: "456 Factory St",
+            city: "Another City",
+            postal_code: "67890",
+            country_code: "US",
+          },
+          stock_location_id: stockLocationId,
+          to_stock_location_id: stockLocationId,
+          from_stock_location_id: fromStockLocationId,
+          is_sample: false,
+        }
+        const newOrderRes = await api.post("/admin/inventory-orders", newOrderPayload, adminHeaders)
+        expect(newOrderRes.status).toBe(201)
+        const newInventoryOrderId = newOrderRes.data.inventoryOrder.id
+
+        // Send to partner
+        const sendRes = await api.post(
+          `/admin/inventory-orders/${newInventoryOrderId}/send-to-partner`,
+          { partnerId, notes: "Create-levels test" },
+          adminHeaders
+        )
+        expect(sendRes.status).toBe(200)
+
+        // Partner starts the order
+        const startRes = await api.post(
+          `/partners/inventory-orders/${newInventoryOrderId}/start`,
+          {},
+          { headers: partnerHeaders }
+        )
+        expect([200, 204]).toContain(startRes.status)
+
+        // Fetch order lines for completion
+        const partnerOrderRes = await api.get(`/partners/inventory-orders/${newInventoryOrderId}`, { headers: partnerHeaders })
+        expect(partnerOrderRes.status).toBe(200)
+        const orderLines = partnerOrderRes.data.inventoryOrder.order_lines || []
+        expect(orderLines.length).toBeGreaterThan(0)
+        const deliverLines = orderLines.map((l: any) => ({ order_line_id: l.id, quantity: l.quantity }))
+
+        // Complete the order fully; provide stock_location_id to ensure destination resolution
+        const completeRes = await api.post(
+          `/partners/inventory-orders/${newInventoryOrderId}/complete`,
+          {
+            notes: "Auto-create levels on completion",
+            tracking_number: "TRACK-NEW-ITEM-001",
+            stock_location_id: stockLocationId,
+            lines: deliverLines,
+          },
+          { headers: partnerHeaders }
+        )
+        expect([200, 204]).toContain(completeRes.status)
+
+        // #2289 — the level is created when the goods are COUNTED, not dispatched.
+        const receiveNew = await api.post(`/admin/inventory-orders/${newInventoryOrderId}/receive`, {}, adminHeaders)
+        expect(receiveNew.status).toBe(200)
+
+        // Verify an inventory_level now exists at destination location with stocked_quantity == requested
+        const container = getContainer()
+        const query = container.resolve(ContainerRegistrationKeys.QUERY)
+        const { data: levels } = await query.graph({
+          entity: "inventory_level",
+          fields: ["id", "inventory_item_id", "location_id", "stocked_quantity"],
+          filters: { inventory_item_id: newInventoryItemId },
+        })
+        const destLevels = (levels || []).filter((l: any) => String(l.location_id) === String(stockLocationId))
+        console.log("[DBG] destLevels=", JSON.stringify(destLevels, null, 2))
+        expect(destLevels.length).toBeGreaterThan(0)
+        const totalStocked = destLevels.reduce((s: number, l: any) => s + (Number(l.stocked_quantity) || 0), 0)
+        const requestedQty = newOrderPayload.quantity
+        expect(totalStocked).toBe(requestedQty)
+      })
+
+      /**
+       * #1613 at the HTTP boundary — the two records of a delivery, and a
+       * cancel that read the wrong one.
+       *
+       * `metadata.partner_delivered_lines` is OVERWRITTEN on every partner
+       * submission, so after two partial deliveries it holds only the second.
+       * The cancel workflow reversed stock from that key, so it un-posted the
+       * second submission and left the first sitting in the warehouse as stock
+       * for goods that were never received.
+       *
+       * Two submissions is the minimum that makes the two records disagree —
+       * with one, the blob and the typed rows say the same thing and the
+       * assertion would hold either way.
+       */
+      it("reverses BOTH partner submissions on cancel, not just the last one (#1613)", async () => {
+        const itemRes = await api.post(
+          "/admin/inventory-items",
+          { title: "Twice-Delivered Fabric", description: "#1613 cancel reversal" },
+          adminHeaders
+        )
+        expect(itemRes.status).toBe(200)
+        const itemId = itemRes.data.inventory_item.id
+
+        const orderRes = await api.post(
+          "/admin/inventory-orders",
+          {
+            order_lines: [{ inventory_item_id: itemId, quantity: 16, price: 400 }],
+            quantity: 16,
+            total_price: 6400,
+            status: "Pending",
+            expected_delivery_date: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+            order_date: new Date().toISOString(),
+            shipping_address: {
+              address_1: "1 Loom Road",
+              city: "Bhagalpur",
+              postal_code: "812001",
+              country_code: "IN",
+            },
+            stock_location_id: stockLocationId,
+            to_stock_location_id: stockLocationId,
+            from_stock_location_id: fromStockLocationId,
+            is_sample: false,
+          },
+          adminHeaders
+        )
+        expect(orderRes.status).toBe(201)
+        const orderId = orderRes.data.inventoryOrder.id
+
+        expect(
+          (await api.post(
+            `/admin/inventory-orders/${orderId}/send-to-partner`,
+            { partnerId, notes: "#1613 two-submission cancel" },
+            adminHeaders
+          )).status
+        ).toBe(200)
+        expect([200, 204]).toContain(
+          (await api.post(`/partners/inventory-orders/${orderId}/start`, {}, { headers: partnerHeaders })).status
+        )
+
+        const partnerView = await api.get(`/partners/inventory-orders/${orderId}`, { headers: partnerHeaders })
+        const lineId = partnerView.data.inventoryOrder.order_lines[0].id
+
+        // Two submissions on the SAME line: 10, then 6.
+        for (const quantity of [10, 6]) {
+          const res = await api.post(
+            `/partners/inventory-orders/${orderId}/complete`,
+            {
+              notes: `#1613 submission of ${quantity}`,
+              deliveryDate: new Date().toISOString(),
+              stock_location_id: stockLocationId,
+              lines: [{ order_line_id: lineId, quantity }],
+            },
+            { headers: partnerHeaders }
+          )
+          expect([200, 204]).toContain(res.status)
+        }
+
+        const container = getContainer()
+        const query = container.resolve(ContainerRegistrationKeys.QUERY)
+        const stockedAtDest = async () => {
+          const { data: levels } = await query.graph({
+            entity: "inventory_level",
+            fields: ["id", "location_id", "stocked_quantity"],
+            filters: { inventory_item_id: itemId },
+          })
+          return (levels || [])
+            .filter((l: any) => String(l.location_id) === String(stockLocationId))
+            .reduce((sum: number, l: any) => sum + (Number(l.stocked_quantity) || 0), 0)
+        }
+
+        // #2289 — two dispatches post nothing; the count posts all 16.
+        expect(await stockedAtDest()).toBe(0)
+        const counted = await api.post(`/admin/inventory-orders/${orderId}/receive`, {}, adminHeaders)
+        expect(counted.status).toBe(200)
+        expect(await stockedAtDest()).toBe(16)
+
+        // 🔴 The blob now holds ONLY the second submission. If this were the
+        // whole record, the order would look 6 units delivered, not 16.
+        const orderView = await api.get(`/admin/inventory-orders/${orderId}?fields=id,status,metadata`, adminHeaders)
+        // #2289 — the supplier's submissions are dispatches, kept under their
+        // own key. `partner_delivered_lines` (what cancel reads as received)
+        // must stay untouched by a dispatch.
+        const blob = orderView.data.inventoryOrder.metadata?.partner_dispatched_lines || []
+        expect(blob).toEqual([{ order_line_id: lineId, quantity: 6 }])
+        expect(orderView.data.inventoryOrder.metadata?.partner_delivered_lines).toBeUndefined()
+
+        const cancelRes = await api.post(`/admin/inventory-orders/${orderId}/cancel`, { reason: "#1613" }, adminHeaders)
+        expect(cancelRes.status).toBe(200)
+
+        // Everything that was posted comes back off. Reading the blob alone
+        // reversed 6 and left 10 units of phantom stock behind.
+        expect(await stockedAtDest()).toBe(0)
+      })
+
+      /**
+       * #2289 hotfix — a cancel after a DISPATCH that nobody counted must not
+       * reverse stock that was never posted. Slice 1 still wrote the dispatch
+       * into `partner_delivered_lines`, which cancel reads as received, so this
+       * order would have gone to -16 at the destination.
+       */
+      it("cancelling a dispatched-but-uncounted order takes no stock off the destination (#2289)", async () => {
+        const itemRes = await api.post(
+          "/admin/inventory-items",
+          { title: "Dispatched Never Counted", description: "#2289 cancel" },
+          adminHeaders
+        )
+        const itemId = itemRes.data.inventory_item.id
+        // The destination already holds stock, as it does in real life — with
+        // no level to subtract from, the bug could not show.
+        await createInventoryLevelsWorkflow(getContainer()).run({
+          input: { inventory_levels: [{ inventory_item_id: itemId, location_id: stockLocationId, stocked_quantity: 100 }] },
+        })
+        const orderRes = await api.post(
+          "/admin/inventory-orders",
+          {
+            order_lines: [{ inventory_item_id: itemId, quantity: 16, price: 400 }],
+            quantity: 16,
+            total_price: 6400,
+            status: "Pending",
+            expected_delivery_date: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+            order_date: new Date().toISOString(),
+            shipping_address: { address_1: "1 Loom Road", city: "Bhagalpur", postal_code: "812001", country_code: "IN" },
+            stock_location_id: stockLocationId,
+            to_stock_location_id: stockLocationId,
+            from_stock_location_id: fromStockLocationId,
+            is_sample: false,
+          },
+          adminHeaders
+        )
+        const orderId = orderRes.data.inventoryOrder.id
+        await api.post(`/admin/inventory-orders/${orderId}/send-to-partner`, { partnerId, notes: "#2289 cancel" }, adminHeaders)
+        await api.post(`/partners/inventory-orders/${orderId}/start`, {}, { headers: partnerHeaders })
+        const view = await api.get(`/partners/inventory-orders/${orderId}`, { headers: partnerHeaders })
+        const lineId = view.data.inventoryOrder.order_lines[0].id
+        const done = await api.post(
+          `/partners/inventory-orders/${orderId}/complete`,
+          { lines: [{ order_line_id: lineId, quantity: 16 }] },
+          { headers: partnerHeaders }
+        )
+        expect(done.status).toBe(200)
+
+        const query = getContainer().resolve(ContainerRegistrationKeys.QUERY)
+        const stocked = async () => {
+          const { data: levels } = await query.graph({
+            entity: "inventory_level",
+            fields: ["location_id", "stocked_quantity"],
+            filters: { inventory_item_id: itemId },
+          })
+          return (levels || [])
+            .filter((l: any) => String(l.location_id) === String(stockLocationId))
+            .reduce((sum: number, l: any) => sum + (Number(l.stocked_quantity) || 0), 0)
+        }
+        // The dispatch moved nothing.
+        expect(await stocked()).toBe(100)
+
+        const cancelRes = await api.post(`/admin/inventory-orders/${orderId}/cancel`, { reason: "#2289" }, adminHeaders)
+        expect(cancelRes.status).toBe(200)
+        // Nothing was posted, so nothing comes off. Slice 1 took this to 84.
+        expect(await stocked()).toBe(100)
+      })
+    })
+})

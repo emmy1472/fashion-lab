@@ -1,0 +1,439 @@
+import { Badge, Button, Container, Drawer, Heading, Input, Label, Select, Switch, Text, toast, usePrompt } from "@medusajs/ui"
+import { ChatBubbleLeftRight, PencilSquare, Trash } from "@medusajs/icons"
+import { useEffect, useMemo, useState } from "react"
+import { useNavigate } from "react-router-dom"
+import { useUpdatePartner, useDeletePartner } from "../../hooks/api/partners-admin"
+import { usePersonTypes } from "../../hooks/api/persontype"
+import { ActionMenu } from "../common/action-menu"
+import { sdk } from "../../lib/config"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
+
+export type AdminPartner = {
+  id: string
+  name: string
+  handle: string
+  logo?: string | null
+  status: "active" | "inactive" | "pending"
+  is_verified: boolean
+  workspace_type?: "seller" | "manufacturer" | "individual" | "designer"
+  whatsapp_number?: string | null
+  whatsapp_verified?: boolean
+  metadata?: Record<string, any> | null
+}
+
+export const PartnerGeneralSection = ({ partner }: { partner: AdminPartner }) => {
+  const prompt = usePrompt()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const [name, setName] = useState(partner.name)
+  const [handle, setHandle] = useState(partner.handle)
+  const [logo, setLogo] = useState(partner.logo || "")
+  const [status, setStatus] = useState<"active" | "inactive" | "pending">(partner.status)
+  const [isVerified, setIsVerified] = useState<boolean>(!!partner.is_verified)
+  const [workspaceType, setWorkspaceType] = useState<"seller" | "manufacturer" | "individual" | "designer">(
+    partner.workspace_type || "manufacturer"
+  )
+  const [showEdit, setShowEdit] = useState(false)
+
+  const { mutateAsync: updatePartner, isPending } = useUpdatePartner()
+  const { mutateAsync: deletePartner } = useDeletePartner(partner.id)
+
+  // Person types for individual workspace type
+  const { personTypes: allPersonTypes } = usePersonTypes({ limit: 100 })
+  const { data: linkedPersonTypesData } = useQuery({
+    queryKey: ["partner-person-types", partner.id],
+    queryFn: () =>
+      sdk.client.fetch<{ person_types: any[]; count: number }>(
+        `/admin/partners/${partner.id}/person-types`
+      ),
+    enabled: workspaceType === "individual",
+  })
+  const linkedPersonTypes = linkedPersonTypesData?.person_types || []
+  const [selectedPersonTypeIds, setSelectedPersonTypeIds] = useState<string[]>([])
+  const [personTypesDirty, setPersonTypesDirty] = useState(false)
+
+  useEffect(() => {
+    const ids = linkedPersonTypes.map((pt: any) => pt.id)
+    setSelectedPersonTypeIds(ids)
+    setPersonTypesDirty(false)
+  }, [linkedPersonTypesData])
+
+  const handleDelete = async () => {
+    const res = await prompt({
+      title: "Delete Partner",
+      description: `Are you sure you want to delete "${partner.name}"? This action cannot be undone. All linked data (tasks, designs, orders, feedbacks) will be unlinked.`,
+      verificationInstruction: "Type the partner handle to confirm.",
+      verificationText: partner.handle,
+      confirmText: "Delete",
+      cancelText: "Cancel",
+    })
+
+    if (!res) return
+
+    try {
+      await deletePartner()
+      toast.success("Partner deleted", { description: `"${partner.name}" has been removed.` })
+      navigate("/partners", { replace: true })
+    } catch (e: any) {
+      toast.error("Delete failed", { description: e?.message || "Could not delete partner" })
+    }
+  }
+
+  // Sync local state if the partner prop updates (e.g., after a successful save/refetch)
+  useEffect(() => {
+    setName(partner.name)
+    setHandle(partner.handle)
+    setLogo(partner.logo || "")
+    setStatus(partner.status)
+    setIsVerified(!!partner.is_verified)
+    setWorkspaceType(partner.workspace_type || "manufacturer")
+  }, [partner.id, partner.name, partner.handle, partner.logo, partner.status, partner.is_verified, partner.workspace_type])
+
+  const isDirty = useMemo(() => {
+    const norm = (v: string | null | undefined) => (v || "").trim()
+    return (
+      norm(name) !== norm(partner.name) ||
+      norm(handle) !== norm(partner.handle) ||
+      norm(logo) !== norm(partner.logo) ||
+      status !== partner.status ||
+      Boolean(isVerified) !== Boolean(partner.is_verified) ||
+      workspaceType !== (partner.workspace_type || "manufacturer")
+    )
+  }, [name, handle, logo, status, isVerified, workspaceType, partner.name, partner.handle, partner.logo, partner.status, partner.is_verified, partner.workspace_type])
+
+  const resetFields = () => {
+    setName(partner.name)
+    setHandle(partner.handle)
+    setLogo(partner.logo || "")
+    setStatus(partner.status)
+    setIsVerified(!!partner.is_verified)
+    setWorkspaceType(partner.workspace_type || "manufacturer")
+  }
+
+  const handleEditOpenChange = (open: boolean) => {
+    if (!open) {
+      resetFields()
+    }
+    setShowEdit(open)
+  }
+
+  const onSave = async () => {
+    try {
+      await updatePartner({
+        id: partner.id,
+        data: { name, handle, logo: logo || null, status, is_verified: isVerified, workspace_type: workspaceType },
+      })
+      toast.success("Partner updated", { description: "Your changes have been saved." })
+      setShowEdit(false)
+    } catch (e: any) {
+      toast.error("Update failed", { description: e?.message || "Could not update partner" })
+    }
+  }
+
+  const workspaceLabel: Record<string, string> = {
+    seller: "Seller",
+    manufacturer: "Manufacturer",
+    individual: "Individual",
+  }
+
+  const onSavePersonTypes = async () => {
+    try {
+      await sdk.client.fetch(`/admin/partners/${partner.id}/person-types`, {
+        method: "POST",
+        body: { person_type_ids: selectedPersonTypeIds },
+      })
+      queryClient.invalidateQueries({ queryKey: ["partner-person-types", partner.id] })
+      setPersonTypesDirty(false)
+      toast.success("Person types updated")
+    } catch (e: any) {
+      toast.error("Failed to update person types", { description: e?.message })
+    }
+  }
+
+  const togglePersonType = (id: string) => {
+    setSelectedPersonTypeIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    )
+    setPersonTypesDirty(true)
+  }
+
+  return (
+    <Container className="divide-y p-0">
+      <div className="flex items-start justify-between px-6 py-4">
+        <div>
+          <Heading level="h2">General</Heading>
+          <Text size="small" className="text-ui-fg-subtle">Basic information for this partner</Text>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge color={partner.status === "active" ? "green" : partner.status === "pending" ? "orange" : "grey"}>{partner.status}</Badge>
+          {partner.is_verified ? <Badge color="green">Verified</Badge> : <Badge>Verified</Badge>}
+          <ActionMenu
+            groups={[
+              {
+                actions: [
+                  {
+                    label: "Edit",
+                    icon: <PencilSquare />,
+                    onClick: () => setShowEdit(true),
+                  },
+                  {
+                    label: "Add Feedback",
+                    icon: <ChatBubbleLeftRight />,
+                    to: `/partners/${partner.id}/add-feedback`,
+                  },
+                ],
+              },
+              {
+                actions: [
+                  {
+                    label: "Delete",
+                    icon: <Trash />,
+                    onClick: handleDelete,
+                  },
+                ],
+              },
+            ]}
+          />
+        </div>
+      </div>
+
+      {/* Read-only display — edit happens in the drawer (roadmap #2) */}
+      <div className="text-ui-fg-subtle grid grid-cols-2 gap-x-4">
+        <div className="flex items-center justify-between gap-x-2 px-6 py-3 border-b col-span-2">
+          <Text size="small" leading="compact" weight="plus">Name</Text>
+          <Text size="small" leading="compact" className="text-ui-fg-base">{partner.name}</Text>
+        </div>
+        <div className="flex items-center justify-between gap-x-2 px-6 py-3 border-b">
+          <Text size="small" leading="compact" weight="plus">Handle</Text>
+          <Text size="small" leading="compact" className="text-ui-fg-base">{partner.handle}</Text>
+        </div>
+        <div className="flex items-center justify-between gap-x-2 px-6 py-3 border-b">
+          <Text size="small" leading="compact" weight="plus">Workspace Type</Text>
+          <Text size="small" leading="compact" className="text-ui-fg-base">
+            {workspaceLabel[partner.workspace_type || "manufacturer"]}
+          </Text>
+        </div>
+        <div className="flex items-center justify-between gap-x-2 px-6 py-3 col-span-2">
+          <Text size="small" leading="compact" weight="plus">Logo URL</Text>
+          <Text size="small" leading="compact" className="text-ui-fg-base truncate max-w-[60%] text-right">
+            {partner.logo || "—"}
+          </Text>
+        </div>
+      </div>
+
+      {/* Edit drawer */}
+      <Drawer open={showEdit} onOpenChange={handleEditOpenChange}>
+        <Drawer.Content>
+          <Drawer.Header>
+            <Drawer.Title>Edit Partner</Drawer.Title>
+            <Drawer.Description>Update this partner's basic information.</Drawer.Description>
+          </Drawer.Header>
+          <Drawer.Body className="flex flex-col gap-y-4 overflow-y-auto">
+            <div>
+              <Label size="small">Name</Label>
+              <Input value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label size="small">Handle</Label>
+                <Input value={handle} onChange={(e) => setHandle(e.target.value)} />
+              </div>
+              <div>
+                <Label size="small">Status</Label>
+                <Select value={status} onValueChange={(v: string) => setStatus(v as any)}>
+                  <Select.Trigger>
+                    <Select.Value placeholder="Select status" />
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Item value="active">Active</Select.Item>
+                    <Select.Item value="inactive">Inactive</Select.Item>
+                    <Select.Item value="pending">Pending</Select.Item>
+                  </Select.Content>
+                </Select>
+              </div>
+              <div>
+                <Label size="small">Workspace Type</Label>
+                <Select value={workspaceType} onValueChange={(v: string) => setWorkspaceType(v as any)}>
+                  <Select.Trigger>
+                    <Select.Value placeholder="Select workspace type" />
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Item value="seller">Seller</Select.Item>
+                    <Select.Item value="manufacturer">Manufacturer</Select.Item>
+                    <Select.Item value="individual">Individual</Select.Item>
+                    <Select.Item value="designer">Designer</Select.Item>
+                  </Select.Content>
+                </Select>
+              </div>
+              <div className="flex items-end gap-2">
+                <Switch checked={isVerified} onCheckedChange={setIsVerified} />
+                <Label size="small">Verified</Label>
+              </div>
+            </div>
+            <div>
+              <Label size="small">Logo URL</Label>
+              <Input value={logo} onChange={(e) => setLogo(e.target.value)} placeholder="https://..." />
+            </div>
+          </Drawer.Body>
+          <Drawer.Footer>
+            <Button size="small" variant="secondary" onClick={() => handleEditOpenChange(false)} disabled={isPending}>
+              Cancel
+            </Button>
+            <Button size="small" onClick={onSave} disabled={!isDirty || isPending} isLoading={isPending}>
+              Save
+            </Button>
+          </Drawer.Footer>
+        </Drawer.Content>
+      </Drawer>
+
+      {workspaceType === "individual" && (
+        <div className="px-6 py-4 space-y-3">
+          <div>
+            <Heading level="h2" className="text-base">Person Types</Heading>
+            <Text size="small" className="text-ui-fg-subtle">
+              Select the roles this individual performs
+            </Text>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {(allPersonTypes || []).map((pt: any) => {
+              const isSelected = selectedPersonTypeIds.includes(pt.id)
+              return (
+                <button
+                  key={pt.id}
+                  type="button"
+                  onClick={() => togglePersonType(pt.id)}
+                  className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-all ${
+                    isSelected
+                      ? "border-ui-border-interactive bg-ui-bg-interactive text-ui-fg-on-color"
+                      : "border-ui-border-base hover:shadow-elevation-card-hover"
+                  }`}
+                >
+                  {pt.name}
+                </button>
+              )
+            })}
+          </div>
+          {personTypesDirty && (
+            <div className="flex justify-end">
+              <Button size="small" onClick={onSavePersonTypes} variant="primary">
+                Save Person Types
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <WhatsAppVerificationSection partner={partner} />
+    </Container>
+  )
+}
+
+// ─── WhatsApp Verification Section ──────────────────────────────────────────
+
+const WhatsAppVerificationSection = ({ partner }: { partner: AdminPartner }) => {
+  const queryClient = useQueryClient()
+  const [phone, setPhone] = useState(partner.whatsapp_number || "")
+  const [notify, setNotify] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  const isVerified = !!partner.whatsapp_verified && !!partner.whatsapp_number
+
+  const handleVerify = async () => {
+    const normalized = phone.replace(/[^0-9]/g, "")
+    if (normalized.length < 10) {
+      toast.error("Enter a valid phone number with country code")
+      return
+    }
+
+    setSaving(true)
+    try {
+      await sdk.client.fetch(`/admin/partners/${partner.id}/whatsapp-verify`, {
+        method: "POST",
+        body: { phone: normalized, notify },
+      })
+      queryClient.invalidateQueries({ queryKey: ["partner"] })
+      toast.success("WhatsApp number verified", {
+        description: notify ? `Notification sent to ${normalized}` : undefined,
+      })
+    } catch (e: any) {
+      toast.error("Verification failed", { description: e?.message })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleRemove = async () => {
+    setSaving(true)
+    try {
+      await sdk.client.fetch(`/admin/partners/${partner.id}/whatsapp-verify`, {
+        method: "DELETE",
+      })
+      setPhone("")
+      queryClient.invalidateQueries({ queryKey: ["partner"] })
+      toast.success("WhatsApp verification removed")
+    } catch (e: any) {
+      toast.error("Failed to remove", { description: e?.message })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="px-6 py-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <Heading level="h2" className="text-base">WhatsApp</Heading>
+          <Text size="small" className="text-ui-fg-subtle">
+            Verify a WhatsApp number for this partner to receive notifications
+          </Text>
+        </div>
+        {isVerified && (
+          <Badge color="green" size="2xsmall">Verified</Badge>
+        )}
+      </div>
+
+      {isVerified ? (
+        <div className="flex items-center justify-between rounded-lg border border-ui-border-base bg-ui-bg-subtle px-4 py-3">
+          <div>
+            <Text size="small" weight="plus">{partner.whatsapp_number}</Text>
+            <Text size="xsmall" className="text-ui-fg-muted">Verified WhatsApp number</Text>
+          </div>
+          <Button
+            size="small"
+            variant="danger"
+            onClick={handleRemove}
+            disabled={saving}
+          >
+            Remove
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div>
+            <Label size="small">Phone Number</Label>
+            <Input
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              placeholder="e.g. 919667554245 (with country code, no +)"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch checked={notify} onCheckedChange={setNotify} />
+            <Label size="small">Send verification notification to partner</Label>
+          </div>
+          <div className="flex justify-end">
+            <Button
+              size="small"
+              variant="primary"
+              onClick={handleVerify}
+              disabled={saving || !phone.trim()}
+              isLoading={saving}
+            >
+              Verify Number
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

@@ -1,0 +1,1059 @@
+import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
+
+import designOrderLink from "../../../../links/design-order-link"
+import designMediaFolderLink from "../../../../links/design-media-folder-link"
+import productDesignLink from "../../../../links/product-design-link"
+import designConsumptionLogLink from "../../../../links/design-consumption-log"
+import designPersonLink from "../../../../links/designs-person-link"
+import designRawMaterialGroupLink from "../../../../links/design-raw-material-group"
+import designInventoryOrderLink from "../../../../links/design-inventory-order"
+import { GraphBuilder, asArray, money, resolveExisting } from "../../builder"
+import { DESIGN_ITEM_NODES, resolveDesignItems } from "./items"
+/*
+ * 🔴 Imported, not re-written. The arrival gate is `Delivered` and NOT
+ * `Shipped`, and a second copy of that rule here is a second place for it to
+ * drift — the design graph would then say the cloth had landed while the run
+ * graph still held dispatch.
+ */
+import { isDependencyMet } from "../production-run/absence"
+import type { EdgeState, Graph, GraphNode, SpineContext, SpineDescriptor } from "../../types"
+import {
+  daysWaiting,
+  expectsInventory,
+  expectsPartner,
+  expectsProductionRun,
+  expectsSpecification,
+  expectsConsumptionLog,
+  productNodeState,
+  runsAwaitingProduct,
+  runsRejected,
+  reachableCustomers,
+} from "./absence"
+
+/**
+ * The DESIGN spine (#1847).
+ *
+ * Lifted out of `GET /admin/designs/:id/graph` unchanged so the admin canvas
+ * and the MCP `get_entity_neighbours` tool resolve neighbours through one
+ * implementation. The node and edge construction below is the prototype's,
+ * verbatim; what changed is that it now returns a `Graph` instead of writing a
+ * response, and pushes through the shared `GraphBuilder`.
+ *
+ * An absent edge is the thing a list of rows can never show. The motivating
+ * case is `production_run.approved_product_id` — written by
+ * `approve-run-output` on every approval, read by nothing, so a finished run
+ * that was never listed for sale is indistinguishable from one that was.
+ *
+ * 🔴 Absences are asserted ONLY where the model genuinely expects the
+ * neighbour (see `absence.ts`). A graph that cries wolf on every empty
+ * relation is worse than no graph: the reader stops believing the dashed
+ * edges, which are the ones worth believing.
+ */
+/** Is this id in the resolved set? Kept tiny so the filters above read cleanly. */
+const orNull = (resolved: string[], id: unknown): boolean =>
+  !!id && resolved.includes(String(id))
+
+const resolveDesignGraph = async ({ scope, id }: SpineContext): Promise<Graph> => {
+  const designId = id
+  const query = scope.resolve(ContainerRegistrationKeys.QUERY) as any
+
+  /**
+   * The relations read straight off the entity are exactly the four the design
+   * detail loader already proves resolve this way (DESIGN_DETAIL_FIELDS).
+   * Anything beyond them is read through the link's own entryPoint below —
+   * a `query.graph` hop from an entity to a linked field can come back with NO
+   * KEY AT ALL rather than an error, and an empty graph is the one failure this
+   * route must never render as "nothing there".
+   */
+  const { data: designs } = await query.graph({
+    entity: "designs",
+    filters: { id: designId },
+    fields: [
+      "*",
+      "partners.*",
+      "tasks.*",
+      "inventory_items.*",
+      "customers.*",
+      // Intra-module hasMany relations — these resolve straight off the entity
+      // (probed: every key comes back populated). Only MODULE LINKS need the
+      // entryPoint treatment below.
+      "specifications.*",
+      "colors.*",
+      "size_sets.*",
+      "components.*",
+      "used_in.*",
+    ],
+  })
+
+  const design = (designs || [])[0]
+  if (!design) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      `Design ${designId} was not found`
+    )
+  }
+
+  const partners = asArray<any>(design.partners)
+  const tasks = asArray<any>(design.tasks)
+  const inventoryItems = asArray<any>(design.inventory_items)
+  const customers = reachableCustomers(asArray<any>(design.customers))
+  const mediaFiles = asArray<any>(design.media_files)
+  const moodboard = asArray<any>(design.moodboard)
+  const specifications = asArray<any>(design.specifications)
+  const colors = asArray<any>(design.colors)
+  const sizeSets = asArray<any>(design.size_sets)
+  const components = asArray<any>(design.components)
+  const usedIn = asArray<any>(design.used_in)
+
+  const { data: runs } = await query.graph({
+    entity: "production_runs",
+    filters: { design_id: designId },
+    fields: ["*"],
+  })
+  const runList = asArray<any>(runs)
+
+  /**
+   * Everything that travels through a LINK TABLE rather than the entity.
+   *
+   * 🔴 Read through `entryPoint`, never as a field hop off `designs`: a
+   * `query.graph` hop from an entity to a linked field can come back with NO
+   * KEY AT ALL rather than an error, and an empty graph is the one failure
+   * this resolver must never render as "nothing there".
+   *
+   * One round trip for all of them — they are independent.
+   */
+  const [
+    { data: orderLinks },
+    { data: folderLinks },
+    { data: productLinks },
+    { data: consumptionLinks },
+    { data: personLinks },
+    { data: materialGroupLinks },
+    { data: inventoryOrderLinks },
+  ] = await Promise.all([
+    query.graph({
+      entity: designOrderLink.entryPoint,
+      filters: { design_id: designId },
+      fields: ["order_id"],
+    }),
+    query.graph({
+      entity: designMediaFolderLink.entryPoint,
+      filters: { design_id: designId },
+      fields: ["folder_id"],
+    }),
+    query.graph({
+      entity: productDesignLink.entryPoint,
+      filters: { design_id: designId },
+      fields: ["product_id"],
+    }),
+    query.graph({
+      entity: designConsumptionLogLink.entryPoint,
+      filters: { design_id: designId },
+      fields: ["consumption_log_id"],
+    }),
+    query.graph({
+      entity: designPersonLink.entryPoint,
+      filters: { design_id: designId },
+      fields: ["person_id", "role"],
+    }),
+    query.graph({
+      entity: designRawMaterialGroupLink.entryPoint,
+      filters: { design_id: designId },
+      fields: ["raw_material_group_id", "resolved_raw_material_id"],
+    }),
+    /*
+     * The material this design is WAITING FOR (#2111), as opposed to the
+     * inventory ITEMS that make up its bill of materials. Attaching an order
+     * (#2200) is what makes the arrival tellable, and until now it left no
+     * trace here at all: the design graph showed items and no orders, so a
+     * design whose cloth was still in transit looked identical to one whose
+     * cloth had never been ordered.
+     *
+     * `notify_customer` / `notified_at` come along because they decide whether
+     * the client hears about the arrival, and that is a fact about this design
+     * that exists nowhere else a reader can see.
+     */
+    query.graph({
+      entity: designInventoryOrderLink.entryPoint,
+      filters: { design_id: designId },
+      fields: [
+        "inventory_orders_id",
+        "notify_customer",
+        "notified_at",
+        "note",
+      ],
+    }),
+  ])
+  const rawOrderIds = asArray<any>(orderLinks).map((l) => l.order_id).filter(Boolean)
+  const folderIds = asArray<any>(folderLinks).map((l) => l.folder_id).filter(Boolean)
+  const rawProductIds = asArray<any>(productLinks).map((l) => l.product_id).filter(Boolean)
+  const rawConsumptionIds = asArray<any>(consumptionLinks)
+    .map((l) => l.consumption_log_id)
+    .filter(Boolean)
+  const personLinkRows = asArray<any>(personLinks)
+  const materialGroupRows = asArray<any>(materialGroupLinks)
+  const inventoryOrderRows = asArray<any>(inventoryOrderLinks)
+
+  /*
+   * 🔴 Keep only the ids with a record behind them.
+   *
+   * A LINK ROW IS NOT A RECORD. Measured on the partner spine against the
+   * local database, where four `people` link rows pointed at person ids that
+   * do not exist and two `submissions` links at submissions that were gone —
+   * so the node said "4 linked" and the drawer listed none. Every node here
+   * built from a link table had the same defect, and it makes the node claim
+   * `present`, which this feature DEFINES as "a declared link with something
+   * on the other end".
+   *
+   * The `media` folder ids are left alone: that node counts FILES off the
+   * design entity, and the folder count is a secondary prop rather than the
+   * thing the edge asserts.
+   */
+  const [orderIds, linkedProductIds, consumptionIds, personIds, materialGroupIds] =
+    await Promise.all([
+      resolveExisting(query, "order", rawOrderIds),
+      resolveExisting(query, "product", rawProductIds),
+      resolveExisting(query, "consumption_log", rawConsumptionIds),
+      resolveExisting(
+        query,
+        "person",
+        personLinkRows.map((l) => l.person_id).filter(Boolean)
+      ),
+      resolveExisting(
+        query,
+        "raw_material_group",
+        materialGroupRows.map((l) => l.raw_material_group_id).filter(Boolean)
+      ),
+    ])
+
+  // Keep the link rows (they carry `role` / `resolved_raw_material_id`), but
+  // only for the ids that actually resolved.
+  const people = personLinkRows.filter((l) => orNull(personIds, l.person_id))
+  const materialGroups = materialGroupRows.filter((l) =>
+    orNull(materialGroupIds, l.raw_material_group_id)
+  )
+
+  /*
+   * 🔴 The orders are fetched as RECORDS, never counted off the link rows —
+   * the same rule the attach route follows. A link row is not a record: the
+   * partner spine once said "4 linked" against four person ids that no longer
+   * existed. The node needs each order's status anyway, since "waiting" and
+   * "arrived" are the whole point of drawing it.
+   */
+  const linkedOrderIds = inventoryOrderRows
+    .map((l) => l.inventory_orders_id)
+    .filter(Boolean)
+    .map(String)
+  const { data: inventoryOrders = [] } = linkedOrderIds.length
+    ? await query.graph({
+        entity: "inventory_orders",
+        filters: { id: linkedOrderIds },
+        fields: ["id", "status", "quantity", "expected_delivery_date"],
+      })
+    : { data: [] }
+  const orderById = new Map(
+    asArray<any>(inventoryOrders).map((o) => [String(o.id), o])
+  )
+  const supplyOrders = inventoryOrderRows
+    .filter((l) => orderById.has(String(l.inventory_orders_id)))
+    .map((l) => ({
+      ...orderById.get(String(l.inventory_orders_id)),
+      notify_customer: l.notify_customer !== false,
+      notified_at: l.notified_at ?? null,
+      note: l.note ?? null,
+    }))
+
+  // ---- derived facts the absence rules key on -----------------------------
+
+  const runsWithProduct = runList.filter((r) => !!r.approved_product_id)
+  const productIds = Array.from(
+    new Set(runsWithProduct.map((r) => r.approved_product_id))
+  )
+  const outstandingRuns = runsAwaitingProduct(runList)
+  const rejectedRuns = runsRejected(runList)
+
+  // The task enum is pending | in_progress | completed | cancelled | accepted |
+  // assigned — "completed" is the only terminal-done value, so don't invent
+  // synonyms that would silently count nothing.
+  const doneTasks = tasks.filter((t) => String(t.status) === "completed").length
+
+  const builder = new GraphBuilder("design")
+  const push = builder.push.bind(builder)
+
+  // ---- production runs ----------------------------------------------------
+
+  const runStatusCounts = runList.reduce<Record<string, number>>((acc, r) => {
+    const k = String(r.status)
+    acc[k] = (acc[k] || 0) + 1
+    return acc
+  }, {})
+
+  const producedTotal = runList.reduce(
+    (sum, r) => sum + (Number(r.produced_quantity) || 0),
+    0
+  )
+
+  if (runList.length) {
+    push(
+      {
+        key: "runs",
+        type: "production_run",
+        label: "Production runs",
+        sublabel: `${runList.length} run${runList.length === 1 ? "" : "s"}`,
+        state: "present",
+        count: runList.length,
+        status: null,
+        href: `/designs/${designId}/production-runs`,
+        props: [
+          ...Object.entries(runStatusCounts).map(([k, v]) => ({
+            key: k,
+            value: String(v),
+          })),
+          { key: "produced", value: String(producedTotal) },
+          {
+            key: "awaiting_reassignment",
+            value: String(runStatusCounts["awaiting_reassignment"] || 0),
+          },
+        ],
+        action: null,
+      },
+      { label: "design_id", state: "present", reason: null }
+    )
+  } else if (expectsProductionRun(design.status, runList.length)) {
+    /*
+     * 🔴 Drawn ONLY when a run is genuinely expected.
+     *
+     * This branch used to fall through to a `present` node with a count of
+     * zero, a sublabel of "not started" and a null action — on every design
+     * that has not been committed yet, which is most of them. By this
+     * feature's own definition a `present` edge is "a declared link with
+     * SOMETHING ON THE OTHER END", and there was nothing: the node asserted a
+     * neighbour that does not exist, said nothing the spine's own status did
+     * not already say, and offered no action.
+     *
+     * It is the same defect as counting link rows instead of records, in a
+     * different disguise, and it survived three steps of this feature because
+     * a node that is merely POINTLESS looks identical to one that is wrong.
+     * Nothing is lost by dropping it: `expectsProductionRun` is exactly
+     * "committed && no runs", so the case that carried the "Send to
+     * production" action is precisely the case still drawn below.
+     */
+    push(
+      {
+        key: "runs",
+        type: "production_run",
+        label: "Production runs",
+        sublabel: "none yet",
+        state: "absent",
+        count: 0,
+        status: null,
+        href: `/designs/${designId}/production-runs`,
+        props: [{ key: "design status", value: String(design.status) }],
+        action: {
+          label: "Send to production",
+          href: `/designs/${designId}/production-run`,
+        },
+      },
+      {
+        label: "design_id",
+        state: "absent",
+        reason: `Design is ${design.status} and no run has been created.`,
+      }
+    )
+  }
+
+  /**
+   * Rejected output, which no status-based view on this page can show.
+   *
+   * `approval_decision` is a SEPARATE AXIS from `status`: a rejected run stays
+   * `completed`, because the work WAS done and the partner is still owed for
+   * it. So the "Production runs" node above counts a rejected run among its
+   * completed ones and says nothing about the decision — the rejection is
+   * recorded and read by nothing that keys on status.
+   *
+   * 🔴 Uses the SHARED predicate, `runsRejected`, the same one the
+   * `runs-rejected` cohort board imports. A design page that disagreed with
+   * that board about whether a run was rejected is the exact fault the
+   * feature exists to remove, and a second copy of the rule is how it happens.
+   *
+   * Drawn ONLY when there is at least one, for the reason the empty `runs`
+   * branch above was deleted: a `present` node with a count of zero asserts a
+   * neighbour that does not exist, and a node that is merely pointless looks
+   * identical to one that is wrong.
+   */
+  if (rejectedRuns.length) {
+    const rejectedUnits = rejectedRuns.reduce(
+      (sum, r: any) => sum + (Number(r.rejected_quantity) || 0),
+      0
+    )
+    push(
+      {
+        key: "runs_rejected",
+        type: "production_run",
+        label: "Rejected output",
+        // The count goes IN the sublabel: the canvas draws `sublabel ?? count`,
+        // so a sublabel that omitted it would hide the number it replaces.
+        sublabel: `${rejectedRuns.length} rejected run${
+          rejectedRuns.length === 1 ? "" : "s"
+        }${rejectedUnits ? `, ${rejectedUnits} unit${rejectedUnits === 1 ? "" : "s"}` : ""}`,
+        state: "present",
+        count: rejectedRuns.length,
+        status: null,
+        href: `/designs/${designId}/production-runs`,
+        props: [
+          { key: "rejected runs", value: String(rejectedRuns.length) },
+          ...(rejectedUnits
+            ? [{ key: "units rejected", value: String(rejectedUnits) }]
+            : []),
+          {
+            key: "still counted completed",
+            value: String(
+              rejectedRuns.filter((r: any) => String(r.status) === "completed")
+                .length
+            ),
+          },
+        ],
+        action: null,
+      },
+      { label: "approval_decision", state: "present", reason: null }
+    )
+  }
+
+  // ---- product: the motivating absent edge --------------------------------
+
+  const productState = productNodeState(
+    productIds.length,
+    outstandingRuns.length,
+    linkedProductIds.length
+  )
+
+  if (productState === "present") {
+    push(
+      {
+        key: "product",
+        type: "product",
+        label: "Product",
+        sublabel: `${productIds.length} listed`,
+        state: "present",
+        count: productIds.length,
+        status: null,
+        href: `/products/${productIds[0]}`,
+        props: [
+          { key: "from runs", value: String(runsWithProduct.length) },
+          { key: "product id", value: String(productIds[0]) },
+        ],
+        action: null,
+      },
+      { label: "approved_product_id", state: "present", reason: null }
+    )
+  } else if (productState === "derived") {
+    /**
+     * Joined through `product_design` with no run having written
+     * `approved_product_id`. A real relationship, but not this node's column —
+     * so it draws dashed, and says which path it came down. Reading it as
+     * "present" would claim a run produced it; reading it as "none" would deny
+     * a link that exists.
+     */
+    push(
+      {
+        key: "product",
+        type: "product",
+        label: "Product",
+        sublabel: `${linkedProductIds.length} linked directly`,
+        state: "derived",
+        count: linkedProductIds.length,
+        status: null,
+        href: `/products/${linkedProductIds[0]}`,
+        props: [
+          { key: "via", value: "product_design" },
+          { key: "approved_product_id", value: "null" },
+          { key: "product id", value: String(linkedProductIds[0]) },
+        ],
+        action: null,
+      },
+      {
+        label: "product_design",
+        state: "derived",
+        reason:
+          "This design is joined to a catalogue product through the product_design link, but no production run wrote approved_product_id. The product exists; it is not recorded as any run's output.",
+      }
+    )
+  } else if (productState === "absent") {
+    const waitingDays = daysWaiting(outstandingRuns)
+
+    push(
+      {
+        key: "product",
+        type: "product",
+        label: "Product",
+        sublabel: productIds.length
+          ? `${productIds.length} listed, ${outstandingRuns.length} not`
+          : "never created",
+        state: "absent",
+        count: 0,
+        status: null,
+        href: null,
+        props: [
+          { key: "runs awaiting", value: String(outstandingRuns.length) },
+          ...(productIds.length
+            ? [{ key: "already listed", value: String(productIds.length) }]
+            : []),
+          { key: "approved_product_id", value: "null" },
+          ...(waitingDays !== null
+            ? [{ key: "waiting", value: `${waitingDays} days` }]
+            : []),
+          { key: "produced", value: String(producedTotal) },
+        ],
+        action: {
+          label: "List this run as a product",
+          href: `/designs/${designId}/production-runs`,
+        },
+      },
+      {
+        label: "approved_product_id",
+        state: "absent",
+        reason:
+          productIds.length
+            ? "Some runs on this design were listed and others were not. The listed ones do not discharge the rest — each finished run owes its own product."
+            : "A run finished and no catalogue product was created from it. The column is written on approval and read by nothing, so this never appears in a list.",
+      }
+    )
+  }
+
+  // ---- partners -----------------------------------------------------------
+
+  const partnerExpected = expectsPartner(runList, partners.length)
+  if (partners.length) {
+    push(
+      {
+        key: "partners",
+        type: "partner",
+        label: "Partners",
+        sublabel: partners.map((p) => p.name).filter(Boolean).join(", ") || null,
+        state: "present",
+        count: partners.length,
+        status: null,
+        href: `/designs/${designId}/partners`,
+        props: partners.slice(0, 4).map((p) => ({
+          key: p.name || p.id,
+          value: String(p.status ?? "linked"),
+        })),
+        action: null,
+      },
+      { label: "partner", state: "present", reason: null }
+    )
+  } else if (partnerExpected) {
+    push(
+      {
+        key: "partners",
+        type: "partner",
+        label: "Partners",
+        sublabel: "none linked",
+        state: "absent",
+        count: 0,
+        status: null,
+        href: `/designs/${designId}/partners`,
+        props: [{ key: "outsourced runs", value: String(runList.filter((r) => r.execution_mode === "outsourced").length) }],
+        action: {
+          label: "Link a partner",
+          href: `/designs/${designId}/linkPartner`,
+        },
+      },
+      {
+        label: "partner",
+        state: "absent",
+        reason:
+          "A run is set to outsourced execution but no partner is linked to the design.",
+      }
+    )
+  }
+
+  // ---- tasks --------------------------------------------------------------
+
+  if (tasks.length) {
+    push(
+      {
+        key: "tasks",
+        type: "task",
+        label: "Tasks",
+        sublabel: `${doneTasks} of ${tasks.length} done`,
+        state: "present",
+        count: tasks.length,
+        status: null,
+        href: `/designs/${designId}/tasks`,
+        props: [
+          { key: "done", value: String(doneTasks) },
+          { key: "open", value: String(tasks.length - doneTasks) },
+        ],
+        action: null,
+      },
+      { label: "tasks", state: "present", reason: null }
+    )
+  }
+
+  // ---- supply: the material this design is waiting for --------------------
+
+  /*
+   * Distinct from the Inventory node below. That one is the design's bill of
+   * materials — WHAT it is made of. This one is the purchase that has to land
+   * before anyone can make it, and its status is the difference between "not
+   * started yet" and "cannot start yet".
+   */
+  if (supplyOrders.length) {
+    const unmet = supplyOrders.filter((o) => !isDependencyMet(o.status))
+    const willTell = supplyOrders.filter((o) => o.notify_customer && !o.notified_at)
+    push(
+      {
+        key: "supply_orders",
+        type: "inventory_order",
+        label: "Material on order",
+        sublabel: unmet.length
+          ? `${unmet.length} of ${supplyOrders.length} not delivered`
+          : `${supplyOrders.length} delivered`,
+        state: unmet.length ? "derived" : "present",
+        count: supplyOrders.length,
+        status: unmet.length ? "blocked" : "met",
+        href: null,
+        props: supplyOrders.slice(0, 4).map((o) => ({
+          key: String(o.id),
+          value: String(o.status ?? "—"),
+        })),
+        action: null,
+      },
+      {
+        label: "design ↔ inventory_order",
+        state: unmet.length ? "derived" : "present",
+        /*
+         * Names `Delivered` explicitly, for the same reason the run spine
+         * does: a reader who reads `Shipped` as arrival will chase a maker who
+         * does not have the cloth yet.
+         *
+         * The notify clause is here because it is otherwise invisible. An
+         * attachment with `notify_customer: false` is a deliberate silence,
+         * and a deliberate silence that nothing displays is indistinguishable
+         * from the bug this pipeline exists to end — a client who is told
+         * nothing because nobody noticed.
+         */
+        reason: unmet.length
+          ? `The cloth is not here yet — an order counts as arrived at Delivered, not Shipped. ${unmet
+              .map((o) => `${o.id} is ${o.status}`)
+              .join("; ")}.${
+              willTell.length
+                ? ""
+                : " No attached order will tell this design's client when it lands."
+            }`
+          : null,
+      }
+    )
+  }
+
+  // ---- inventory ----------------------------------------------------------
+
+  if (inventoryItems.length) {
+    push(
+      {
+        key: "inventory",
+        type: "inventory_item",
+        label: "Inventory",
+        sublabel: `${inventoryItems.length} item${inventoryItems.length === 1 ? "" : "s"}`,
+        state: "present",
+        count: inventoryItems.length,
+        status: null,
+        href: `/designs/${designId}`,
+        props: inventoryItems.slice(0, 4).map((i) => ({
+          key: i.title || i.sku || i.id,
+          value: String(i.sku ?? ""),
+        })),
+        action: null,
+      },
+      { label: "inventory_item", state: "present", reason: null }
+    )
+  } else if (expectsInventory(runList, inventoryItems.length)) {
+    push(
+      {
+        key: "inventory",
+        type: "inventory_item",
+        label: "Inventory",
+        sublabel: "nothing linked",
+        state: "absent",
+        count: 0,
+        status: null,
+        href: `/designs/${designId}`,
+        props: [{ key: "runs", value: String(runList.length) }],
+        action: { label: "Link inventory", href: `/designs/${designId}/addinv` },
+      },
+      {
+        label: "inventory_item",
+        state: "absent",
+        reason:
+          "A run exists but no inventory item is linked, so material consumption cannot be costed against this design.",
+      }
+    )
+  }
+
+  // ---- media --------------------------------------------------------------
+
+  const mediaCount = mediaFiles.length + folderIds.length
+  if (mediaCount || moodboard.length) {
+    push(
+      {
+        key: "media",
+        type: "media",
+        label: "Media",
+        sublabel: `${mediaFiles.length} file${mediaFiles.length === 1 ? "" : "s"}`,
+        state: "present",
+        count: mediaCount,
+        status: null,
+        href: `/designs/${designId}/media`,
+        props: [
+          { key: "files", value: String(mediaFiles.length) },
+          { key: "folders", value: String(folderIds.length) },
+          { key: "moodboard", value: String(moodboard.length) },
+        ],
+        action: null,
+      },
+      { label: "media_folder", state: "present", reason: null }
+    )
+  }
+
+  // ---- orders (and the customers behind them) -----------------------------
+
+  if (orderIds.length) {
+    push(
+      {
+        key: "orders",
+        type: "order",
+        label: "Orders",
+        sublabel: `${orderIds.length} order${orderIds.length === 1 ? "" : "s"}`,
+        state: "present",
+        count: orderIds.length,
+        status: null,
+        href: `/orders/${orderIds[0]}`,
+        props: [{ key: "orders", value: String(orderIds.length) }],
+        action: null,
+      },
+      { label: "order", state: "present", reason: null }
+    )
+  }
+
+  if (customers.length) {
+    push(
+      {
+        key: "customers",
+        type: "customer",
+        label: "Customers",
+        sublabel: `${customers.length}`,
+        state: "present",
+        count: customers.length,
+        status: null,
+        href: null,
+        props: customers.slice(0, 3).map((c) => ({
+          key: c.email || c.id,
+          value: [c.first_name, c.last_name].filter(Boolean).join(" ") || "—",
+        })),
+        action: null,
+      },
+      { label: "customer", state: "present", reason: null }
+    )
+  } else {
+    /**
+     * 🔴 THE ABSENCE THAT COST A MONTH OF SILENCE.
+     *
+     * Until this branch existed the node was drawn ONLY when a customer was
+     * linked, so a design that could reach nobody drew nothing at all — the
+     * absence was invisible on the one surface built to show absences.
+     *
+     * It is not cosmetic. EVERY customer email about a design — production
+     * started, production complete, materials linked, materials delivered,
+     * status changed — resolves its recipient through this link and returns
+     * SILENTLY when there is none: `sendDesignStatusUpdateEmailWorkflow`
+     * returns null and its `when` guard simply does not fire. No exception, no
+     * warning, nothing in any list.
+     *
+     * Measured on prod 2026-09-20: all five Oshen designs, minted into
+     * published products and viewed by the client from Australia, carried no
+     * customer. So did the Pashmina Inspired Tunic, whose run is holding on a
+     * delivery that will fire a production-started mail into nobody.
+     *
+     * Deliberately `absent` and not `derived`: there is no neighbour here doing
+     * its job badly — there is no neighbour.
+     */
+    push(
+      {
+        key: "customers",
+        type: "customer",
+        label: "Customer",
+        sublabel: "nobody",
+        state: "absent",
+        count: 0,
+        status: null,
+        href: null,
+        props: [],
+        action: { label: "Attach the customer", href: `/designs/${designId}` },
+      },
+      {
+        label: "customer",
+        state: "absent",
+        reason:
+          "No customer is linked, so every email about this design reaches nobody and says nothing about it — the send resolves its recipient here and returns silently. A design sold through a design order gets this link from the order; one that came out of a conversation has to be given it.",
+      }
+    )
+  }
+
+  // ---- specifications (the tech-pack) -------------------------------------
+
+  if (specifications.length) {
+    push(
+      {
+        key: "specifications",
+        type: "specification",
+        label: "Specifications",
+        sublabel: `${specifications.length} detail${specifications.length === 1 ? "" : "s"}`,
+        state: "present",
+        count: specifications.length,
+        status: null,
+        href: `/designs/${designId}`,
+        props: specifications.slice(0, 4).map((sp) => ({
+          key: sp.name || sp.type || sp.id,
+          value: String(sp.value ?? sp.description ?? "—").slice(0, 40),
+        })),
+        action: null,
+      },
+      { label: "specifications", state: "present", reason: null }
+    )
+  } else if (expectsSpecification(design.status, specifications.length)) {
+    push(
+      {
+        key: "specifications",
+        type: "specification",
+        label: "Specifications",
+        sublabel: "none recorded",
+        state: "absent",
+        count: 0,
+        status: null,
+        href: `/designs/${designId}`,
+        props: [{ key: "design status", value: String(design.status) }],
+        action: { label: "Add construction detail", href: null },
+      },
+      {
+        label: "specifications",
+        state: "absent",
+        reason:
+          "The design is committed and carries no construction detail, so a tech-pack cannot be generated from it.",
+      }
+    )
+  }
+
+  // ---- consumption --------------------------------------------------------
+
+  if (consumptionIds.length) {
+    push(
+      {
+        key: "consumption",
+        type: "consumption_log",
+        label: "Consumption",
+        sublabel: `${consumptionIds.length} log${consumptionIds.length === 1 ? "" : "s"}`,
+        state: "present",
+        count: consumptionIds.length,
+        status: null,
+        href: `/designs/${designId}`,
+        props: [{ key: "logs", value: String(consumptionIds.length) }],
+        action: null,
+      },
+      { label: "consumption_log", state: "present", reason: null }
+    )
+  } else if (expectsConsumptionLog(runList, consumptionIds.length)) {
+    push(
+      {
+        key: "consumption",
+        type: "consumption_log",
+        label: "Consumption",
+        sublabel: "never recorded",
+        state: "absent",
+        count: 0,
+        status: null,
+        href: `/designs/${designId}`,
+        props: [
+          {
+            key: "finished runs",
+            value: String(runList.filter((r) => String(r.status) === "completed").length),
+          },
+          { key: "produced", value: String(producedTotal) },
+        ],
+        action: null,
+      },
+      {
+        label: "consumption_log",
+        state: "absent",
+        reason:
+          "A run finished and no material consumption was ever logged against this design, so what it actually cost cannot be known — only estimated.",
+      }
+    )
+  }
+
+  // ---- raw material groups ------------------------------------------------
+
+  if (materialGroups.length) {
+    const resolved = materialGroups.filter((g) => g.resolved_raw_material_id).length
+    push(
+      {
+        key: "materials",
+        type: "raw_material_group",
+        label: "Material groups",
+        sublabel: `${materialGroups.length} pinned`,
+        state: "present",
+        count: materialGroups.length,
+        status: null,
+        href: `/designs/${designId}`,
+        props: [
+          { key: "groups", value: String(materialGroups.length) },
+          // The colour stays unresolved until production picks one (#817 S4).
+          { key: "resolved at production", value: `${resolved} of ${materialGroups.length}` },
+        ],
+        action: null,
+      },
+      { label: "raw_material_group", state: "present", reason: null }
+    )
+  }
+
+  // ---- people -------------------------------------------------------------
+
+  if (people.length) {
+    push(
+      {
+        key: "people",
+        type: "person",
+        label: "People",
+        sublabel: `${people.length} linked`,
+        state: "present",
+        count: people.length,
+        status: null,
+        href: `/designs/${designId}`,
+        props: people.slice(0, 4).map((pl) => ({
+          key: String(pl.person_id).slice(0, 18),
+          value: String(pl.role ?? "—"),
+        })),
+        action: null,
+      },
+      { label: "person", state: "present", reason: null }
+    )
+  }
+
+  // ---- colours and sizes --------------------------------------------------
+
+  if (colors.length || sizeSets.length) {
+    push(
+      {
+        key: "palette",
+        type: "palette",
+        label: "Colours & sizes",
+        sublabel: `${colors.length} colour${colors.length === 1 ? "" : "s"}, ${sizeSets.length} size set${sizeSets.length === 1 ? "" : "s"}`,
+        state: "present",
+        count: colors.length + sizeSets.length,
+        status: null,
+        href: `/designs/${designId}`,
+        props: [
+          { key: "colours", value: String(colors.length) },
+          { key: "size sets", value: String(sizeSets.length) },
+        ],
+        action: null,
+      },
+      { label: "colors / size_sets", state: "present", reason: null }
+    )
+  }
+
+  // ---- bundles ------------------------------------------------------------
+
+  if (components.length || usedIn.length) {
+    push(
+      {
+        key: "components",
+        type: "design_component",
+        label: "Bundled designs",
+        sublabel: `${components.length} in, ${usedIn.length} out`,
+        state: "present",
+        count: components.length + usedIn.length,
+        status: null,
+        href: `/designs/${designId}`,
+        props: [
+          { key: "components", value: String(components.length) },
+          { key: "used in", value: String(usedIn.length) },
+        ],
+        action: null,
+      },
+      { label: "components / used_in", state: "present", reason: null }
+    )
+  }
+
+  // ---- revision lineage ---------------------------------------------------
+
+  if (design.revised_from_id) {
+    push(
+      {
+        key: "revision",
+        type: "design",
+        label: "Revised from",
+        sublabel: `revision ${design.revision_number ?? 1}`,
+        state: "present",
+        count: 1,
+        status: null,
+        href: `/designs/${design.revised_from_id}`,
+        props: [
+          { key: "revision", value: String(design.revision_number ?? 1) },
+          { key: "parent", value: String(design.revised_from_id).slice(0, 18) },
+        ],
+        action: null,
+      },
+      { label: "revised_from_id", state: "present", reason: null }
+    )
+  }
+
+  // ---- the spine ----------------------------------------------------------
+
+  const spine: GraphNode = {
+    key: "design",
+    type: "design",
+    label: design.name || designId,
+    sublabel: String(design.status),
+    state: "present" as EdgeState,
+    count: 1,
+    status: String(design.status),
+    href: `/designs/${designId}`,
+    props: [
+      { key: "status", value: String(design.status) },
+      { key: "priority", value: String(design.priority ?? "—") },
+      { key: "type", value: String(design.design_type ?? "—") },
+      { key: "revision", value: String(design.revision_number ?? 1) },
+      ...(design.target_completion_date
+        ? [
+            {
+              key: "target",
+              value: new Date(design.target_completion_date)
+                .toISOString()
+                .slice(0, 10),
+            },
+          ]
+        : []),
+      ...(money(design.estimated_cost, design.cost_currency)
+        ? [{ key: "estimated", value: money(design.estimated_cost, design.cost_currency)! }]
+        : []),
+    ],
+    action: null,
+  }
+
+  return builder.build(spine)
+}
+
+export const designSpine: SpineDescriptor = {
+  key: "design",
+  label: "Design",
+  resolve: resolveDesignGraph,
+  /*
+   * The members behind each aggregate node, fetched only when a drawer opens
+   * (#1847 step 4). Kept in its own file: `resolve` above is already 700 lines
+   * of node construction, and the two answer different questions — which edges
+   * exist, and which records are on the far end of one of them.
+   */
+  items: resolveDesignItems,
+  itemNodes: DESIGN_ITEM_NODES,
+}

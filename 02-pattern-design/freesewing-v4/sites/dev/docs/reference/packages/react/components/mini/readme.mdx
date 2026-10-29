@@ -1,0 +1,40 @@
+---
+title: Mini
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.mini.mjs'
+import { MiniNoteExample, MiniTipExample, MiniWarningExample } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Mini** component family provides the following components:
+
+- [MiniNote](#mininote)
+- [MiniTip](#minitip)
+- [MiniWarning](#miniwarning)
+
+:::tip
+These components are typically used when a
+[Popout](/reference/packages/react/components/popout/) would take up too much
+space.
+:::
+
+### MiniNote
+
+<ComponentDocs docs={jsdoc.jsdocMiniNote} example={MiniNoteExample} />
+
+### MiniTip
+
+<ComponentDocs docs={jsdoc.jsdocMiniTip} example={MiniTipExample} />
+
+### MiniWarning
+
+<ComponentDocs docs={jsdoc.jsdocMiniWarning} example={MiniWarningExample} />
+
+</DocusaurusDoc>

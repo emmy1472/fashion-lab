@@ -1,0 +1,132 @@
+import { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
+import { createShippingOptionsWorkflow } from "@medusajs/medusa/core-flows"
+import { ensurePartnerShippingProfileId } from "../../../../../lib/partner-shipping-profile"
+import {
+  assertStoreOwnsShippingTarget,
+  validatePartnerStoreAccess,
+} from "../../../helpers"
+import { PartnerCreateShippingOptionReq } from "../validators"
+
+export const GET = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const { store } = await validatePartnerStoreAccess(
+    req.auth_context,
+    req.params.id,
+    req.scope
+  )
+
+  if (!store.default_location_id) {
+    return res.json({ shipping_options: [], count: 0, offset: 0, limit: 20 })
+  }
+
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+
+  // Get shipping options through the location → fulfillment sets → service zones chain.
+  // `prices.price_rules.*` must be expanded so the partner-ui's pricing
+  // grid can bucket each price into the right column (region vs
+  // currency vs conditional) — without it, every region price is
+  // misread as a currency price.
+  const { data: locations } = await query.graph({
+    entity: "stock_locations",
+    fields: [
+      "fulfillment_sets.service_zones.shipping_options.*",
+      "fulfillment_sets.service_zones.shipping_options.prices.*",
+      "fulfillment_sets.service_zones.shipping_options.prices.price_rules.*",
+      "fulfillment_sets.service_zones.shipping_options.rules.*",
+      "fulfillment_sets.service_zones.shipping_options.type.*",
+      "fulfillment_sets.service_zones.shipping_options.shipping_profile.*",
+    ],
+    filters: { id: store.default_location_id },
+  })
+
+  const shippingOptions: any[] = []
+  const location = locations?.[0]
+  if (location?.fulfillment_sets) {
+    for (const fs of location.fulfillment_sets) {
+      if (fs?.service_zones) {
+        for (const sz of fs.service_zones) {
+          if (sz?.shipping_options) {
+            for (const so of sz.shipping_options) {
+              shippingOptions.push({
+                ...so,
+                service_zone: {
+                  id: sz.id,
+                  name: sz.name,
+                  fulfillment_set: {
+                    id: fs.id,
+                    name: fs.name,
+                    type: fs.type,
+                    // The partner-ui's order-create-fulfillment form
+                    // reads shippingOption.service_zone.fulfillment_set.location.id
+                    // to default the location selector. Without including
+                    // location here, the form crashes during render with
+                    // "undefined is not an object (evaluating
+                    // 'shippingOption.service_zone.fulfillment_set.location.id')".
+                    location: { id: location.id, name: location.name },
+                  },
+                },
+              })
+            }
+          }
+        }
+      }
+    }
+  }
+
+  res.json({
+    shipping_options: shippingOptions,
+    count: shippingOptions.length,
+    offset: 0,
+    limit: 20,
+  })
+}
+
+export const POST = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const { store } = await validatePartnerStoreAccess(
+    req.auth_context,
+    req.params.id,
+    req.scope
+  )
+
+  const body = PartnerCreateShippingOptionReq.parse(req.body)
+  await assertStoreOwnsShippingTarget(
+    store,
+    { serviceZoneId: body.service_zone_id },
+    req.scope
+  )
+
+  // #1983 — a partner's option always goes on the partner profile, whatever the
+  // client sent. The profile table is platform-wide, so a client-chosen id
+  // could put a partner's courier on the HOUSE profile and let it ship house
+  // goods — the exact crossing the strict split exists to stop.
+  const { result } = await createShippingOptionsWorkflow(req.scope).run({
+    input: [
+      {
+        ...body,
+        shipping_profile_id: await ensurePartnerShippingProfileId(req.scope),
+      } as any,
+    ],
+  })
+
+  // Refetch the created option with its prices/relations so the create
+  // response mirrors admin (`refetchShippingOption`) AND the sibling
+  // update route ([optionId] POST). The bare workflow result omits the
+  // resolved `prices`/`rules`/`type` rows, so a client reading
+  // `shipping_option.prices` off the create response would get
+  // `undefined`. `prices.price_rules.*` is expanded for the same
+  // pricing-grid bucketing reason documented on the GET/update routes.
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+  const { data: options } = await query.graph({
+    entity: "shipping_options",
+    fields: ["*", "prices.*", "prices.price_rules.*", "rules.*", "type.*", "shipping_profile.*"],
+    filters: { id: result[0].id },
+  })
+
+  res.status(201).json({ shipping_option: options?.[0] ?? result[0] })
+}

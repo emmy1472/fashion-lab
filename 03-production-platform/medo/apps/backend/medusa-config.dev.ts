@@ -1,0 +1,312 @@
+import { loadEnv, defineConfig, Modules } from "@medusajs/framework/utils";
+import path from "path";
+
+loadEnv("production", process.cwd());
+
+module.exports = defineConfig({
+  projectConfig: {
+    databaseUrl: process.env.DATABASE_URL,
+    http: {
+      storeCors: process.env.STORE_CORS!,
+      adminCors: process.env.ADMIN_CORS!,
+      authCors: process.env.AUTH_CORS!,
+      jwtSecret: process.env.JWT_SECRET || "supersecret",
+      cookieSecret: process.env.COOKIE_SECRET || "supersecret",
+    },
+    redisUrl: process.env.REDIS_URL,
+    workerMode: process.env.MEDUSA_WORKER_MODE as "shared" | "worker" | "server",
+  },
+
+  admin: {
+    vite: () => ({
+      // Keep Medusa's default config
+       resolve: {
+              alias: {
+                "@": path.resolve(__dirname, "./src/admin"),
+              }
+              // Keep Medusa's existing resolve options
+            },
+      // `css.preprocessorOptions.scss.api` removed on the 2.19 upgrade — Vite 7
+      // dropped the legacy Sass API and the option with it. No runtime change.
+    }),
+    disable: process.env.DISABLE_MEDUSA_ADMIN === "true",
+    backendUrl: process.env.MEDUSA_BACKEND_URL,
+    
+  },
+  featureFlags: {
+     translation: true,
+     index_engine: true,
+     view_configrations: true,
+  },
+
+  plugins: [
+    {
+      resolve: "@medusajs/draft-order",
+      options: {},
+    },
+    {
+      resolve: "@medusajs/loyalty-plugin",
+      options: {},
+    },
+    {
+      resolve: "@jytextiles/medusa-plugin-etsy-sync",
+      options: {
+        keystring: process.env.ETSY_KEYSTRING ?? "",
+        sharedSecret: process.env.ETSY_SHARED_SECRET ?? "",
+        redirectUri:
+          process.env.ETSY_REDIRECT_URI ??
+          "http://localhost:9000/app/settings/oauth/etsy/callback",
+        scope:
+          process.env.ETSY_SCOPE ??
+          "listings_r listings_w listings_d shops_r",
+      },
+    },
+  ],
+
+  modules: [
+    // Custom app modules
+    {
+      resolve: "./src/modules/census",
+    },
+    {
+      resolve: "./src/modules/person",
+    },
+    {
+      resolve: "./src/modules/personproperty",
+    },
+    {
+      resolve: "./src/modules/crm",
+    },
+    {
+      resolve: "./src/modules/inventory_orders",
+    },
+    {
+      resolve: "./src/modules/internal_payments",
+    },
+    {
+      resolve: "./src/modules/company",
+    },
+    {
+      resolve: "./src/modules/website",
+    },
+    {
+      resolve: "./src/modules/designs",
+      dependencies: [Modules.LINK],
+    },
+    {
+      resolve: "./src/modules/raw_material",
+    },
+    {
+      resolve: "./src/modules/tasks",
+    },
+    {
+      resolve: "./src/modules/notes",
+    },
+    {
+      resolve: "./src/modules/partner",
+    },
+    {
+      resolve: "./src/modules/custom-s3-provider",
+    },
+    {
+      resolve: "./src/modules/socials",
+    },
+    {
+      resolve: "./src/modules/social-provider",
+    },
+
+    // Production-ready modules
+    {
+      resolve: "@medusajs/medusa/cache-redis",
+      options: {
+        redisUrl: process.env.REDIS_URL,
+      },
+    },
+    {
+      resolve: "@medusajs/medusa/event-bus-redis",
+      options: {
+        redisUrl: process.env.REDIS_URL,
+      },
+    },
+    {
+      resolve: "@medusajs/medusa/workflow-engine-redis",
+      options: {
+        redis: {
+          redisUrl: process.env.REDIS_URL,
+        },
+      },
+    },
+
+    {
+      resolve: "@medusajs/medusa/notification",
+      // #1339 — puts the suppression ledger's service into the provider
+      // container. Without this the guard in each email provider degrades to
+      // "not enforced" (it logs [email-suppression-unavailable] and sends).
+      // partnerPush: the device-token store the push provider reads (#1339
+      // pattern again).
+      dependencies: ["email_suppression", "partnerPush"],
+      options: {
+        providers: [
+          {
+            resolve: "./src/modules/resend",
+            id: "resend",
+            options: {
+              channels: ["email"],
+              api_key: process.env.RESEND_API_KEY,
+              from: process.env.RESEND_FROM_EMAIL,
+            },
+          },
+          {
+            resolve: "./src/modules/mailjet",
+            id: "mailjet",
+            options: {
+              channels: ["email_bulk"],
+              api_key: process.env.MAILJET_API_KEY,
+              secret_key: process.env.MAILJET_SECRET_KEY,
+              from_email: process.env.MAILJET_FROM_EMAIL,
+              from_name: process.env.MAILJET_FROM_NAME || "Jaal Yantra Textiles",
+            },
+          },
+          {
+            resolve: "./src/modules/maileroo",
+            id: "maileroo",
+            options: {
+              channels: ["email_partner"],
+              api_key: process.env.MAILEROO_API_KEY,
+              from_email: process.env.MAILEROO_FROM_EMAIL || "partner@partner.jaalyantra.com",
+              from_name: process.env.MAILEROO_FROM_NAME || "Jaal Yantra Textiles Partners",
+            },
+          },
+          {
+            resolve: "@medusajs/medusa/notification-local",
+            id: "local",
+            options: {
+              channels: ["feed"],
+            },
+          },
+          {
+            // The APNs/FCM leg of the partner notification system — rides the
+            // rows createPartnerNotification writes.
+            resolve: "./src/modules/notification-push",
+            id: "partner-push",
+            options: {
+              channels: ["push"],
+            },
+          },
+          {
+            // Audit-only — the real WhatsApp send happens in
+            // src/modules/social-provider/whatsapp-service.ts. This provider
+            // exists so callers can persist a notification row via
+            // notificationModuleService.createNotifications({ channel: "whatsapp", … })
+            // after the upstream send succeeds.
+            resolve: "./src/modules/notification-whatsapp-audit",
+            id: "whatsapp-audit",
+            options: {
+              channels: ["whatsapp"],
+            },
+          },
+        ],
+      },
+    },
+    {
+      resolve: "@medusajs/medusa/file",
+      options: {
+        providers: [
+          {
+            resolve: "@medusajs/medusa/file-s3",
+            id: "s3",
+            options: {
+              file_url: process.env.S3_FILE_URL,
+              access_key_id: process.env.S3_ACCESS_KEY_ID,
+              secret_access_key: process.env.S3_SECRET_ACCESS_KEY,
+              region: process.env.S3_REGION,
+              bucket: process.env.S3_BUCKET,
+              endpoint: process.env.S3_ENDPOINT,
+            },
+          },
+        ],
+      },
+    },
+    {
+      resolve: "@medusajs/medusa/payment",
+      options: {
+        providers: [
+          {
+            resolve: "@medusajs/medusa/payment-stripe",
+            id: "stripe",
+            options: {
+              apiKey: process.env.STRIPE_API_KEY,
+              webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+            },
+          },
+        ],
+      },
+    },
+  {
+    resolve: "./src/modules/email_templates",
+  },
+  {
+    resolve: "./src/modules/agreements",
+  },
+  {
+    resolve: "./src/modules/media",
+  },
+  {
+    resolve: "./src/modules/fullfilled_orders",
+  },
+  {
+    resolve: "@medusajs/index",
+  },
+  {
+    resolve: "./src/modules/feedback",
+  },
+  {
+    resolve: "./src/modules/analytics",
+  },
+  {
+    resolve: "./src/modules/etsysync",
+  },
+  {
+    resolve: "./src/modules/external_stores",
+  },
+  {
+    resolve: "./src/modules/encryption",
+  },
+  {
+    resolve: "./src/modules/visual_flows",
+  },
+  {
+    resolve: "./src/modules/aivtwo",
+  },
+  {
+    resolve: "./src/modules/forms",
+  },
+  {
+      resolve: "./src/modules/production_runs",
+  },
+  {
+    resolve: "./src/modules/production_policy",
+  },
+  {
+    resolve: "./src/modules/ad-planning",
+  },
+  {
+    resolve: "./src/modules/spec_store",
+  },
+   {
+      resolve: "@medusajs/medusa/translation",
+    },
+    {
+    resolve: "./src/modules/inbound_emails",
+  },
+   {
+      resolve: "./src/modules/hang_tag_settings",
+    },
+    {
+      resolve: "./src/modules/email-provider-manager",
+    },
+  {
+    resolve: "./src/modules/partner-push",
+  },
+],
+});

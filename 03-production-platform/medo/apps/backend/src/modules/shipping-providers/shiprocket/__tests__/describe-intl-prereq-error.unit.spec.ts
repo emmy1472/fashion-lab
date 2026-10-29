@@ -1,0 +1,96 @@
+import { describeIntlPrereqError } from "../client"
+
+/**
+ * #1118 — the intl-prerequisites gate turns Shiprocket's opaque KYC / bank /
+ * pickup rejections into actionable admin guidance. These assert the keyword
+ * matching on representative Shiprocket wording, and that unrelated errors pass
+ * through untouched (null → caller rethrows the original).
+ */
+describe("describeIntlPrereqError (#1118)", () => {
+  it("detects an unverified-KYC rejection", () => {
+    const g = describeIntlPrereqError({
+      message: "Your KYC is not verified. Please complete KYC to ship internationally.",
+    })
+    expect(g?.reason).toBe("kyc")
+    expect(g?.message).toMatch(/KYC/i)
+    expect(g?.message).toMatch(/retry/i)
+  })
+
+  it("detects missing settlement bank details", () => {
+    const g = describeIntlPrereqError({
+      message: "Bank account details are not updated for your account.",
+    })
+    expect(g?.reason).toBe("bank_details")
+    expect(g?.message).toMatch(/bank details/i)
+  })
+
+  it("detects a pickup not enabled for international shipping", () => {
+    const g = describeIntlPrereqError({
+      message: "Pickup location is not enabled for international shipping.",
+    })
+    expect(g?.reason).toBe("pickup_not_intl")
+    expect(g?.message).toMatch(/pickup/i)
+  })
+
+  it("prefers the pickup reason when wording mentions both pickup and international", () => {
+    // Pickup-not-intl wording often also says "international" — make sure it
+    // doesn't fall through to a less-specific match.
+    const g = describeIntlPrereqError({
+      message: "This pickup address is not allowed for international orders.",
+    })
+    expect(g?.reason).toBe("pickup_not_intl")
+  })
+
+  it("reads messages out of a Shiprocket field-error bag", () => {
+    const g = describeIntlPrereqError({
+      fieldErrors: { kyc_status: ["KYC pending, cannot create international shipment"] },
+    })
+    expect(g?.reason).toBe("kyc")
+  })
+
+  it("names a wallet shortfall so it isn't mistaken for bad order data", () => {
+    // Arrives as awb_assign_error on an HTTP 200 (see assertAwbAssigned).
+    const g = describeIntlPrereqError({
+      message:
+        "Shiprocket AWB assignment failed — Insufficient amount to label this shipment",
+    })
+    expect(g?.reason).toBe("insufficient_balance")
+    expect(g?.message).toMatch(/wallet/i)
+  })
+
+  /**
+   * A partner has no Shiprocket login — the shared carrier account is the
+   * platform's. Pointing them at "Billing → Recharge" is advice they cannot act
+   * on, so every gate carries partner-facing copy that names what they CAN do.
+   */
+  it("gives every gate partner-facing copy that never mentions the dashboard", () => {
+    const gates = [
+      describeIntlPrereqError({ message: "Insufficient amount to label this shipment" }),
+      describeIntlPrereqError({ message: "KYC is not verified" }),
+      describeIntlPrereqError({ message: "settlement bank details missing" }),
+      describeIntlPrereqError({ message: "pickup location is not enabled for international" }),
+    ]
+    for (const g of gates) {
+      expect(g?.partnerMessage).toBeTruthy()
+      expect(g!.partnerMessage).not.toMatch(/shiprocket|dashboard/i)
+      expect(g!.partnerMessage).toMatch(/support|credits/i)
+    }
+    // The wallet case is the one a partner hits in practice — it must name
+    // credits and support, per the wording asked for in the field.
+    expect(gates[0]!.partnerMessage).toMatch(/courier credits/i)
+    expect(gates[0]!.partnerMessage).toMatch(/support/i)
+  })
+
+  it("returns null for an unrelated error (caller rethrows untouched)", () => {
+    expect(
+      describeIntlPrereqError({ message: "HSN code is required for international shipments" })
+    ).toBeNull()
+    expect(describeIntlPrereqError({ message: "Invalid pincode" })).toBeNull()
+    expect(describeIntlPrereqError({})).toBeNull()
+  })
+
+  it("does not treat a bare 'bank' mention without detail/account/settlement as a gate", () => {
+    // Avoid false positives on incidental wording.
+    expect(describeIntlPrereqError({ message: "riverbank warehouse closed" })).toBeNull()
+  })
+})

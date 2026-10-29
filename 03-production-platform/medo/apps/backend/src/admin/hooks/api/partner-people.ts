@@ -1,0 +1,129 @@
+import { FetchError } from "@medusajs/js-sdk"
+import {
+  QueryKey,
+  UseMutationOptions,
+  UseQueryOptions,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query"
+import { sdk } from "../../lib/config"
+import { queryKeysFactory } from "../../lib/query-key-factory"
+import { partnersQueryKeys } from "./partners-admin"
+
+export interface PartnerPerson {
+  id: string
+  first_name: string
+  last_name: string
+  email: string | null
+  state: string
+  avatar: string | null
+  created_at?: string
+}
+
+export interface PartnerPeopleResponse {
+  people: PartnerPerson[]
+  count: number
+  /** Link rows pointing at a person that no longer exists (#1857). */
+  dangling?: number
+}
+
+const PARTNER_PEOPLE_QUERY_KEY = "partner_people" as const
+export const partnerPeopleQueryKeys = queryKeysFactory(PARTNER_PEOPLE_QUERY_KEY)
+
+export const usePartnerPeople = (
+  partnerId: string,
+  options?: Omit<
+    UseQueryOptions<PartnerPeopleResponse, FetchError, PartnerPeopleResponse, QueryKey>,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: async () =>
+      sdk.client.fetch<PartnerPeopleResponse>(
+        `/admin/partners/${partnerId}/people`,
+        { method: "GET" }
+      ),
+    queryKey: partnerPeopleQueryKeys.detail(partnerId),
+    ...options,
+  })
+
+  /*
+   * 🔴 Filtered here as well as on the server. The route is fixed, but this
+   * hook is the last thing between a null row and `person.id` in a `.map`,
+   * and that deref did not blank the section — it blanked the entire partner
+   * page. Two layers, because the cost of the guard is a `filter` and the
+   * cost of missing it is every partner with a stale link becoming
+   * unreachable.
+   */
+  const people = (data?.people || []).filter((p): p is PartnerPerson => !!p?.id)
+
+  return {
+    people,
+    count: people.length,
+    dangling: data?.dangling ?? 0,
+    ...rest,
+  }
+}
+
+export interface LinkPeoplePayload {
+  person_ids: string[]
+}
+
+export const useLinkPeopleToPartner = (
+  partnerId: string,
+  options?: UseMutationOptions<
+    { partner_id: string; person_ids: string[]; linked: boolean },
+    Error,
+    LinkPeoplePayload
+  >
+) => {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async (payload) => {
+      return sdk.client.fetch<{ partner_id: string; person_ids: string[]; linked: boolean }>(
+        `/admin/partners/${partnerId}/people`,
+        {
+          method: "POST",
+          body: payload,
+        }
+      )
+    },
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: partnerPeopleQueryKeys.detail(partnerId) })
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.detail(partnerId) })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+export const useUnlinkPeopleFromPartner = (
+  partnerId: string,
+  options?: UseMutationOptions<
+    { partner_id: string; person_ids: string[]; linked: boolean },
+    Error,
+    LinkPeoplePayload
+  >
+) => {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async (payload) => {
+      return sdk.client.fetch<{ partner_id: string; person_ids: string[]; linked: boolean }>(
+        `/admin/partners/${partnerId}/people`,
+        {
+          method: "DELETE",
+          body: payload,
+        }
+      )
+    },
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: partnerPeopleQueryKeys.detail(partnerId) })
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.detail(partnerId) })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}

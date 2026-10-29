@@ -1,0 +1,735 @@
+import { createAdminUser, getAuthHeaders } from "../helpers/create-admin-user";
+import { getSharedTestEnv, setupSharedTestSuite } from "./shared-test-setup";
+
+// 90s, the convention across these specs: 30s is not enough for the shared
+// runner's boot hook on a cold CI database, and the PR job boots every changed
+// spec in one process.
+jest.setTimeout(90000);
+setupSharedTestSuite(() => {
+    let headers: any;
+    let inventoryItemId: string;
+    let stockLocationId: string;
+    let fromStockLocationId: string;
+    const { api, getContainer } = getSharedTestEnv();
+    beforeEach(async () => {
+      const container = getContainer();
+      await createAdminUser(container);
+      headers = await getAuthHeaders(api);
+
+      // Create an inventory item for the order
+      const newInventory = {
+        title: "Test Inventory",
+        description: "Test Description",
+      };
+      const response = await api.post("/admin/inventory-items", newInventory, headers);
+      expect(response.status).toBe(200);
+      inventoryItemId = response.data.inventory_item.id;
+      const stockLocations = {
+        name: 'Main Warehouse'
+      }
+      const stockLocation = await api.post("/admin/stock-locations", stockLocations, headers);
+      expect(stockLocation.status).toBe(200);
+      stockLocationId = stockLocation.data.stock_location.id;
+      // Create an additional stock location to act as fromLocation
+      const fromStockLocations = {
+        name: 'Secondary Warehouse'
+      };
+      const fromStockLocation = await api.post("/admin/stock-locations", fromStockLocations, headers);
+      expect(fromStockLocation.status).toBe(200);
+      fromStockLocationId = fromStockLocation.data.stock_location.id;
+
+    });
+
+
+    describe("POST /admin/inventory-orders", () => {
+      it("should create an inventory order with valid data", async () => {
+        const orderPayload = {
+          order_lines: [
+            { inventory_item_id: inventoryItemId, quantity: 2, price: 100 },
+          ],
+          quantity: 2,
+          total_price: 200,
+          status: "Pending",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+          from_stock_location_id: fromStockLocationId,
+        };
+        
+        const res = await api.post("/admin/inventory-orders", orderPayload, headers);
+        expect(res.status).toBe(201);
+
+        expect(res.data).toBeDefined();
+        expect(Array.isArray(res.data.inventoryOrder.orderlines)).toBe(true);
+        expect(res.data.inventoryOrder.orderlines.length).toBe(1);
+        
+        expect(res.data.inventoryOrder.orderlines[0].inventory_items[0].id).toBe(inventoryItemId);
+      });
+
+      it("should fail with missing required fields", async () => {
+        const res = await api.post("/admin/inventory-orders", {}, headers).catch((err) => err.response);
+        expect(res.status).toBe(400);
+        expect(res.data || res.data).toBeDefined();
+      });
+
+      it("should fail with invalid quantity type", async () => {
+        const orderPayload = {
+          order_lines: [
+            { inventory_item_id: inventoryItemId, quantity: "two", price: 100 },
+          ],
+          quantity: "two",
+          total_price: 200,
+          status: "Pending",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+        };
+
+        const res = await api.post("/admin/inventory-orders", orderPayload, headers).catch((err) => err.response);
+        expect(res.status).toBe(400);
+        expect(res.data || res.data).toBeDefined();
+      });
+
+      it("should fail with negative price", async () => {
+        const orderPayload = {
+          order_lines: [
+            { inventory_item_id: inventoryItemId, quantity: 2, price: -100 },
+          ],
+          quantity: 2,
+          total_price: -200,
+          status: "Pending",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+        };
+
+        const res = await api.post("/admin/inventory-orders", orderPayload, headers).catch((err) => err.response);
+        expect(res.status).toBe(400);
+        expect(res.data || res.data).toBeDefined();
+      });
+
+      // #790 — the new "Ready for Delivery" status must be accepted by the
+      // validator AND the DB check constraint (proves Migration20260630120000
+      // landed the new enum value).
+      it("should accept the new 'Ready for Delivery' status", async () => {
+        const orderPayload = {
+          order_lines: [
+            { inventory_item_id: inventoryItemId, quantity: 2, price: 100 },
+          ],
+          quantity: 2,
+          total_price: 200,
+          status: "Ready for Delivery",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+          from_stock_location_id: fromStockLocationId,
+        };
+        const res = await api.post("/admin/inventory-orders", orderPayload, headers);
+        expect(res.status).toBe(201);
+        expect(res.data.inventoryOrder.status).toBe("Ready for Delivery");
+      });
+    });
+
+    // Per-line extra cost (colour job, …) + order-level tax entered at create.
+    describe("POST /admin/inventory-orders — per-line extra_cost + order tax", () => {
+      it("persists a per-unit extra_cost and records the order tax as a charge", async () => {
+        const orderPayload = {
+          order_lines: [
+            { inventory_item_id: inventoryItemId, quantity: 2, price: 100, extra_cost: 25 },
+          ],
+          quantity: 2,
+          total_price: 250, // (100 + 25) × 2
+          tax_amount: 30,
+          status: "Pending",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+          from_stock_location_id: fromStockLocationId,
+        };
+
+        const res = await api.post("/admin/inventory-orders", orderPayload, headers);
+        expect(res.status).toBe(201);
+        const orderId = res.data.inventoryOrder.id;
+
+        // The per-unit extra cost is persisted on the line (bigNumber → numeric).
+        const line = res.data.inventoryOrder.orderlines[0];
+        expect(Number(line.extra_cost)).toBe(25);
+
+        // The tax is recorded as an order charge of type "tax", raising the
+        // payable ceiling by exactly that amount (not folded into total_price).
+        const chargesRes = await api.get(`/admin/inventory-orders/${orderId}/charges`, headers);
+        expect(chargesRes.status).toBe(200);
+        expect(chargesRes.data.totals.raises).toBe(30);
+        expect(chargesRes.data.goods_total).toBe(250);
+        expect(chargesRes.data.payable_ceiling).toBe(280);
+      });
+
+      it("accepts lines without extra_cost and no tax (backwards-compatible)", async () => {
+        const orderPayload = {
+          order_lines: [
+            { inventory_item_id: inventoryItemId, quantity: 1, price: 100 },
+          ],
+          quantity: 1,
+          total_price: 100,
+          status: "Pending",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+          from_stock_location_id: fromStockLocationId,
+        };
+
+        const res = await api.post("/admin/inventory-orders", orderPayload, headers);
+        expect(res.status).toBe(201);
+        const orderId = res.data.inventoryOrder.id;
+
+        expect(Number(res.data.inventoryOrder.orderlines[0].extra_cost)).toBe(0);
+
+        // No tax charge was written, so the ceiling equals the goods total.
+        const chargesRes = await api.get(`/admin/inventory-orders/${orderId}/charges`, headers);
+        expect(chargesRes.data.charges).toHaveLength(0);
+        expect(chargesRes.data.payable_ceiling).toBe(100);
+      });
+    });
+
+    type OrderLine = { inventory_item_id: string; quantity: number; price: number };
+    describe("GET /admin/inventory-orders", () => {
+      let createdOrders = [] as any[];
+      beforeEach(async () => {
+        // Create multiple inventory orders, each with unique inventory items and multiple unique orderlines
+        const ordersToCreate = [
+          {
+            order_lines: [] as OrderLine[],
+            quantity: 1,
+            total_price: 50,
+            status: "Pending",
+            expected_delivery_date: new Date("2025-01-01").toISOString(),
+            order_date: new Date("2025-01-01").toISOString(),
+            shipping_address: {},
+            stock_location_id: stockLocationId,
+            from_stock_location_id: fromStockLocationId,
+          },
+          {
+            order_lines: [],
+            quantity: 5,
+            total_price: 500,
+            status: "Processing",
+            expected_delivery_date: new Date("2025-02-01").toISOString(),
+            order_date: new Date("2025-02-01").toISOString(),
+            shipping_address: {},
+            stock_location_id: stockLocationId,
+            from_stock_location_id: fromStockLocationId,
+          },
+          {
+            order_lines: [],
+            quantity: 2,
+            total_price: 200,
+            status: "Shipped",
+            expected_delivery_date: new Date("2025-03-01").toISOString(),
+            order_date: new Date("2025-03-01").toISOString(),
+            shipping_address: {},
+            stock_location_id: stockLocationId,
+            from_stock_location_id: fromStockLocationId,
+          },
+        ];
+        createdOrders = [];
+        for (const [orderIdx, order] of ordersToCreate.entries()) {
+          // For each order, create 2 unique inventory items and use them as orderlines
+          const orderLines: OrderLine[] = [];
+          for (let i = 0; i < 2; i++) {
+            const inventoryRes = await api.post("/admin/inventory-items", {
+              title: `Test Inventory ${order.status} ${i} ${Math.random()}`,
+              description: `Test Description ${order.status} ${i}`
+            }, headers);
+            expect(inventoryRes.status).toBe(200);
+            const uniqueInventoryId = inventoryRes.data.inventory_item.id;
+            // For the second order (index 1), set quantities to [2,3] so total is 5
+            let quantity = i + 1;
+            if (orderIdx === 1) {
+              quantity = i === 0 ? 2 : 3;
+            }
+            orderLines.push({
+              inventory_item_id: uniqueInventoryId,
+              quantity,
+              price: (i + 1) * 50
+            });
+          }
+          order.order_lines = orderLines;
+          order.quantity = orderLines.reduce((sum, l) => sum + l.quantity, 0);
+          order.total_price = orderLines.reduce((sum, l) => sum + l.price, 0);
+          const res = await api.post("/admin/inventory-orders", order, headers);
+          expect(res.status).toBe(201);
+          createdOrders.push(res.data);
+        }
+      });
+
+      it("should list all inventory orders", async () => {
+        const res = await api.get("/admin/inventory-orders", headers);
+        expect(res.status).toBe(200);
+        expect(res.data.inventory_orders.length).toBeGreaterThanOrEqual(3);
+        expect(res.data.count).toBeGreaterThanOrEqual(3);
+      });
+
+      it("should filter by status", async () => {
+        const res = await api.get("/admin/inventory-orders?status=Pending", headers);
+        expect(res.status).toBe(200);
+        expect(res.data.inventory_orders.length).toBeGreaterThanOrEqual(1);
+        res.data.inventory_orders.forEach(order => {
+          expect(order.status).toBe("Pending");
+        });
+      });
+
+      it("should filter by quantity", async () => {
+        const res = await api.get("/admin/inventory-orders?quantity=5", headers);
+        expect(res.status).toBe(200);
+        expect(res.data.inventory_orders.length).toBeGreaterThanOrEqual(1);
+        res.data.inventory_orders.forEach(order => {
+          expect(order.quantity).toBe(5);
+        });
+      });
+
+      it("should filter by order_date", async () => {
+        const res = await api.get("/admin/inventory-orders?order_date=2025-02-01", headers);
+        expect(res.status).toBe(200);
+        expect(res.data.inventory_orders.length).toBeGreaterThanOrEqual(1);
+        res.data.inventory_orders.forEach(order => {
+          expect(order.order_date.startsWith("2025-02-01")).toBe(true);
+        });
+      });
+
+      it("should paginate results", async () => {
+        const res1 = await api.get("/admin/inventory-orders?limit=2&offset=0", headers);
+        expect(res1.status).toBe(200);
+        expect(res1.data.inventory_orders.length).toBeLessThanOrEqual(2);
+        expect(res1.data.count).toBeGreaterThanOrEqual(3);
+        const res2 = await api.get("/admin/inventory-orders?limit=2&offset=2", headers);
+        expect(res2.status).toBe(200);
+        expect(res2.data.inventory_orders.length).toBeLessThanOrEqual(2);
+      });
+
+      it("should order results by order_date desc", async () => {
+        const res = await api.get("/admin/inventory-orders?order=order_date:desc", headers);
+        expect(res.status).toBe(200);
+        const orders = res.data.inventory_orders;
+        for (let i = 1; i < orders.length; i++) {
+          expect(new Date(orders[i-1].order_date) >= new Date(orders[i].order_date)).toBe(true);
+        }
+      });
+
+      it("should combine filters (status and quantity)", async () => {
+        const res = await api.get("/admin/inventory-orders?status=Processing&quantity=5", headers);
+        expect(res.status).toBe(200);
+        expect(res.data.inventory_orders.length).toBeGreaterThanOrEqual(1);
+        res.data.inventory_orders.forEach(order => {
+          expect(order.status).toBe("Processing");
+          expect(order.quantity).toBe(5);
+        });
+      });
+    });
+
+    // #1737 follow-up — the list table's "Order ID" column was replaced with the
+    // partner name (line details in a tooltip), so GET /admin/inventory-orders
+    // must resolve + attach `partner` and `order_lines` per row without breaking
+    // the existing list contract.
+    describe("GET /admin/inventory-orders — partner + order lines for the list table", () => {
+      let listPartnerId: string;
+      let listPartnerName: string;
+      let listItemId: string;
+      let assignedOrderId: string;
+      let unassignedOrderId: string;
+
+      beforeEach(async () => {
+        const unique = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
+        listPartnerName = `List Partner ${unique}`;
+
+        const partnerRes = await api.post(
+          "/admin/partners",
+          {
+            partner: { name: listPartnerName, handle: `list-partner-${unique}` },
+            admin: { email: `list-partner-${unique}@jyt.test`, first_name: "L", last_name: "P" },
+          },
+          headers
+        );
+        expect(partnerRes.status).toBe(201);
+        listPartnerId = partnerRes.data.partner.id;
+
+        const itemRes = await api.post("/admin/inventory-items", { title: `List Fabric ${unique}` }, headers);
+        expect(itemRes.status).toBe(200);
+        listItemId = itemRes.data.inventory_item.id;
+
+        const base = {
+          order_lines: [{ inventory_item_id: listItemId, quantity: 2, price: 100 }],
+          quantity: 2,
+          total_price: 200,
+          status: "Pending",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+          from_stock_location_id: fromStockLocationId,
+        };
+
+        const assignedRes = await api.post("/admin/inventory-orders", base, headers);
+        expect(assignedRes.status).toBe(201);
+        assignedOrderId = assignedRes.data.inventoryOrder.id;
+
+        const assignRes = await api.post(
+          `/admin/inventory-orders/${assignedOrderId}/assign-partner`,
+          { partner_id: listPartnerId },
+          headers
+        );
+        expect(assignRes.status).toBe(200);
+
+        const unassignedRes = await api.post("/admin/inventory-orders", base, headers);
+        expect(unassignedRes.status).toBe(201);
+        unassignedOrderId = unassignedRes.data.inventoryOrder.id;
+      });
+
+      it("attaches the partner name and item lines to an assigned order", async () => {
+        const res = await api.get(`/admin/inventory-orders?q=${assignedOrderId}&limit=100`, headers);
+        expect(res.status).toBe(200);
+
+        const order = res.data.inventory_orders.find((o: any) => o.id === assignedOrderId);
+        expect(order).toBeDefined();
+
+        // Partner name reaches the list (the "Partner" column).
+        expect(order.partner).toBeDefined();
+        expect(order.partner.name).toBe(listPartnerName);
+
+        // Item lines reach the list (the tooltip).
+        expect(Array.isArray(order.order_lines)).toBe(true);
+        expect(order.order_lines.length).toBe(1);
+        expect(Number(order.order_lines[0].quantity)).toBe(2);
+        expect(Number(order.order_lines[0].price)).toBe(100);
+        expect(order.order_lines[0].inventory_items[0].id).toBe(listItemId);
+
+        // The list contract is unchanged for the same row.
+        expect(order.status).toBe("Pending");
+        expect(Number(order.quantity)).toBe(2);
+      });
+
+      it("still lists an unassigned order without a partner (no breakage)", async () => {
+        const res = await api.get(`/admin/inventory-orders?q=${unassignedOrderId}&limit=100`, headers);
+        expect(res.status).toBe(200);
+
+        const order = res.data.inventory_orders.find((o: any) => o.id === unassignedOrderId);
+        expect(order).toBeDefined();
+        expect(order.partner).toBeUndefined();
+        expect(Array.isArray(order.order_lines)).toBe(true);
+        expect(order.order_lines.length).toBe(1);
+      });
+    });
+
+    describe("GET /admin/inventory-orders/:id", () => {
+      let createdOrder: any;
+      let createdOrderId: string;
+      beforeEach(async () => {
+        // Create an inventory item and an order
+        const inventoryRes = await api.post("/admin/inventory-items", {
+          title: "Test Inventory Single",
+          description: "Test Description Single"
+        }, headers);
+        expect(inventoryRes.status).toBe(200);
+        const inventoryItemId = inventoryRes.data.inventory_item.id;
+        const stockLocations = {
+          name: 'Main Warehouse'
+        }
+        const stockLocation = await api.post("/admin/stock-locations", stockLocations, headers);
+        expect(stockLocation.status).toBe(200);
+        const stockLocationId = stockLocation.data.stock_location.id;
+        const orderPayload = {
+          order_lines: [
+            { inventory_item_id: inventoryItemId, quantity: 2, price: 100 },
+          ],
+          quantity: 2,
+          total_price: 200,
+          status: "Pending",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+          from_stock_location_id: fromStockLocationId,
+        };
+        const res = await api.post("/admin/inventory-orders", orderPayload, headers);
+        expect(res.status).toBe(201);
+        createdOrder = res.data;
+        createdOrderId = res.data.inventoryOrder.id;
+      });
+
+      it("should fetch a single inventory order by id", async () => {
+        const res = await api.get(`/admin/inventory-orders/${createdOrderId}?fields=id,orderlines.*`, headers);
+        expect(res.status).toBe(200);
+        expect(res.data.inventoryOrder).toBeDefined();
+        expect(res.data.inventoryOrder.id).toBe(createdOrderId);
+        expect(res.data.inventoryOrder.orderlines.length).toBe(1);
+      });
+
+      it("should fetch a single inventory order with specific fields", async () => {
+        const res = await api.get(`/admin/inventory-orders/${createdOrderId}?fields=id,status`, headers);
+        expect(res.status).toBe(200);
+        expect(res.data.inventoryOrder).toBeDefined();
+        expect(res.data.inventoryOrder.id).toBe(createdOrderId);
+        expect(res.data.inventoryOrder.status).toBe("Pending");
+        // Should not include orderlines if not requested
+        expect(res.data.inventoryOrder.orderlines).toBeUndefined();
+      });
+    });
+
+    describe("PUT /admin/inventory-orders/:id", () => {
+      let createdOrder: any;
+      let createdOrderId: string;
+      beforeEach(async () => {
+        // Create an inventory item and an order
+        const inventoryRes = await api.post("/admin/inventory-items", {
+          title: "Test Inventory Update",
+          description: "Test Description Update"
+        }, headers);
+        expect(inventoryRes.status).toBe(200);
+        const inventoryItemId = inventoryRes.data.inventory_item.id;
+        const stockLocations = {
+          name: 'Main Warehouse'
+        }
+        const stockLocation = await api.post("/admin/stock-locations", stockLocations, headers);
+        expect(stockLocation.status).toBe(200);
+        const stockLocationId = stockLocation.data.stock_location.id;
+        const orderPayload = {
+          order_lines: [
+            { inventory_item_id: inventoryItemId, quantity: 2, price: 100 },
+          ],
+          quantity: 2,
+          total_price: 200,
+          status: "Pending",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+          from_stock_location_id: fromStockLocationId,
+        };
+        const res = await api.post("/admin/inventory-orders", orderPayload, headers);
+        expect(res.status).toBe(201);
+        createdOrder = res.data;
+        createdOrderId = res.data.inventoryOrder.id;
+      });
+
+      it("should update an inventory order when status is Pending", async () => {
+        const updatePayload = {
+          status: "Pending",
+          quantity: 5,
+          total_price: 500,
+        };
+        const res = await api.put(`/admin/inventory-orders/${createdOrderId}`, updatePayload, headers);
+        expect(res.status).toBe(200);
+        // PUT answers { inventoryOrder }, like POST does — the fields were
+        // never at the top level.
+        expect(res.data.inventoryOrder.quantity).toBe(5);
+        expect(res.data.inventoryOrder.total_price).toBe(500);
+      });
+
+      it("should update an order while Processing", async () => {
+        // First, update status to Processing
+        const updateStatus = { status: "Processing" };
+        const res1 = await api.put(`/admin/inventory-orders/${createdOrderId}`, updateStatus, headers);
+        expect(res1.status).toBe(200);
+        // Updating again is allowed: the guard permits Pending and Processing
+        const updatePayload = { quantity: 10 };
+        const res2 = await api.put(`/admin/inventory-orders/${createdOrderId}`, updatePayload, headers);
+        expect(res2.status).toBe(200);
+        expect(res2.data.inventoryOrder.quantity).toBe(10);
+      });
+
+      it("should not update an order if status is not Pending or Processing", async () => {
+        // Drive the order to a non-updatable status: Pending -> Processing -> Shipped
+        const res1 = await api.put(`/admin/inventory-orders/${createdOrderId}`, { status: "Processing" }, headers);
+        expect(res1.status).toBe(200);
+        const res2 = await api.put(`/admin/inventory-orders/${createdOrderId}`, { status: "Shipped" }, headers);
+        expect(res2.status).toBe(200);
+        // Now any further update must fail
+        const res3 = await api.put(`/admin/inventory-orders/${createdOrderId}`, { quantity: 10 }, headers).catch((err) => err.response);
+        expect(res3.status).toBe(400);
+        expect(res3.data.message).toBe("Order can only be updated if status is 'Pending' or 'Processing'.");
+      });
+
+      it("should return 400 for invalid update payload", async () => {
+        const updatePayload = {
+          quantity: -3,
+        };
+        const res = await api.put(`/admin/inventory-orders/${createdOrderId}`, updatePayload, headers).catch((err) => err.response);
+        expect(res.status).toBe(400);
+        expect(res.data.message).toBe('Invalid request: Value for field \'quantity\' too small, expected at least: \'0\'');
+      });
+
+      // #778 C2 admin-half — admin marking an order Delivered must POST stock to
+      // the destination location (mirroring partner-complete), not just write the
+      // status column, and record the delivered lines so a later cancel reverses.
+      it("posts only the COUNTED quantity when an admin marks an order Delivered, and refuses it with no counts (#2289)", async () => {
+        const invRes = await api.post("/admin/inventory-items", {
+          title: "Deliverable Inventory",
+          description: "for admin-delivered stock posting",
+        }, headers);
+        expect(invRes.status).toBe(200);
+        const itemId = invRes.data.inventory_item.id;
+
+        const destLoc = await api.post("/admin/stock-locations", { name: "Dest Warehouse" }, headers);
+        const destLocId = destLoc.data.stock_location.id;
+
+        const orderPayload = {
+          order_lines: [{ inventory_item_id: itemId, quantity: 3, price: 100 }],
+          quantity: 3,
+          total_price: 300,
+          status: "Processing",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: destLocId,
+          from_stock_location_id: fromStockLocationId,
+        };
+        const orderRes = await api.post("/admin/inventory-orders", orderPayload, headers);
+        expect(orderRes.status).toBe(201);
+        const orderId = orderRes.data.inventoryOrder.id;
+
+        // #2289 S2 — Delivered with no counts is refused: it used to post
+        // "everything outstanding" with nobody having counted anything.
+        const noCount = await api
+          .put(`/admin/inventory-orders/${orderId}`, { status: "Delivered" }, headers)
+          .catch((e: any) => e.response);
+        expect(noCount.status).toBe(400);
+        expect(JSON.stringify(noCount.data)).toMatch(/counted quantities/);
+
+        // The admin detail's per-line ledger (#2289) names the line to count.
+        const lineRes = await api.get(`/admin/inventory-orders/${orderId}`, headers);
+        expect(lineRes.data.inventoryOrder.dispatch_ledger).toEqual([
+          expect.objectContaining({ ordered: 3, dispatched: 0, received: 0 }),
+        ]);
+        const lineId = lineRes.data.inventoryOrder.dispatch_ledger[0].line_id;
+
+        // Mark Delivered via the generic admin PUT, with what was COUNTED: 2 of 3.
+        const putRes = await api.put(
+          `/admin/inventory-orders/${orderId}`,
+          { status: "Delivered", received_lines: [{ order_line_id: lineId, quantity: 2 }] },
+          headers
+        );
+        expect(putRes.status).toBe(200);
+
+        // Only the count is posted at the destination location.
+        const levelRes = await api.get(`/admin/inventory-items/${itemId}?fields=*location_levels`, headers);
+        expect(levelRes.status).toBe(200);
+        const levels = levelRes.data.inventory_item.location_levels || [];
+        const destLevel = levels.find((l: any) => l.location_id === destLocId);
+        expect(destLevel).toBeDefined();
+        expect(destLevel.stocked_quantity).toBe(2);
+
+        // The delivered lines must be recorded for cancel reversal.
+        const orderGet = await api.get(`/admin/inventory-orders/${orderId}?fields=id,status,metadata`, headers);
+        expect(orderGet.data.inventoryOrder.status).toBe("Delivered");
+        const delivered = orderGet.data.inventoryOrder.metadata?.partner_delivered_lines || [];
+        expect(delivered).toEqual([{ order_line_id: lineId, quantity: 2 }]);
+
+        // #1613 — and into the TYPED record too. Writing only the metadata blob
+        // made the admin delivery invisible to every reader of
+        // `line_fulfillments`: the partner path's own over-delivery guard, the
+        // drift audit, and anything asking what this order actually received.
+        const { ContainerRegistrationKeys } = await import("@medusajs/framework/utils");
+        const query = getContainer().resolve(ContainerRegistrationKeys.QUERY) as any;
+        const { data: withReceipts } = await query.graph({
+          entity: "inventory_orders",
+          filters: { id: orderId },
+          fields: ["id", "orderlines.id", "orderlines.line_fulfillments.quantity_delta", "orderlines.line_fulfillments.event_type"],
+        });
+        const receipts = (withReceipts?.[0]?.orderlines || [])
+          .flatMap((l: any) => l.line_fulfillments || [])
+          .filter((f: any) => f?.quantity_delta != null);
+        expect(receipts).toEqual([
+          expect.objectContaining({ quantity_delta: 2, event_type: "received" }),
+        ]);
+      });
+
+
+    });
+
+    // #790 slice 2 — standalone admin shipment endpoint. The status guard +
+    // not-found checks are deterministic (they fire before the carrier call), so
+    // they don't depend on a live shipping provider in the test env.
+    describe("POST /admin/inventory-orders/:id/shipment", () => {
+      it("rejects creating a shipment for a Pending order (status guard)", async () => {
+        const orderPayload = {
+          order_lines: [{ inventory_item_id: inventoryItemId, quantity: 2, price: 100 }],
+          quantity: 2,
+          total_price: 200,
+          status: "Pending",
+          expected_delivery_date: new Date().toISOString(),
+          order_date: new Date().toISOString(),
+          shipping_address: {},
+          stock_location_id: stockLocationId,
+          from_stock_location_id: fromStockLocationId,
+        };
+        const created = await api.post("/admin/inventory-orders", orderPayload, headers);
+        expect(created.status).toBe(201);
+        const id = created.data.inventoryOrder.id;
+
+        const res = await api
+          .post(`/admin/inventory-orders/${id}/shipment`, {}, headers)
+          .catch((err) => err.response);
+        expect(res.status).toBe(400);
+        expect(res.data.message).toMatch(/cannot create a shipment/i);
+      });
+
+      it("returns 404 for a non-existent order", async () => {
+        const res = await api
+          .post("/admin/inventory-orders/inv_order_does_not_exist/shipment", {}, headers)
+          .catch((err) => err.response);
+        expect(res.status).toBe(404);
+      });
+    });
+
+    // #790 slice 3 — admin "Mark Ready for Delivery" transition route.
+    describe("POST /admin/inventory-orders/:id/ready-for-delivery", () => {
+      const baseOrder = (status: string) => ({
+        order_lines: [{ inventory_item_id: inventoryItemId, quantity: 2, price: 100 }],
+        quantity: 2,
+        total_price: 200,
+        status,
+        expected_delivery_date: new Date().toISOString(),
+        order_date: new Date().toISOString(),
+        shipping_address: {},
+        stock_location_id: stockLocationId,
+        from_stock_location_id: fromStockLocationId,
+      });
+
+      it("transitions a Partial order to Ready for Delivery", async () => {
+        const created = await api.post("/admin/inventory-orders", baseOrder("Processing"), headers);
+        const id = created.data.inventoryOrder.id;
+        // "Partial" is a system-set status (only the complete workflow sets it on
+        // partial fulfilment) — the create/update API validators don't accept it,
+        // so put the order into Partial directly via the module service.
+        const svc: any = getContainer().resolve("inventory_orders");
+        await svc.updateInventoryOrders({ id, status: "Partial" });
+        const res = await api.post(`/admin/inventory-orders/${id}/ready-for-delivery`, {}, headers);
+        expect(res.status).toBe(200);
+        const got = await api.get(`/admin/inventory-orders/${id}?fields=id,status`, headers);
+        expect(got.data.inventoryOrder.status).toBe("Ready for Delivery");
+      });
+
+      it("rejects from Processing (completion not recorded yet)", async () => {
+        const created = await api.post("/admin/inventory-orders", baseOrder("Processing"), headers);
+        const id = created.data.inventoryOrder.id;
+        const res = await api
+          .post(`/admin/inventory-orders/${id}/ready-for-delivery`, {}, headers)
+          .catch((err) => err.response);
+        expect(res.status).toBe(400);
+      });
+
+      it("rejects from a non-allowed status (Pending)", async () => {
+        const created = await api.post("/admin/inventory-orders", baseOrder("Pending"), headers);
+        const id = created.data.inventoryOrder.id;
+        const res = await api
+          .post(`/admin/inventory-orders/${id}/ready-for-delivery`, {}, headers)
+          .catch((err) => err.response);
+        expect(res.status).toBe(400);
+      });
+    });
+});

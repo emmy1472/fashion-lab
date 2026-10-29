@@ -1,0 +1,155 @@
+# https://help.github.com/articles/dealing-with-line-endings/
+
+#--------- Set the default behavior, in case people don't have core.autocrlf set
+* text=auto
+
+#--------- c++ file encoding
+# force Github to re-encode & store non-UTF-8 text files as UTF-8. Upon checkout, these files might revert to their original encoding.
+*.cpp text diff=cpp working-tree-encoding=UTF-8 eol=lf
+*.c text diff=cpp working-tree-encoding=UTF-8 eol=lf
+*.h text diff=cpp working-tree-encoding=UTF-8 eol=lf
+*.hpp text diff=cpp working-tree-encoding=UTF-8 eol=lf
+
+# Compiled Object files
+*.slo   binary
+*.lo    binary
+*.o     binary
+*.obj   binary
+
+# Precompiled Headers
+*.gch   binary
+*.pch   binary
+
+# Compiled Dynamic libraries
+*.so    binary
+*.dylib binary
+*.dll   binary
+
+# Compiled Static libraries
+*.lai   binary
+*.la    binary
+*.a     binary
+*.lib   binary
+
+# Executables
+*.app   binary
+*.exe   binary
+*.out   binary
+#--------- end c++ file encoding
+
+#--------- Declare text files that will always have LF line endings on checkout
+*.md text eol=lf
+*.pri text eol=lf
+*.pro text eol=lf
+*.py text eol=lf
+*.qrc text eol=lf
+*.spec text eol=lf
+*.txt text eol=lf
+#--------- end Declare text files that will always have LF line endings on checkout
+
+#--------- Begin encoding for non-c++ binary files 
+#graphics
+*.ico      binary
+*.png      binary 
+*.jpg      binary 
+*.bmp      binary 
+*.gif      binary
+*.ttf      binary
+
+#artifacts
+*.dll      binary
+*.ocx      binary
+*.pdb      binary
+*.apx      binary
+*.snk      binary
+*.pfx      binary
+*.pdf      binary
+#--------- end encoding for additional files 
+
+#--------- Explicitly declare text files you want to always be normalized and converted to native line endings on checkout.
+#.foo text
+#--------- end Explicity declare text files...
+
+# How to get extension in source
+# find $PWD | sed -e 's/.*\///' | grep '.\..' | sed -e 's/.*\.//' | sort | uniq
+
+# 1
+# ai
+# backupfiles
+# bat
+# bookmarks
+# branch
+# changelog
+# compat
+# control
+# copyright
+# cpp
+# css
+# d
+# desc
+# desktop
+# dirs
+# dirstate
+# dll
+# docs
+# dsc
+# ebuild
+# exe
+# files
+# fncache
+# format
+# gif
+# h
+# html
+# i
+# icns
+# ico
+# include-binaries
+# info
+# install
+# iss
+# js
+# json
+# local
+# log
+# manpages
+# map
+# md
+# md5
+# menu
+# mime
+# pdf
+# phaseroots
+# plist
+# png
+# postinst
+# postrm
+# pri
+# pro
+# properties
+# py
+# qm
+# qrc
+# rc
+# recipe
+# rules
+# sh
+# sharedmimeinfo
+# SlackBuild
+# spec
+# strings
+# substvars
+# svg
+# theme
+# ts
+# tx
+# txt
+# ui
+# val
+# vit
+# vst
+# xcf
+# xml
+# xsd
+# yml
+

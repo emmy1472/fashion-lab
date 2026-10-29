@@ -1,0 +1,149 @@
+---
+title: useAccount
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { MiniTip } from '@freesewing/react/components/Mini'
+
+<DocusaurusDoc>
+
+The **useAccount** hook provides access to a FreeSewing user's account data in local storage.
+
+Use this hook to tap into the account state that is stored in the browser.
+
+<MiniTip>To load the account data, or update it, refer to the [useBackend](//reference/packages/react/hooks/usebackend/) hook instead.</MiniTip>
+
+## Example
+
+```js
+import { useAccount } from '@freesewing/react/hooks/useAccount'
+
+const MyComponent = () => {
+  const {
+    account,
+    admin,
+    clearAdmin,
+    control,
+    impersonate,
+    seenuser,
+    setAccount,
+    setSeenUser,
+    setToken,
+    signOut,
+    stopImpersonating,
+    token
+  } = useAccount()
+
+  // ...
+}
+```
+
+## Return value
+
+Calling the hook returns an object with the following properties:
+
+- [account](#account)
+- [admin](#admin)
+- [clearAdmin](#clearadmin)
+- [control](#control)
+- [impersonate](#impersonate)
+- [seenUser](#seenuser)
+- [setAccount](#setaccount)
+- [setSeenUser](#setseenuser)
+- [setToken](#settoken)
+- [signOut](#signout)
+- [stopImpersonating](#stopimpersonating)
+- [token](#token)
+
+### account
+
+Holds the account data available in the browser. Below is an example:
+
+```js
+{
+  id: 1,
+  bio: "Hi, my name is Joost 👋\n\n - 🫡  I am the  [benevolent dictator](https://en.wikipedia.org/wiki/Benevolent_dictator_for_life) here at FreeSewing\n - 🧵 I make clothes and shoes\n - 👕 I design sewing patterns\n - 🧑‍💻 I write code\n - 🐘 I am [@joost@freesewing.social](https://freesewing.social/@joost) on Mastodon\n - 🦋 I am [@joost.at](https://bsky.app/profile/joost.at) on Bluesky\n - 📫 My email is joost AT joost DOT at\n - 🙊 I'm an introvert\n - 🦈 My pronouns are he/him or they/them\n - 👻 Joost sounds like Ghost, in case you're wondering\n",
+  compare: true,
+  consent: 1,
+  control: 5,
+  createdAt: "2014-01-20T17:10:47.000Z",
+  ehash: "8543e38de4652095c51571fb8dc1734eb7b1b736e574176c42e2f954e5e95a50",
+  email:"joost@joost.at",
+  data: {
+    mastodon: "@joost@freesewing.social",
+    instagram: "@freesewing_org",
+    githubUsername: "joostdecock",
+    githubEmail: "joost@joost.at",
+    reddit: "j__st",
+    website: "https://freesewing.org/"
+  },
+  ihash: "7bf3d6a154885eb2c4f56e2bf54b3666d8fb634b72c07c971511816ed0298c79",
+  imperial: false,
+  initial: "joost@decock.org",
+  jwtCalls: 13860,
+  keyCalls: 16,
+  language: "en",
+  lastSeen: "2025-05-29T09:47:56.603Z",
+  mfaEnabled: true,
+  newsletter: true,
+  role: "admin",
+  status: 1,
+  updatedAt: "2025-05-29T09:47:56.604Z",
+  username: "joost",
+  lusername: "joost",
+  passwordType: "v3",
+  bestBefore:1748515676626
+}
+```
+
+### admin
+
+A user with the `admin` role can impersonate another user.
+When that happens, this will hold the `account` data of the admin user so it can be restored later.
+
+### clearAdmin
+
+This clears the admin data held in `admin`.
+
+### control
+
+This provides the user's control score.
+
+### impersonate
+
+This method allows users with the `admin` role to impersonate another user.
+
+It takes an object that should hold the entire user's account data as returned from the backend.
+
+### seenUser
+
+This holds the username that was once authenticated in this browser.
+
+It is what allows a _welcome back [seenUser]_ message to be shown even when no user is currently logged in.
+
+### setAccount
+
+This method sets the data held in `account`.
+
+### setSeenUser
+
+This method sets the data held in `seenUser`.
+
+### setToken
+
+This method sets the data held in `token`.
+
+### signOut
+
+This message will remove the account data from the browser.
+
+### stopImpersonating
+
+This method will stop impersonating theuser and restore the `admin` account data to `account`.
+
+### token
+
+This holds the JSON Web Token that is used to authenticate to the FreeSewing backend.
+
+</DocusaurusDoc>
+

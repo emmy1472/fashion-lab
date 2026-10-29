@@ -1,0 +1,233 @@
+import {
+    ContainerRegistrationKeys,
+    Modules,
+    TransactionHandlerType,
+} from "@medusajs/framework/utils"
+import { StepResponse, WorkflowResponse, createStep, createWorkflow, transform } from "@medusajs/framework/workflows-sdk"
+import { notifyOnFailureStep, sendNotificationsStep } from "@medusajs/medusa/core-flows"
+import { sendInventoryOrderToPartnerWorkflow } from "./send-to-partner";
+import type { IWorkflowEngineService, RemoteQueryFunction } from "@medusajs/types";
+
+const TASKS_MODULE = "tasksModuleService"
+
+type SetInventoryOrderStepSuccessInput = {
+    stepId: string;
+    updatedOrder: any;
+};
+
+export const setInventoryOrderStepSuccessStep = createStep(
+    "set-inventory-order-step-success",
+    async function (
+        { stepId, updatedOrder }: SetInventoryOrderStepSuccessInput,
+        { container, context }
+    ) {
+        const logger: any = container.resolve(ContainerRegistrationKeys.LOGGER)
+        const engineService = container.resolve(
+            Modules.WORKFLOW_ENGINE
+        ) as IWorkflowEngineService
+
+        // Get the workflow transaction ID from associated tasks instead of order metadata
+        const query = container.resolve(ContainerRegistrationKeys.QUERY) as Omit<RemoteQueryFunction, symbol>
+
+        // Find tasks linked to this inventory order that have a transaction ID
+        const taskLinksResult = await query.graph({
+            entity: "inventory_orders",
+            fields: [
+                "id",
+                "inventory_order_id",
+                "tasks.*"
+            ],
+            filters: {
+                id: updatedOrder.id
+            }
+        })
+        const taskLinks = taskLinksResult.data || []
+
+        // Find a task with a transaction ID (should be one of the partner workflow tasks)
+        let workflowTransactionId: string | null = null
+        for (const order of taskLinks) {
+            if (order.tasks && Array.isArray(order.tasks)) {
+                for (const task of order.tasks) {
+                    if (task && task.transaction_id) {
+                        workflowTransactionId = task.transaction_id
+                        break
+                    }
+                }
+                if (workflowTransactionId) break
+            }
+        }
+        
+        if (!workflowTransactionId) {
+            throw new Error(`No workflow transaction ID found in tasks for inventory order ${updatedOrder.id}`);
+        }
+        
+        logger.debug(
+            `[inventory-order] step success stepId=${stepId} txn=${workflowTransactionId} workflow=${sendInventoryOrderToPartnerWorkflow.getName()}`
+        )
+
+        await engineService.setStepSuccess({
+            idempotencyKey: {
+                action: TransactionHandlerType.INVOKE,
+                transactionId: workflowTransactionId,
+                stepId,
+                workflowId: sendInventoryOrderToPartnerWorkflow.getName(),
+            },
+            stepResponse: new StepResponse(updatedOrder, updatedOrder.id),
+        })
+    }
+)
+
+type SetInventoryOrderStepFailedInput = {
+    stepId: string;
+    updatedOrder: any;
+    error?: string;
+};
+
+export const setInventoryOrderStepFailedStep = createStep(
+    "set-inventory-order-step-failed",
+    async function (
+        { stepId, updatedOrder, error }: SetInventoryOrderStepFailedInput,
+        { container }
+    ) {
+        const logger: any = container.resolve(ContainerRegistrationKeys.LOGGER)
+        const engineService = container.resolve(
+            Modules.WORKFLOW_ENGINE
+        ) as IWorkflowEngineService
+        const taskService = container.resolve(TASKS_MODULE)
+        
+        // Get the workflow transaction ID from associated tasks instead of order metadata
+        const query = container.resolve(ContainerRegistrationKeys.QUERY) as Omit<RemoteQueryFunction, symbol>
+        
+        // Find tasks linked to this inventory order that have a transaction ID
+        const taskLinksResult = await query.graph({
+            entity: "inventory_orders",
+            fields: [
+                "id",
+                "tasks.*"
+            ],
+            filters: {
+                id: updatedOrder.id
+            }
+        })
+        
+        const taskLinks = taskLinksResult.data || []
+        
+        // Find a task with a transaction ID (should be one of the partner workflow tasks)
+        let workflowTransactionId: string | null = null
+        for (const order of taskLinks) {
+            if (order.tasks && Array.isArray(order.tasks)) {
+                for (const task of order.tasks) {
+                    if (task && task.transaction_id) {
+                        workflowTransactionId = task.transaction_id
+                        break
+                    }
+                }
+                if (workflowTransactionId) break
+            }
+        }
+        
+        if (!workflowTransactionId) {
+            throw new Error(`No workflow transaction ID found in tasks for inventory order ${updatedOrder.id}`);
+        }
+        
+        logger.debug(
+            `[inventory-order] step failure stepId=${stepId} txn=${workflowTransactionId} error=${error ?? ""} workflow=${sendInventoryOrderToPartnerWorkflow.getName()}`
+        )
+
+        await engineService.setStepFailure({
+            idempotencyKey: {
+                action: TransactionHandlerType.INVOKE,
+                transactionId: workflowTransactionId,
+                stepId,
+                workflowId: sendInventoryOrderToPartnerWorkflow.getName(),
+            },
+            stepResponse: new StepResponse(updatedOrder, updatedOrder.id),
+        })
+    }
+)
+
+export const setInventoryOrderStepSuccessWorkflow = createWorkflow(
+    {
+        name: "set-inventory-order-step-success-workflow",
+        store: true
+    },
+    (input: SetInventoryOrderStepSuccessInput) => {
+        // Failure notification if this workflow itself errors
+        const failureNotification = transform({ input }, (data) => {
+            return [
+                {
+                    to: "",
+                    channel: "feed",
+                    template: "admin-ui",
+                    data: {
+                        title: "Inventory Order Workflow Signal",
+                        description: `Failed to mark step ${data.input.stepId} as success for order ${data.input.updatedOrder?.id}.`,
+                    },
+                },
+            ]
+        })
+        notifyOnFailureStep(failureNotification)
+
+        const result = setInventoryOrderStepSuccessStep(input)
+
+        // Success notification
+        const successNotification = transform({ input }, (data) => {
+            return [
+                {
+                    to: "",
+                    channel: "feed",
+                    template: "admin-ui",
+                    data: {
+                        title: "Inventory Order Workflow Signal",
+                        description: `Marked step ${data.input.stepId} as success for order ${data.input.updatedOrder?.id}.`,
+                    },
+                },
+            ]
+        })
+        sendNotificationsStep(successNotification)
+        return new WorkflowResponse(result)
+    },
+)
+
+export const setInventoryOrderStepFailedWorkflow = createWorkflow(
+    {
+        name: "set-inventory-order-step-failed-workflow", 
+        store: true
+    },
+    (input: SetInventoryOrderStepFailedInput) => {
+        // Failure notification if this workflow itself errors
+        const failureNotification = transform({ input }, (data) => {
+            return [
+                {
+                    to: "",
+                    channel: "feed",
+                    template: "admin-ui",
+                    data: {
+                        title: "Inventory Order Workflow Signal",
+                        description: `Failed to mark step ${data.input.stepId} as failed for order ${data.input.updatedOrder?.id}.`,
+                    },
+                },
+            ]
+        })
+        notifyOnFailureStep(failureNotification)
+
+        const result = setInventoryOrderStepFailedStep(input)
+
+        // Success notification
+        const successNotification = transform({ input }, (data) => {
+            return [
+                {
+                    to: "",
+                    channel: "feed",
+                    template: "admin-ui",
+                    data: {
+                        title: "Inventory Order Workflow Signal",
+                        description: `Marked step ${data.input.stepId} as failed for order ${data.input.updatedOrder?.id}.`,
+                    },
+                },
+            ]
+        })
+        sendNotificationsStep(successNotification)
+        return new WorkflowResponse(result)
+    },
+)

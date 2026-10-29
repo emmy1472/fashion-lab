@@ -1,0 +1,1874 @@
+import { FetchError } from "@medusajs/js-sdk";
+import {  PaginatedResponse, DateComparisonOperator } from "@medusajs/types";
+import {
+  QueryKey,
+  UseMutationOptions,
+  UseQueryOptions,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { sdk } from "../../lib/config";
+import { queryKeysFactory } from "../../lib/query-key-factory";
+import type { DesignPartnerStageRole as DesignPartnerStageRoleValue } from "../../../modules/designs/partner-stage-roles";
+
+export interface ColorPalette {
+  name: string;
+  code: string;
+}
+
+export interface FeedbackHistory {
+  date: string | Date;
+  feedback: string;
+  author: string;
+}
+
+export interface CustomSize {
+  [key: string]: {
+    [measurement: string]: number;
+  };
+}
+
+export interface DesignColor {
+  id?: string;
+  name: string;
+  hex_code: string;
+  usage_notes?: string;
+  order?: number;
+}
+
+export interface DesignSizeSet {
+  id?: string;
+  size_label: string;
+  measurements: Record<string, number>;
+}
+
+export interface DesignMedia {
+  id?: string;
+  url: string;
+  isThumbnail?: boolean;
+}
+
+export interface AdminDesign {
+  id: string;
+  name: string;
+  description?: string;
+  inspiration_sources?: string[];
+  design_type?: "Original" | "Derivative" | "Custom" | "Collaboration";
+  /** #938 — WHAT the design is ("trousers"), vs `design_type` = how original. */
+  product_type?: string | null;
+  /** Whether a human or a model set `product_type`. Drives the badge. */
+  product_type_source?: "manual" | "inferred" | null;
+  status?: "Conceptual" | "In_Development" | "Technical_Review" | "Sample_Production" | "Revision" | "Approved" | "Rejected" | "On_Hold" | "Commerce_Ready" | "Superseded";
+  priority?: "Low" | "Medium" | "High" | "Urgent";
+  revised_from_id?: string | null;
+  revision_number?: number;
+  revision_notes?: string | null;
+  target_completion_date: string | Date;
+  design_files?: string[];
+  thumbnail_url?: string;
+  custom_sizes?: CustomSize;
+  color_palette?: ColorPalette[];
+  tags?: string[];
+  estimated_cost?: number;
+  material_cost?: number | null;
+  production_cost?: number | null;
+  tasks?: any[]; // Array of design tasks
+  designer_notes?: string;
+  feedback_history?: FeedbackHistory[];
+  media_files?: DesignMedia[];
+  metadata?: Record<string, any> | null | undefined;
+  moodboard?: Record<string, any> | null;
+  colors?: Array<DesignColor>;
+  size_sets?: Array<DesignSizeSet>;
+  created_at?: Date;
+  updated_at?: Date;
+  partner_id?: string;
+}
+
+export type CreateAdminDesignPayload = Omit<AdminDesign, "id" | "created_at" | "updated_at">;
+export type UpdateAdminDesignPayload = Partial<CreateAdminDesignPayload>;
+
+export interface AdminDesignResponse {
+  design: AdminDesign;
+}
+
+export interface AdminDesignsResponse {
+  designs: AdminDesign[];
+  count: number;
+  offset: number;
+  limit: number;
+}
+
+export interface AdminDesignsQuery {
+  offset?: number;
+  limit?: number;
+  name?: string;
+  design_type?: AdminDesign["design_type"];
+  /** null clears the type and hands it back to inference. */
+  product_type?: string | null;
+  status?: AdminDesign["status"];
+  priority?: AdminDesign["priority"];
+  tags?: string[];
+  partner_id?: string;
+  customer_id?: string;
+  created_at?: DateComparisonOperator;
+  target_completion_date?: DateComparisonOperator;
+  q?: string;
+}
+
+/** Mirrors modules/designs/partner-stage-roles.ts — the fixed stage list (#2306). */
+export type DesignPartnerStageRole = DesignPartnerStageRoleValue;
+
+export interface LinkDesignPartner {
+  partnerIds?: string[];
+  /** `stage_role` omitted leaves an existing partner's stage alone; null clears it. */
+  partners?: { partner_id: string; stage_role?: DesignPartnerStageRole | null }[];
+}
+
+export interface DesignPartnerRosterEntry {
+  partner_id: string;
+  /** How the partner relates to the design: prospect / maker / designer. */
+  role: string | null;
+  /** Which production stage they do on it; null = not chosen yet. */
+  stage_role: DesignPartnerStageRole | null;
+  sla_days: number | null;
+  created_at: string;
+  partner: { id: string; name?: string | null; handle?: string | null; logo?: string | null } | null;
+}
+
+export interface DesignPartnerRosterResponse {
+  design_id: string;
+  roster: DesignPartnerRosterEntry[];
+  count: number;
+}
+
+export interface DesignInventoryOrderRow {
+  id: string;
+  status: string;
+  quantity?: number | null;
+  expected_delivery_date?: string | null;
+  partner?: { id: string; name?: string | null } | null;
+  note?: string | null;
+}
+
+/** Inventory orders linked to a design — what a stage can wait for (#2306 S2). */
+export const useDesignInventoryOrders = (designId: string) =>
+  useQuery({
+    queryKey: ["designs", "inventory-orders", designId] as const,
+    queryFn: async () =>
+      sdk.client.fetch<{ design_inventory_orders: DesignInventoryOrderRow[] }>(
+        `/admin/designs/${designId}/inventory-orders`,
+        { method: "GET" }
+      ),
+    enabled: !!designId,
+  });
+
+export const designRosterQueryKey = (designId: string) =>
+  ["designs", "roster", designId] as const;
+
+export const useDesignPartnerRoster = (
+  designId: string,
+  options?: Omit<
+    UseQueryOptions<DesignPartnerRosterResponse, FetchError, DesignPartnerRosterResponse, QueryKey>,
+    "queryFn" | "queryKey"
+  >,
+) =>
+  useQuery({
+    queryKey: designRosterQueryKey(designId),
+    queryFn: async () =>
+      sdk.client.fetch<DesignPartnerRosterResponse>(`/admin/designs/${designId}/partner`, {
+        method: "GET",
+      }),
+    enabled: !!designId,
+    ...options,
+  });
+
+const DESIGN_QUERY_KEY = "designs" as const;
+export const designQueryKeys = queryKeysFactory(DESIGN_QUERY_KEY);
+
+export interface DesignQuery {
+  fields?: string[];
+}
+
+export const useDesign = (
+  id: string,
+  query?: DesignQuery,
+  options?: Omit<
+    UseQueryOptions<
+      AdminDesignResponse,
+      FetchError,
+      AdminDesignResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: designQueryKeys.detail(id),
+    queryFn: async () =>
+      sdk.client.fetch<AdminDesignResponse>(`/admin/designs/${id}`, {
+        method: "GET",
+        query: query?.fields
+          ? {
+              fields: query.fields.join(","),
+            }
+          : undefined,
+      }),
+    ...options,
+  });
+  return { ...data, ...rest };
+};
+
+export const useDesigns = (
+  query?: AdminDesignsQuery,
+  options?: Omit<
+    UseQueryOptions<
+      PaginatedResponse<AdminDesignsResponse>,
+      FetchError,
+      PaginatedResponse<AdminDesignsResponse>,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: async () =>
+      sdk.client.fetch<PaginatedResponse<AdminDesignsResponse>>(
+        `/admin/designs`,
+        {
+          method: "GET",
+          query,
+        },
+      ),
+    queryKey: designQueryKeys.list(query),
+    ...options,
+  });
+  
+  // Properly extract the paginated data
+  return { 
+    designs: data?.designs || [], 
+    count: data?.count || 0,
+    offset: query?.offset || 0,
+    limit: query?.limit || 0,
+    ...rest 
+  };
+};
+
+export const useCreateDesign = (
+  options?: UseMutationOptions<
+    AdminDesignResponse,
+    FetchError,
+    CreateAdminDesignPayload
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: CreateAdminDesignPayload) =>
+      sdk.client.fetch<AdminDesignResponse>(`/admin/designs`, {
+        method: "POST",
+        body: payload,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+export const useUpdateDesign = (
+  id: string,
+  options?: UseMutationOptions<
+    AdminDesignResponse,
+    FetchError,
+    UpdateAdminDesignPayload
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: UpdateAdminDesignPayload) =>
+      sdk.client.fetch<AdminDesignResponse>(`/admin/designs/${id}`, {
+        method: "PUT",
+        body: payload,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+/** #1113 — the subset of brief columns the moodboard Concept & Identity frame round-trips to. */
+export type DesignBriefUpdate = {
+  concept_theme?: string | null;
+  aesthetic_keywords?: string[] | null;
+};
+
+/**
+ * #1113 — partial brief update driven by Concept & Identity card edits on the
+ * moodboard canvas (concept_theme + aesthetic_keywords). Backed by the existing
+ * PUT /admin/designs/:id/brief route + UpdateDesignBriefSchema.
+ */
+export const useUpdateDesignBrief = (
+  id: string,
+  options?: UseMutationOptions<{ brief: Record<string, any> }, FetchError, DesignBriefUpdate>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: DesignBriefUpdate) =>
+      sdk.client.fetch<{ brief: Record<string, any> }>(`/admin/designs/${id}/brief`, {
+        method: "PUT",
+        body: payload,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+/** Response of POST /admin/designs/:id/moodboard/generate — the freshly-built scene. */
+export interface GenerateMoodboardResponse {
+  moodboard: {
+    type: "excalidraw";
+    version: number;
+    source: string;
+    elements: any[];
+    appState: Record<string, any>;
+    files: Record<string, any>;
+  };
+}
+
+/**
+ * Seeds/regenerates the design's moodboard with a deterministic AI tech-pack scene
+ * (#892): header/flats/size-set/colorways from the design's own fields + Construction
+ * specs → construction details. REPLACES any existing moodboard.
+ */
+export const useGenerateMoodboard = (
+  id: string,
+  options?: UseMutationOptions<GenerateMoodboardResponse, FetchError, void>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      sdk.client.fetch<GenerateMoodboardResponse>(
+        `/admin/designs/${id}/moodboard/generate`,
+        { method: "POST" },
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+/** Response of POST /admin/designs/:id/moodboard/seed — the seeded scene, or null. */
+export interface SeedMoodboardResponse {
+  moodboard: GenerateMoodboardResponse["moodboard"] | null;
+}
+
+// ── Insert-block palette + construction catalog (#1113 Feature A/B) ────────────
+
+export interface MoodboardBlockListing {
+  key: string;
+  label: string;
+  group: string;
+  available: boolean;
+}
+
+/** The insert-block palette: every drop-in frame + whether the design has data. */
+export const useMoodboardBlocks = (
+  id: string,
+  options?: Omit<UseQueryOptions<{ blocks: MoodboardBlockListing[] }, FetchError>, "queryKey" | "queryFn">,
+) => {
+  return useQuery({
+    queryKey: [...designQueryKeys.detail(id), "moodboard-blocks"],
+    queryFn: async () =>
+      sdk.client.fetch<{ blocks: MoodboardBlockListing[] }>(
+        `/admin/designs/${id}/moodboard/blocks`,
+        { method: "GET" },
+      ),
+    enabled: !!id,
+    ...options,
+  });
+};
+
+/** Build ONE block from the design's data (origin-positioned). Not persisted. */
+export const useInsertMoodboardBlock = (
+  id: string,
+  options?: UseMutationOptions<{ block: GenerateMoodboardResponse["moodboard"] }, FetchError, string>,
+) => {
+  return useMutation({
+    mutationFn: async (block: string) =>
+      sdk.client.fetch<{ block: GenerateMoodboardResponse["moodboard"] }>(
+        `/admin/designs/${id}/moodboard/blocks`,
+        { method: "POST", body: { block } },
+      ),
+    ...options,
+  });
+};
+
+export interface ConstructionParamDef {
+  key: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+}
+export interface ConstructionPreset {
+  value: string;
+  label: string;
+  detailLabel: string;
+  params?: Record<string, number>;
+  fabricRules?: string[];
+  note?: string;
+}
+export interface ConstructionTechnique {
+  slug: string;
+  label: string;
+  family: string;
+  garmentAreas: string[];
+  params: ConstructionParamDef[];
+  defaultFabricRules: string[];
+  presets: ConstructionPreset[];
+}
+export interface ConstructionCatalog {
+  families: string[];
+  techniques: ConstructionTechnique[];
+}
+
+/** The categorized construction catalog the admin picker renders (#1113 Feature B). */
+export const useConstructionTechniques = (
+  id: string,
+  options?: Omit<UseQueryOptions<ConstructionCatalog, FetchError>, "queryKey" | "queryFn">,
+) => {
+  return useQuery({
+    queryKey: [...designQueryKeys.detail(id), "construction-techniques"],
+    queryFn: async () =>
+      sdk.client.fetch<ConstructionCatalog>(
+        `/admin/designs/${id}/construction-techniques`,
+        { method: "GET" },
+      ),
+    enabled: !!id,
+    staleTime: Infinity,
+    ...options,
+  });
+};
+
+/**
+ * Idempotent, brief-friendly seed (#1113): fills an EMPTY `design.moodboard`
+ * from the brief so the editor opens onto an editable snapshot without a manual
+ * click. No-op (returns `{ moodboard: null }`) when the board already has
+ * content or there's nothing to render yet. Never clobbers.
+ */
+export const useSeedMoodboard = (
+  id: string,
+  options?: UseMutationOptions<SeedMoodboardResponse, FetchError, void>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      sdk.client.fetch<SeedMoodboardResponse>(
+        `/admin/designs/${id}/moodboard/seed`,
+        { method: "POST" },
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      if (data?.moodboard) {
+        queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id) });
+      }
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+// #1113 S4 — scoped designer invites for a single design.
+export interface DesignerInvite {
+  id: string;
+  design_id: string;
+  email: string | null;
+  status: "pending" | "accepted" | "revoked" | string;
+  role: string | null;
+  expires_at: string | null;
+  inviter_name: string | null;
+  accepted_partner_id: string | null;
+  accepted_at: string | null;
+  created_at: string;
+}
+
+export interface DesignerInvitesResponse {
+  invites: DesignerInvite[];
+}
+
+export interface CreateDesignerInviteReq {
+  email?: string;
+  expires_in_days?: number;
+  role?: string;
+  inviter_name?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface CreateDesignerInviteResponse {
+  invite: DesignerInvite;
+  /** The raw token/URL — only returned once, at creation. */
+  token: string;
+  url: string;
+  /** Whether a notification email was dispatched (only when `email` was set). */
+  emailed?: boolean;
+}
+
+export const useDesignerInvites = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<DesignerInvitesResponse, FetchError, DesignerInvitesResponse, QueryKey>,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: designQueryKeys.detail(id, ["designer-invites"]),
+    queryFn: async () =>
+      sdk.client.fetch<DesignerInvitesResponse>(
+        `/admin/designs/${id}/designer-invites`,
+        { method: "GET" },
+      ),
+    ...options,
+  });
+  return { ...data, invites: data?.invites ?? [], ...rest };
+};
+
+export const useCreateDesignerInvite = (
+  id: string,
+  options?: UseMutationOptions<CreateDesignerInviteResponse, FetchError, CreateDesignerInviteReq>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload) =>
+      sdk.client.fetch<CreateDesignerInviteResponse>(
+        `/admin/designs/${id}/designer-invites`,
+        { method: "POST", body: payload },
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({
+        queryKey: designQueryKeys.detail(id, ["designer-invites"]),
+      });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+export const useRevokeDesignerInvite = (
+  id: string,
+  options?: UseMutationOptions<
+    { id: string; object: string; revoked: boolean },
+    FetchError,
+    string
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (inviteId) =>
+      sdk.client.fetch<{ id: string; object: string; revoked: boolean }>(
+        `/admin/designs/${id}/designer-invites/${inviteId}`,
+        { method: "DELETE" },
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({
+        queryKey: designQueryKeys.detail(id, ["designer-invites"]),
+      });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+export const useDeleteDesign = (
+  id: string,
+  options?: UseMutationOptions<AdminDesign, FetchError, void>,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      sdk.client.fetch<AdminDesign>(`/admin/designs/${id}`, {
+        method: "DELETE",
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({
+        queryKey: designQueryKeys.detail(id),
+      });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+export interface ApproveDesignResponse {
+  design: AdminDesign;
+  product_id?: string;
+  variant_id?: string;
+}
+
+/**
+ * #2030 item 3 — the size the operator chose, when the design states several
+ * (or none) and the minter would otherwise produce a variant with no size.
+ */
+export type ApproveDesignPayload = { size_label?: string | null } | void;
+
+export const useApproveDesign = (
+  designId: string,
+  options?: UseMutationOptions<
+    ApproveDesignResponse,
+    FetchError,
+    ApproveDesignPayload
+  >
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: ApproveDesignPayload) =>
+      sdk.client.fetch<ApproveDesignResponse>(
+        `/admin/designs/${designId}/approve`,
+        { method: "POST", body: payload || {} }
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+/**
+ * Ask the model to (re-)infer a design's garment type (#938).
+ *
+ * `force` is what lets this overwrite a type a human typed. Without it the
+ * server refuses and reports `skip_reason: "manually_set"` — a designer's
+ * correction moves the production spec, and therefore the cost, so it is not
+ * something a model gets to undo on its own.
+ */
+export type InferProductTypeResponse = {
+  design: AdminDesign;
+  inference: {
+    design_id: string;
+    product_type: string | null;
+    skipped: boolean;
+    skip_reason: string | null;
+    confidence: number | null;
+  };
+};
+
+export const useInferDesignProductType = (
+  designId: string,
+  options?: UseMutationOptions<
+    InferProductTypeResponse,
+    FetchError,
+    { force?: boolean } | void
+  >
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (variables) =>
+      sdk.client.fetch<InferProductTypeResponse>(
+        `/admin/designs/${designId}/product-type`,
+        { method: "POST", body: { force: Boolean((variables as any)?.force) } }
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+export interface PlannedInventoryItemPayload {
+  inventoryId: string;
+  plannedQuantity?: number;
+  /**
+   * Nullable: the link UI sends an explicit null when a material is stocked
+   * nowhere, or in more than one place, rather than guessing which location
+   * consumption should later be deducted from.
+   */
+  locationId?: string | null;
+  metadata?: Record<string, any>;
+}
+
+export interface LinkDesignInventoryPayload {
+  inventoryIds?: string[];
+  inventoryItems?: PlannedInventoryItemPayload[];
+}
+
+export interface UpdateInventoryLinkPayload {
+  plannedQuantity?: number | null;
+  locationId?: string | null;
+  metadata?: Record<string, any> | null;
+}
+
+export interface LinkedInventoryItem {
+  inventory_item_id: string;
+  inventory_id?: string;
+  planned_quantity?: number;
+  consumed_quantity?: number;
+  consumed_at?: string;
+  location_id?: string;
+  metadata?: Record<string, any>;
+  inventory_item?: {
+    id: string;
+    title?: string;
+    sku?: string;
+    thumbnail?: string | null;
+    [key: string]: any;
+  };
+}
+
+export interface DesignInventoryResponse {
+  inventory_items: LinkedInventoryItem[];
+}
+
+export const useDesignInventory = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<
+      DesignInventoryResponse,
+      FetchError,
+      DesignInventoryResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  return useQuery({
+    queryKey: designQueryKeys.detail(id, ["inventory"]),
+    queryFn: async () =>
+      sdk.client.fetch<DesignInventoryResponse>(`/admin/designs/${id}/inventory`, {
+        method: "GET",
+      }),
+    ...options,
+  });
+};
+
+export const useLinkDesignInventory = (
+  id: string,
+  options?: UseMutationOptions<
+    AdminDesignResponse,
+    FetchError,
+    LinkDesignInventoryPayload
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: LinkDesignInventoryPayload) =>
+      sdk.client.fetch<AdminDesignResponse>(`/admin/designs/${id}/inventory`, {
+        method: "POST",
+        body: data,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id, ["inventory"]) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+export const useDelinkInventory = (
+  id: string,
+  options?: UseMutationOptions<
+    AdminDesignResponse,
+    FetchError,
+    LinkDesignInventoryPayload
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: LinkDesignInventoryPayload) =>
+      sdk.client.fetch<AdminDesignResponse>(`/admin/designs/${id}/inventory/delink`, {
+        method: "POST",
+        body: data,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id, ["inventory"]) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+export const useUpdateInventoryLink = (
+  designId: string,
+  inventoryId: string,
+  options?: UseMutationOptions<AdminDesignResponse, FetchError, UpdateInventoryLinkPayload>
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: UpdateInventoryLinkPayload) =>
+      sdk.client.fetch<AdminDesignResponse>(`/admin/designs/${designId}/inventory/${inventoryId}`, {
+        method: "PATCH",
+        body: data,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId, ["inventory"]) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+/** Partner ids newly linked, and those whose stage changed. */
+export interface LinkDesignPartnerResponse {
+  linked: string[];
+  stage_changed: string[];
+}
+
+export const useLinkDesignToPartner = (
+    id: string,
+    options?: UseMutationOptions<
+    LinkDesignPartnerResponse,
+    FetchError,
+    LinkDesignPartner
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: LinkDesignPartner) =>
+      sdk.client.fetch<LinkDesignPartnerResponse>(`/admin/designs/${id}/partner`, {
+        method: "POST",
+        body: data,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: designRosterQueryKey(id) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+}
+
+export const useUnlinkDesignFromPartner = (
+  designId: string,
+  options?: UseMutationOptions<
+    { design_id: string; partner_id: string; unlinked: boolean },
+    FetchError,
+    { partnerId: string }
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { partnerId: string }) =>
+      sdk.client.fetch<{ design_id: string; partner_id: string; unlinked: boolean }>(
+        `/admin/designs/${designId}/partner`,
+        { method: "DELETE", body: data }
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) });
+      queryClient.invalidateQueries({ queryKey: designRosterQueryKey(designId) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+}
+
+export const useCancelPartnerAssignment = (
+  designId: string,
+  options?: UseMutationOptions<
+    { design_id: string; partner_id: string; cancelled_tasks: number; unlinked: boolean; message: string },
+    FetchError,
+    { partner_id: string; unlink?: boolean }
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { partner_id: string; unlink?: boolean }) =>
+      sdk.client.fetch<{ design_id: string; partner_id: string; cancelled_tasks: number; unlinked: boolean; message: string }>(
+        `/admin/designs/${designId}/cancel-partner-assignment`,
+        { method: "POST", body: data }
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+}
+
+
+export interface CreateDesignLLMPayload {
+  designPrompt: string;
+  existingValues?: Record<string, any>;
+}
+
+export const useCreateDesignLLM = (
+  options?: UseMutationOptions<
+    AdminDesignResponse,
+    FetchError,
+    CreateDesignLLMPayload
+  >
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: CreateDesignLLMPayload) =>
+      sdk.client.fetch<AdminDesignResponse>(`/admin/designs/auto`, {
+        method: "POST",
+        body: data,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+// ─── Design Revisions ──────────────────────────────────────────────────────
+
+export interface ReviseDesignPayload {
+  revision_notes: string;
+  overrides?: {
+    name?: string;
+    priority?: string;
+    designer_notes?: string;
+    description?: string;
+    tags?: string[];
+    target_completion_date?: string;
+  };
+}
+
+export interface ReviseDesignResponse {
+  design: AdminDesign;
+  message: string;
+}
+
+export interface DesignRevisionsResponse {
+  design_id: string;
+  root_design_id: string;
+  current_revision: number;
+  lineage: Array<{
+    id: string;
+    name: string;
+    status: string;
+    revision_number: number;
+    revision_notes: string | null;
+    revised_from_id: string | null;
+    created_at: string;
+    updated_at: string;
+  }>;
+}
+
+export const useReviseDesign = (
+  id: string,
+  options?: UseMutationOptions<
+    ReviseDesignResponse,
+    FetchError,
+    ReviseDesignPayload
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: ReviseDesignPayload) =>
+      sdk.client.fetch<ReviseDesignResponse>(`/admin/designs/${id}/revise`, {
+        method: "POST",
+        body: payload,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+export const useDesignRevisions = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<
+      DesignRevisionsResponse,
+      FetchError,
+      DesignRevisionsResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: designQueryKeys.detail(id, ["revisions"]),
+    queryFn: async () =>
+      sdk.client.fetch<DesignRevisionsResponse>(`/admin/designs/${id}/revisions`, {
+        method: "GET",
+      }),
+    ...options,
+  });
+  return { ...data, ...rest };
+};
+
+// ─── Design Components (bundling) ───────────────────────────────────────────
+
+export interface DesignComponentLink {
+  id: string;
+  quantity: number;
+  role?: string | null;
+  notes?: string | null;
+  order: number;
+  metadata?: Record<string, any> | null;
+  parent_design_id: string;
+  component_design_id: string;
+  component_design?: AdminDesign;
+  parent_design?: AdminDesign;
+}
+
+export interface AddDesignComponentPayload {
+  component_design_id: string;
+  quantity?: number;
+  role?: string;
+  notes?: string;
+  order?: number;
+  metadata?: Record<string, any>;
+}
+
+export interface UpdateDesignComponentPayload {
+  quantity?: number;
+  role?: string | null;
+  notes?: string | null;
+  order?: number;
+  metadata?: Record<string, any> | null;
+}
+
+const designComponentsKey = (designId: string) => ["designs", designId, "components"] as const;
+const designUsedInKey = (designId: string) => ["designs", designId, "used-in"] as const;
+
+export const useDesignComponents = (designId: string) => {
+  const { data, ...rest } = useQuery({
+    queryKey: designComponentsKey(designId),
+    queryFn: () =>
+      sdk.client.fetch<{ components: DesignComponentLink[]; count: number }>(
+        `/admin/designs/${designId}/components`
+      ),
+    enabled: !!designId,
+  });
+  return { components: data?.components || [], count: data?.count || 0, ...rest };
+};
+
+export const useDesignUsedIn = (designId: string) => {
+  const { data, ...rest } = useQuery({
+    queryKey: designUsedInKey(designId),
+    queryFn: () =>
+      sdk.client.fetch<{ used_in: DesignComponentLink[]; count: number }>(
+        `/admin/designs/${designId}/used-in`
+      ),
+    enabled: !!designId,
+  });
+  return { used_in: data?.used_in || [], count: data?.count || 0, ...rest };
+};
+
+export const useAddDesignComponent = (designId: string) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: AddDesignComponentPayload) =>
+      sdk.client.fetch<{ component: DesignComponentLink }>(
+        `/admin/designs/${designId}/components`,
+        { method: "POST", body: payload }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: designComponentsKey(designId) });
+    },
+  });
+};
+
+export const useUpdateDesignComponent = (designId: string, componentId: string) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: UpdateDesignComponentPayload) =>
+      sdk.client.fetch<{ component: DesignComponentLink }>(
+        `/admin/designs/${designId}/components/${componentId}`,
+        { method: "PATCH", body: payload }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: designComponentsKey(designId) });
+    },
+  });
+};
+
+export const useRemoveDesignComponent = (designId: string) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (componentId: string) =>
+      sdk.client.fetch(
+        `/admin/designs/${designId}/components/${componentId}`,
+        { method: "DELETE" }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: designComponentsKey(designId) });
+    },
+  });
+};
+
+// ── Construction details (#892) ──────────────────────────────────────────────
+// A construction detail is a DesignSpecification (category "Construction") whose
+// metadata holds { technique, params, fabricRules } — the source the tech-pack
+// generator reads for the construction-details frame.
+
+export interface ConstructionDetail {
+  id: string;
+  title: string;
+  category: string;
+  details?: string | null;
+  special_instructions?: string | null;
+  metadata?: {
+    technique?: string;
+    params?: Record<string, number>;
+    fabricRules?: string[];
+    [k: string]: any;
+  } | null;
+}
+
+export interface ConstructionDetailPayload {
+  technique: string;
+  label?: string;
+  params?: Record<string, number>;
+  fabricRules?: string[];
+  note?: string;
+}
+
+const constructionDetailsKey = (designId: string) =>
+  ["designs", designId, "construction-details"] as const;
+
+export const useConstructionDetails = (designId: string) => {
+  const { data, ...rest } = useQuery({
+    queryKey: constructionDetailsKey(designId),
+    queryFn: () =>
+      sdk.client.fetch<{ construction_details: ConstructionDetail[]; count: number }>(
+        `/admin/designs/${designId}/construction-details`
+      ),
+    enabled: !!designId,
+  });
+  return {
+    construction_details: data?.construction_details || [],
+    count: data?.count || 0,
+    ...rest,
+  };
+};
+
+export const useCreateConstructionDetail = (designId: string) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: ConstructionDetailPayload) =>
+      sdk.client.fetch<{ construction_detail: ConstructionDetail }>(
+        `/admin/designs/${designId}/construction-details`,
+        { method: "POST", body: payload }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: constructionDetailsKey(designId) });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) });
+    },
+  });
+};
+
+export const useUpdateConstructionDetail = (designId: string, detailId: string) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: Partial<ConstructionDetailPayload>) =>
+      sdk.client.fetch<{ construction_detail: ConstructionDetail }>(
+        `/admin/designs/${designId}/construction-details/${detailId}`,
+        { method: "PATCH", body: payload }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: constructionDetailsKey(designId) });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) });
+    },
+  });
+};
+
+export const useDeleteConstructionDetail = (designId: string) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (detailId: string) =>
+      sdk.client.fetch(
+        `/admin/designs/${designId}/construction-details/${detailId}`,
+        { method: "DELETE" }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: constructionDetailsKey(designId) });
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) });
+    },
+  });
+};
+
+// ── Redesign (#892) — Nano-Banana structure-preserving restyle ────────────────
+export interface RedesignPayload {
+  image_url?: string;
+  image_base64?: string;
+  prompt: string;
+}
+
+export interface RedesignResponse {
+  redesign: {
+    image_url: string;
+    provider: string;
+    model: string;
+    prompt: string;
+  };
+}
+
+/** Generate exploratory restyle renders from an input flat/photo. Does not mutate the design. */
+export const useRedesignDesign = (designId: string) => {
+  return useMutation({
+    mutationFn: async (payload: RedesignPayload) =>
+      sdk.client.fetch<RedesignResponse>(
+        `/admin/designs/${designId}/redesign`,
+        { method: "POST", body: payload }
+      ),
+  });
+};
+
+// ── Outline (#892) — potrace vectorization → editable sewable outline ─────────
+export interface OutlinePayload {
+  image_url?: string;
+  image_base64?: string;
+  mode?: "outline" | "posterize";
+  threshold?: number;
+  turd_size?: number;
+  opt_tolerance?: number;
+  black_on_white?: boolean;
+  steps?: number;
+  color?: string;
+  background?: string;
+}
+
+export interface OutlineResponse {
+  outline: {
+    svg: string;
+    image_url: string;
+    mode: "outline" | "posterize";
+    width: number | null;
+    height: number | null;
+  };
+}
+
+/** Vectorize an input flat/cutout into an editable SVG outline. Does not mutate the design. */
+export const useOutlineDesign = (designId: string) => {
+  return useMutation({
+    mutationFn: async (payload: OutlinePayload) =>
+      sdk.client.fetch<OutlineResponse>(
+        `/admin/designs/${designId}/outline`,
+        { method: "POST", body: payload }
+      ),
+  });
+};
+
+export interface NotifyDesignCustomerResponse {
+  message: string
+  design_id: string
+  customer_id: string
+}
+
+export const useNotifyDesignCustomer = (
+  designId: string,
+  options?: UseMutationOptions<NotifyDesignCustomerResponse, FetchError, void>
+) => {
+  return useMutation({
+    mutationFn: async () =>
+      sdk.client.fetch<NotifyDesignCustomerResponse>(
+        `/admin/designs/${designId}/notify-customer`,
+        { method: "POST" }
+      ),
+    ...options,
+  });
+};
+
+// ─── Customer Ordered Designs ───────────────────────────────────────────────
+
+export interface OrderedDesign extends AdminDesign {
+  order_ids: string[]
+}
+
+export interface OrderedDesignsResponse {
+  designs: OrderedDesign[]
+}
+
+export const useCustomerOrderedDesigns = (
+  customerId: string,
+  options?: Omit<
+    UseQueryOptions<OrderedDesignsResponse, FetchError, OrderedDesignsResponse, QueryKey>,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: ["customer-ordered-designs", customerId],
+    queryFn: async () =>
+      sdk.client.fetch<OrderedDesignsResponse>(
+        `/admin/customers/${customerId}/designs/ordered`,
+        { method: "GET" }
+      ),
+    ...options,
+  })
+  return { designs: data?.designs || [], ...rest }
+}
+
+// ─── Customer-Design Linking ────────────────────────────────────────────────
+
+export interface LinkDesignsToCustomerPayload {
+  design_ids: string[]
+}
+
+export interface LinkDesignsToCustomerResponse {
+  linked: number
+}
+
+export const useLinkDesignsToCustomer = (
+  customerId: string,
+  options?: UseMutationOptions<
+    LinkDesignsToCustomerResponse,
+    FetchError,
+    LinkDesignsToCustomerPayload
+  >
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    ...options,
+    mutationFn: async (payload: LinkDesignsToCustomerPayload) =>
+      sdk.client.fetch<LinkDesignsToCustomerResponse>(
+        `/admin/customers/${customerId}/designs`,
+        { method: "POST", body: payload }
+      ),
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+export interface UnlinkDesignsFromCustomerResponse {
+  unlinked: number
+}
+
+export const useUnlinkDesignsFromCustomer = (
+  customerId: string,
+  options?: UseMutationOptions<
+    UnlinkDesignsFromCustomerResponse,
+    FetchError,
+    LinkDesignsToCustomerPayload
+  >
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    ...options,
+    mutationFn: async (payload: LinkDesignsToCustomerPayload) =>
+      sdk.client.fetch<UnlinkDesignsFromCustomerResponse>(
+        `/admin/customers/${customerId}/designs`,
+        { method: "DELETE", body: payload }
+      ),
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: ["customer-ordered-designs", customerId] })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+// ─── Create Draft Order from Designs ────────────────────────────────────────
+
+export interface CreateDesignOrderPayload {
+  design_ids: string[]
+  currency_code?: string
+  price_overrides?: Record<string, number>
+  /** Currency of price_overrides (e.g. "inr"). Defaults to store default. */
+  override_currency?: string
+}
+
+export interface CreateDesignOrderResponse {
+  cart: any
+  /** Whether the link actually reached the buyer. Absent on older responses. */
+  email?: { sent: boolean; to: string | null; reason: string | null }
+  /**
+   * 🔴 Nullable. The route refuses to build a link it cannot aim — no
+   * storefront host, or no country for the cart — because a guessed one is
+   * re-regioned by the storefront middleware and prices the cart in the wrong
+   * currency (#2051). `checkout_url_reason` says which, in plain words.
+   *
+   * It was typed `string` here while never being one in those cases, the same
+   * shape of lie that made `total_estimated` throw on this very screen.
+   */
+  checkout_url: string | null
+  checkout_url_reason?: string | null
+  /** A PayU link that completes THIS cart. Null off INR — the ordinary case. */
+  payment_link?: string | null
+  payment_link_reason?: string | null
+}
+
+export interface DesignEstimatePreview {
+  design_id: string
+  name: string
+  /**
+   * 🔴 `null` when the estimator had nothing to price from — no bill of
+   * materials, no cost history (#1564). It is NOT zero: zero is a deliberate
+   * freebie, and the two must not be spelled the same way.
+   *
+   * These were typed `number` here while the route had returned `number | null`
+   * since #1564, so the preview drawer called `.toFixed(2)` on a null and threw
+   * `null is not an object` before it could render — hiding the one screen
+   * where the operator supplies the missing price the backend asks for.
+   */
+  total_estimated: number | null
+  unit_price: number | null
+  confidence: string
+  material_cost: number
+  production_cost: number
+}
+
+export interface PreviewDesignOrderResponse {
+  estimates: DesignEstimatePreview[]
+  currency_code: string
+  /** Covers only the lines that could be priced — see `total_is_complete`. */
+  total: number
+  /** The designs the estimator could not price. Named, not absorbed into 0. */
+  unpriceable?: { design_id: string; name: string }[]
+  /** False when any line has no price, so the total above is partial. */
+  total_is_complete?: boolean
+}
+
+export const usePreviewDesignOrder = (
+  customerId: string,
+  options?: UseMutationOptions<
+    PreviewDesignOrderResponse,
+    FetchError,
+    CreateDesignOrderPayload
+  >
+) => {
+  return useMutation({
+    mutationFn: async (payload: CreateDesignOrderPayload) =>
+      sdk.client.fetch<PreviewDesignOrderResponse>(
+        `/admin/customers/${customerId}/design-order/preview`,
+        { method: "POST", body: payload }
+      ),
+    ...options,
+  })
+}
+
+export const useCreateDesignOrder = (
+  customerId: string,
+  options?: UseMutationOptions<
+    CreateDesignOrderResponse,
+    FetchError,
+    CreateDesignOrderPayload
+  >
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    ...options,
+    mutationFn: async (payload: CreateDesignOrderPayload) =>
+      sdk.client.fetch<CreateDesignOrderResponse>(
+        `/admin/customers/${customerId}/design-order`,
+        { method: "POST", body: payload }
+      ),
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: ["customer-ordered-designs", customerId] })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+// ─── Consumption Logs ────────────────────────────────────────────────
+
+export interface ConsumptionLog {
+  id: string;
+  design_id: string;
+  inventory_item_id: string;
+  raw_material_id?: string | null;
+  quantity: number;
+  unit_of_measure: string;
+  consumption_type: "sample" | "production" | "wastage";
+  is_committed: boolean;
+  consumed_by: "admin" | "partner";
+  consumed_at: string;
+  unit_cost?: number | null;
+  notes?: string | null;
+  location_id?: string | null;
+  metadata?: Record<string, any> | null;
+  /**
+   * 🔴 What `quantity` MEASURES — and it was declared nowhere and rendered
+   * nowhere. The same figure deducts `q` under "total" and `q × pieces` under
+   * "per_piece", so a row reading "2 Meter" could mean 2 or 6 and the screen
+   * looked identical either way. On the design that surfaced this, two
+   * `per_piece` logs of 2 would have deducted 12 m where 6 m was used.
+   */
+  quantity_basis?: "total" | "per_piece" | null;
+  /**
+   * Set once the stock movement actually happened. A log past this point is
+   * frozen — the number then describes a decrement that occurred, so it takes
+   * a reversing entry rather than an edit.
+   */
+  inventory_applied_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ConsumptionLogsListResponse {
+  logs: ConsumptionLog[];
+  count: number;
+}
+
+export interface LogConsumptionPayload {
+  inventoryItemId: string;
+  rawMaterialId?: string;
+  quantity: number;
+  quantityBasis?: "total" | "per_piece";
+  unitCost?: number;
+  unitOfMeasure?: string;
+  consumptionType?: "sample" | "production" | "wastage";
+  notes?: string;
+  locationId?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface CommitConsumptionPayload {
+  logIds?: string[];
+  commitAll?: boolean;
+  defaultLocationId?: string;
+}
+
+export const useDesignConsumptionLogs = (
+  designId: string,
+  params?: Record<string, any>,
+  options?: Omit<
+    UseQueryOptions<ConsumptionLogsListResponse, FetchError, ConsumptionLogsListResponse, QueryKey>,
+    "queryFn" | "queryKey"
+  >
+) => {
+  return useQuery({
+    queryKey: designQueryKeys.detail(designId, ["consumption-logs", params]),
+    queryFn: async () => {
+      const searchParams = new URLSearchParams()
+      if (params) {
+        Object.entries(params).forEach(([k, v]) => {
+          if (v !== undefined && v !== null && v !== "") searchParams.set(k, String(v))
+        })
+      }
+      const qs = searchParams.toString()
+      return sdk.client.fetch<ConsumptionLogsListResponse>(
+        `/admin/designs/${designId}/consumption-logs${qs ? `?${qs}` : ""}`,
+        { method: "GET" }
+      )
+    },
+    ...options,
+  })
+}
+
+export const useLogConsumption = (
+  designId: string,
+  options?: UseMutationOptions<{ consumption_log: ConsumptionLog }, FetchError, LogConsumptionPayload>
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: LogConsumptionPayload) =>
+      sdk.client.fetch<{ consumption_log: ConsumptionLog }>(
+        `/admin/designs/${designId}/consumption-logs`,
+        { method: "POST", body: payload }
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+/**
+ * Correct one consumption log, or retire a duplicate.
+ *
+ * There was no edit path at all — the routes were POST + GET — so the figure
+ * that decides both stock deduction and design cost could only ever be added
+ * to. The server refuses a log already applied to stock and writes an ops
+ * audit row carrying before/after for every write.
+ */
+export const useUpdateConsumptionLog = (
+  designId: string,
+  options?: UseMutationOptions<
+    { consumption_log: ConsumptionLog },
+    FetchError,
+    { logId: string } & Partial<
+      Pick<
+        ConsumptionLog,
+        "quantity" | "quantity_basis" | "unit_cost" | "notes" | "location_id"
+      >
+    >
+  >
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ logId, ...body }) =>
+      sdk.client.fetch<{ consumption_log: ConsumptionLog }>(
+        `/admin/designs/${designId}/consumption-logs/${logId}`,
+        { method: "PATCH", body }
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+export const useDeleteConsumptionLog = (
+  designId: string,
+  options?: UseMutationOptions<{ deleted: boolean }, FetchError, string>
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (logId: string) =>
+      sdk.client.fetch<{ deleted: boolean }>(
+        `/admin/designs/${designId}/consumption-logs/${logId}`,
+        { method: "DELETE" }
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+export const useCommitConsumption = (
+  designId: string,
+  options?: UseMutationOptions<any, FetchError, CommitConsumptionPayload>
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: CommitConsumptionPayload) =>
+      sdk.client.fetch<any>(
+        `/admin/designs/${designId}/consumption-logs/commit`,
+        { method: "POST", body: payload }
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+/* ------------------------------------------------------------------------ *
+ * Design graph — the spine's neighbours as nodes and edges (#1847).
+ *
+ * The three edge states are the contract: `present` is a declared link with
+ * something on the other end, `derived` is true only through a shared record,
+ * and `absent` is a neighbour the model expects and has not got — the "future
+ * edge" that a list of rows can never show.
+ * ------------------------------------------------------------------------ */
+
+
+/* ------------------------------------------------------------------------ *
+ * Moodboards — one board per OWNER, not one blob per design (#2017).
+ *
+ * The admin used to save the scene through `PUT /admin/designs/:id` with
+ * `{ moodboard }`, i.e. the same `design.moodboard` column a partner wrote
+ * through. Last write won, silently, with a 200: whoever saved second erased
+ * the other's board and nobody was told. These two hooks are the board-scoped
+ * door that replaces it.
+ *
+ * 🔴 The READ has to move with the WRITE. `design.moodboard` is the fallback
+ * for a design the backfill never reached, and every resolver ignores it the
+ * moment a row exists — so a surface that saves to the row and still reads the
+ * column shows the scene reverting on the next load.
+ * ------------------------------------------------------------------------ */
+
+/** A board as the API presents it — the viewer's own, or someone else's. */
+export type DesignMoodboardBoard = {
+  id: string;
+  owner_type: string;
+  partner_id?: string | null;
+  title?: string | null;
+  scene?: any;
+  thumbnail_url?: string | null;
+  updated_at?: string | null;
+  is_own: boolean;
+  /**
+   * True when this is the legacy `design.moodboard` blob rendered as a board
+   * rather than a row of its own. "Predates per-owner boards" is a different
+   * fact from "is your board", and a surface may want to say so.
+   */
+  is_legacy: boolean;
+};
+
+export type DesignMoodboardsResponse = {
+  own: DesignMoodboardBoard | null;
+  others: DesignMoodboardBoard[];
+  usedLegacyFallback: boolean;
+};
+
+export const designMoodboardQueryKey = (designId: string) =>
+  [DESIGN_QUERY_KEY, designId, "moodboards"] as const;
+
+/** The admin's own (core) board plus every partner board, read-only. */
+export const useDesignMoodboards = (
+  designId: string,
+  options?: Omit<
+    UseQueryOptions<
+      DesignMoodboardsResponse,
+      FetchError,
+      DesignMoodboardsResponse,
+      readonly (string | undefined)[]
+    >,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: designMoodboardQueryKey(designId) as any,
+    queryFn: async () =>
+      sdk.client.fetch<DesignMoodboardsResponse>(
+        `/admin/designs/${designId}/moodboards`,
+      ),
+    ...options,
+  });
+  return { ...data, ...rest };
+};
+
+/**
+ * Save the scene to the CORE board.
+ *
+ * Sends `scene` (the entity's own name); the route also accepts the older
+ * `moodboard` key, so this hook and the route need no lockstep deploy.
+ */
+export const useSaveDesignMoodboard = (
+  designId: string,
+  options?: UseMutationOptions<
+    { board?: DesignMoodboardBoard; moodboard?: any },
+    FetchError,
+    { scene: any }
+  >,
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: { scene: any }) =>
+      sdk.client.fetch<{ board?: DesignMoodboardBoard; moodboard?: any }>(
+        `/admin/designs/${designId}/moodboards`,
+        { method: "POST", body: payload },
+      ),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({
+        queryKey: designMoodboardQueryKey(designId) as any,
+      });
+      // The design detail still carries the legacy `moodboard` field that some
+      // readers have not moved off yet; keep it from going stale beside a
+      // freshly-saved board.
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(designId) });
+      options?.onSuccess?.(data, variables, _mutateResult, context);
+    },
+  });
+};
+
+/* ------------------------------------------------------------------------ *
+ * Currencies a design order can actually be created in (#2176 item 5).
+ *
+ * 🔴 The set is "currencies that have a REGION", not every currency the
+ * platform knows. `create-draft-order-from-designs` refuses a currency with no
+ * matching region outright — "No region is configured for X, so a cart cannot
+ * be created in it" — because a cart whose region's currency differs from its
+ * own is priced in one currency and taxed as another. Offering a currency the
+ * create will reject would move that refusal from the picker to after the
+ * operator has chosen their designs.
+ * ------------------------------------------------------------------------ */
+
+export type DesignOrderCurrency = {
+  /** Lower-case ISO-4217, e.g. "eur". */
+  code: string
+  /** The region that makes it creatable, for the operator to recognise. */
+  region_name: string
+}
+
+export const designOrderCurrenciesQueryKey = ["design-order-currencies"] as const
+
+export const useDesignOrderCurrencies = () => {
+  const { data, ...rest } = useQuery({
+    queryKey: designOrderCurrenciesQueryKey,
+    queryFn: async () => {
+      // `*countries` too: the picker needs the currency LIST, and the wizard
+      // needs country → currency to suggest one from the buyer's address.
+      const res = await sdk.client.fetch<{
+        regions?: {
+          name?: string
+          currency_code?: string
+          countries?: { iso_2?: string | null }[]
+        }[]
+      }>(`/admin/regions?limit=100&fields=id,name,currency_code,*countries`);
+
+      const byCode = new Map<string, DesignOrderCurrency>();
+      for (const r of res?.regions ?? []) {
+        const code = String(r?.currency_code ?? "").trim().toLowerCase();
+        if (!code) continue;
+        // First region wins the label. Several regions can share a currency
+        // (usd covers America, Africa and South America here) and the CODE is
+        // what the cart is created with, so the extra names would be noise.
+        if (!byCode.has(code)) {
+          byCode.set(code, { code, region_name: r?.name ?? code.toUpperCase() });
+        }
+      }
+      return {
+        currencies: [...byCode.values()].sort((a, b) =>
+          a.code.localeCompare(b.code)
+        ),
+        regions: res?.regions ?? [],
+      };
+    },
+  });
+  return { currencies: data?.currencies ?? [], regions: data?.regions ?? [], ...rest };
+};
+
+export type AttachDesignCustomer = { customer_id: string | null }
+
+export type DesignCustomerResponse = {
+  design_customer: {
+    design_id: string
+    customer_id: string | null
+    changed: boolean
+    detached?: string[]
+  }
+}
+
+/**
+ * Whose design this is (#2111).
+ *
+ * 🔴 Distinct from `useAttachDesignOrderCustomer`, which takes a LINE ITEM and
+ * needs a design order to exist. This one takes the design, which is the only
+ * way a design that came out of a conversation rather than a checkout can ever
+ * acquire an owner — and without an owner every email about it reaches nobody,
+ * silently.
+ */
+export const useAttachDesignCustomer = (
+  id: string,
+  options?: UseMutationOptions<
+    DesignCustomerResponse,
+    FetchError,
+    AttachDesignCustomer
+  >
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (data: AttachDesignCustomer) =>
+      sdk.client.fetch<DesignCustomerResponse>(`/admin/designs/${id}/customer`, {
+        method: "POST",
+        body: data,
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: designQueryKeys.detail(id) })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}

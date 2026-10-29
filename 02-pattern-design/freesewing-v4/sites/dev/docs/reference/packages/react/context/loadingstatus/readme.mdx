@@ -1,0 +1,143 @@
+---
+title: LoadingStatus
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { Popout } from '@freesewing/react/components/Popout'
+import { Tab, Tabs } from '@freesewing/react/components/Tab'
+import { LoadingExamples } from './_examples.js'
+
+<DocusaurusDoc>
+
+The **LoadingStatus** context is used to set loading status across the FreeSewing web UI.
+
+<Popout type="tip">
+As with all React context, the provider should wrap the content in which you
+want to use the context.
+
+When using one of the high-level wrappers like
+[DocusaurusDoc](/reference/packages/react/components/docusaurus/#docusaurusdoc)
+or
+[DocusaurusPage](/reference/packages/react/components/docusaurus/#docusauruspage)
+the context provider is already loaded.
+</Popout>
+
+## Examples
+
+<LoadingExamples />
+
+## Components
+
+The **LoadingStatus** context provides the following components:
+
+- [LoadingStatusContext](#loadingstatuscontext)
+- [LoadingStatusContextProvider](#loadingstatuscontextprovider)
+
+### LoadingStatusContext
+
+This is the context itself to be passed to `React.useContext()`.
+
+```js
+import { LoadingStatusContext } from '@freesewing/react/context/LoadingStatus'
+
+const MyComponent = () => {
+  const {
+    loading,
+    LoadingStatus,
+    LoadingProgress,
+    setLoadingStatus,
+  } = useContext(LoadingStatusContext)
+
+  // ...
+}
+```
+
+The returned object holds the following:
+
+### context.loading
+
+This is a boolean that is `true` when we are currently in a loading state, or `false` when not.
+
+### context.LoadingStatus
+
+This is the component that renders the actual loading status message.
+
+<Popout type="tip">
+When using one of the high-level wrappers like
+[DocusaurusDoc](/reference/packages/react/components/docusaurus/#docusaurusdoc)
+or
+[DocusaurusPage](/reference/packages/react/components/docusaurus/#docusauruspage)
+the LoadingStatus component is already loaded.
+As such, so you typically do not need to use this.
+</Popout>
+
+### context.LoadingProgress
+
+This is a helper component to display a loading message with a progress bar.
+Although you still need to update the loading state yourself to generate a true progress example.
+
+<Tabs tabs="Props, Examples">
+<Tab>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Type</th>
+        <th>Description</th>
+        <th>Optional</th>
+        <th>Default Value</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>props</td>
+        <td>object</td>
+        <td>All component props</td>
+        <td>no</td>
+        <td>`undefined`</td>
+      </tr>
+      <tr>
+        <td>props.msg</td>
+        <td>string|JSX.Element</td>
+        <td>The loading message</td>
+        <td>yes</td>
+        <td>`undefined`</td>
+      </tr>
+      <tr>
+        <td>props.val</td>
+        <td>number</td>
+        <td>The current progress value</td>
+        <td>yes</td>
+        <td>`0`</td>
+      </tr>
+      <tr>
+        <td>props.max</td>
+        <td>number</td>
+        <td>The maximum progress value</td>
+        <td>yes</td>
+        <td>`1`</td>
+      </tr>
+    </tbody>
+  </table>
+</Tab>
+<Tab>
+  <LoadingExamples />
+</Tab>
+</Tabs>
+
+### context.setLoadingStatus
+
+This is the method to be used to set the loading status:
+```js
+setLoadingStatus([
+  show=false,
+  msg=null,
+  fade=true
+  success=true,
+])
+```
+### LoadingStatusContextProvider
+
+This is the context provider, it does not take any props apart from `props.children`.
+
+</DocusaurusDoc>

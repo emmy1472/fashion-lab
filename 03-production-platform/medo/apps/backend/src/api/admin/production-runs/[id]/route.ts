@@ -1,0 +1,877 @@
+/**
+ * @file Admin API route for retrieving production runs
+ * @description Provides endpoints for retrieving detailed information about production runs including associated tasks
+ * @module API/Admin/ProductionRuns
+ */
+
+/**
+ * @typedef {Object} ProductionRun
+ * @property {string} id - The unique identifier for the production run
+ * @property {string} name - The name of the production run
+ * @property {string} status - The current status of the production run (e.g., "pending", "in_progress", "completed")
+ * @property {Date} created_at - When the production run was created
+ * @property {Date} updated_at - When the production run was last updated
+ * @property {string} [description] - Optional description of the production run
+ * @property {string} [product_id] - The ID of the product being produced
+ * @property {number} [quantity] - The quantity of items to be produced
+ * @property {Date} [start_date] - The planned start date of the production run
+ * @property {Date} [end_date] - The planned end date of the production run
+ */
+
+/**
+ * @typedef {Object} ProductionTask
+ * @property {string} id - The unique identifier for the task
+ * @property {string} name - The name of the task
+ * @property {string} status - The current status of the task (e.g., "pending", "in_progress", "completed")
+ * @property {string} [description] - Optional description of the task
+ * @property {string} [assigned_to] - The user or team assigned to the task
+ * @property {Date} [due_date] - The due date for the task
+ * @property {Date} created_at - When the task was created
+ * @property {Date} updated_at - When the task was last updated
+ */
+
+/**
+ * @typedef {Object} ProductionRunResponse
+ * @property {ProductionRun} production_run - The production run details
+ * @property {ProductionTask[]} tasks - Array of tasks associated with the production run
+ */
+
+/**
+ * Retrieve a production run by ID
+ * @route GET /admin/production-runs/{id}
+ * @group ProductionRun - Operations related to production runs
+ * @param {string} id.path.required - The ID of the production run to retrieve
+ * @returns {ProductionRunResponse} 200 - Production run object with associated tasks
+ * @throws {MedusaError} 400 - Invalid ID format
+ * @throws {MedusaError} 401 - Unauthorized
+ * @throws {MedusaError} 404 - Production run not found
+ * @throws {MedusaError} 500 - Internal server error
+ *
+ * @example request
+ * GET /admin/production-runs/prod_run_123456789
+ *
+ * @example response 200
+ * {
+ *   "production_run": {
+ *     "id": "prod_run_123456789",
+ *     "name": "Summer Collection 2023",
+ *     "status": "in_progress",
+ *     "created_at": "2023-05-01T08:00:00Z",
+ *     "updated_at": "2023-05-15T10:30:00Z",
+ *     "description": "Production run for summer collection t-shirts",
+ *     "product_id": "prod_987654321",
+ *     "quantity": 5000,
+ *     "start_date": "2023-05-10T00:00:00Z",
+ *     "end_date": "2023-06-30T00:00:00Z"
+ *   },
+ *   "tasks": [
+ *     {
+ *       "id": "task_111111111",
+ *       "name": "Fabric Cutting",
+ *       "status": "completed",
+ *       "description": "Cut fabric according to pattern specifications",
+ *       "assigned_to": "team_cutting",
+ *       "due_date": "2023-05-12T00:00:00Z",
+ *       "created_at": "2023-05-02T09:00:00Z",
+ *       "updated_at": "2023-05-12T18:00:00Z"
+ *     },
+ *     {
+ *       "id": "task_222222222",
+ *       "name": "Sewing",
+ *       "status": "in_progress",
+ *       "description": "Assemble t-shirts from cut fabric",
+ *       "assigned_to": "team_sewing",
+ *       "due_date": "2023-05-25T00:00:00Z",
+ *       "created_at": "2023-05-02T09:00:00Z",
+ *       "updated_at": "2023-05-15T10:00:00Z"
+ *     }
+ *   ]
+ * }
+ */
+import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
+
+import { PRODUCTION_RUNS_MODULE } from "../../../../modules/production_runs"
+import type ProductionRunService from "../../../../modules/production_runs/service"
+import {
+  allocationLabels,
+  readRunAllocation,
+  setRunAllocation,
+} from "../../../../lib/production-run-allocation"
+import {
+  checkAllocationEdit,
+  normalizeRunMaterials,
+} from "../../../../workflows/production-runs/lib/run-materials"
+import { costTypeGuardMessage } from "../../../../workflows/production-runs/lib/cost-type-guard"
+import { autoDraftRunPayout } from "../../../../workflows/payment_submissions/lib/auto-draft-run-payout"
+import { refreshUnclaimedDraftPayouts } from "../../../../workflows/payment_submissions/lib/refresh-draft-payouts"
+import { reopenProductionRun } from "../../../../workflows/production-runs/lib/short-close-production-run"
+import {
+  assessRunQuantityCorrection,
+  correctionConsequenceNote,
+} from "../../../../workflows/production-runs/lib/run-quantity-correction"
+import {
+  foldRunClaimTallies,
+  listPartnerPriorLines,
+} from "../../../../workflows/payment_submissions/lib/run-claims"
+import { PAYMENT_SUBMISSIONS_MODULE } from "../../../../modules/payment_submissions"
+import {
+  releaseRunOnDependencyAttach,
+  type AttachReleaseOutcome,
+} from "../../../../workflows/production-runs/lib/release-dependent-runs"
+import { checkRunDependencyAttach } from "../../../../workflows/production-runs/lib/attach-run-dependencies"
+import { TASKS_MODULE } from "../../../../modules/tasks"
+import { cleanIds } from "../../../../workflows/production-runs/lib/run-dependencies"
+
+export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
+  const id = req.params.id
+  const productionRunService: ProductionRunService = req.scope.resolve(
+    PRODUCTION_RUNS_MODULE
+  )
+
+  const run = await productionRunService.retrieveProductionRun(id)
+
+  // Include tasks if link field exists
+  let tasks: any[] = []
+  try {
+    const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+      entity: "production_runs",
+      fields: ["*", "tasks.*"],
+      filters: { id },
+    })
+    const node = (data || [])[0]
+    tasks = node?.tasks || []
+  } catch {
+    // ignore if link not yet synced
+  }
+
+  const allocation = await readRunAllocation(req.scope, id)
+
+  return res.status(200).json({
+    production_run: run,
+    tasks,
+    // What this run was actually assigned, as opposed to what its design can be
+    // made of. Empty = no selection was made; the run is unconstrained.
+    materials: allocation,
+    materials_constrained: allocation.length > 0,
+  })
+}
+
+/**
+ * POST /admin/production-runs/:id
+ * Update a production run. quantity/role/run_type are only allowed before the
+ * run is accepted/started. Cost fields (partner_cost_estimate, cost_type,
+ * cost_currency) are
+ * editable by admins any time except cancelled, since admins may need to
+ * record/correct cost after the partner has already begun work.
+ *
+ * produced_quantity/rejected_quantity are corrections of what the PARTNER
+ * reported at completion, so — unlike the structural fields — they are editable
+ * precisely BECAUSE the run is completed. Partners self-report these
+ * (`POST /partners/production-runs/:id/complete`) and do over-report:
+ * `prod_run_01KYPM4G…` was reported as 9 produced when 3 were made, and there
+ * was no way to correct it short of a direct DB write. Every correction writes
+ * an append-only activity row recording who changed what from what, since the
+ * number feeds cost-per-unit, the design cost engine, goods-transfer quantities
+ * and the public production story.
+ *
+ * `materials` — the per-assignment allocation — is what the partner was SENT,
+ * so it is freely editable while the assignment is still a proposal, and
+ * ADD-ONLY once they have accepted or started (#2111): you may issue them more
+ * material, you may not take it back, shrink it, or move where they draw it
+ * from. A flat freeze made cloth bought after a run started permanently
+ * unattachable to the very run it was bought for.
+ * Sending it REPLACES the allocation wholesale (the same shape as
+ * `PUT /admin/production-run-policy`); sending `[]` or `null` clears it, which
+ * returns the run to unconstrained — the whole design BOM available again.
+ */
+export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
+  const id = req.params.id
+  const productionRunService: ProductionRunService = req.scope.resolve(PRODUCTION_RUNS_MODULE)
+
+  const run = await productionRunService.retrieveProductionRun(id) as any
+
+  if (run.status === "cancelled") {
+    throw new MedusaError(
+      MedusaError.Types.NOT_ALLOWED,
+      "Cannot edit a cancelled production run"
+    )
+  }
+
+  const body = req.body as Record<string, any>
+  const update: Record<string, any> = {}
+
+  /**
+   * 🔴 QUANTITY NO LONGER FREEZES WITH THE OTHER STRUCTURAL FIELDS (#1695).
+   *
+   * `role` and `run_type` say WHO is doing the work and HOW — changing them
+   * after a partner has accepted rewrites the assignment underneath them, so
+   * they keep the old freeze.
+   *
+   * `quantity` is different: it is the CEILING on what may be billed against
+   * the run, and freezing it at `accepted_at` deadlocked the two halves of a
+   * correction. A run sent for 2 where the partner made 3 could not be fixed
+   * from either end — the run refused because work had begun, and
+   * `assessRunClaims` refused a claim of 3 against a ceiling of 2. Nothing was
+   * paid and nothing was disputed. It took an ops job to break it.
+   *
+   * The freeze point is SETTLEMENT: correctable while every live claim against
+   * the run is a Draft. See `assessRunQuantityCorrection` for the whole rule.
+   */
+  /** Reported back so a ceiling never moves next to money in silence. */
+  let quantityCorrection: ReturnType<typeof assessRunQuantityCorrection> | null =
+    null
+
+  const touchesAssignment =
+    body.role !== undefined || body.run_type !== undefined
+  const touchesQuantity = body.quantity !== undefined
+  const touchesStructural = touchesAssignment || touchesQuantity
+
+  if (touchesAssignment) {
+    if (run.accepted_at || run.started_at) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "Cannot edit role or run_type after the run has been accepted or started"
+      )
+    }
+    if (run.status === "completed") {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "Cannot edit a completed production run"
+      )
+    }
+  }
+
+  if (touchesStructural) {
+    /**
+     * 🔴 `null` CLEARS the agreed quantity (#1676) — an open-ended run, with no
+     * ceiling on what may be claimed against it. `Number(null)` is 0, which
+     * would have written the opposite: a quantity that IS set and is unusable,
+     * which every payment guard refuses outright.
+     *
+     * ⚠️ This used to be gated on "before the partner accepts or starts". It is
+     * now gated on the money instead (#1695): open-ending a run is a RAISE — it
+     * removes the ceiling — so it is allowed exactly as long as any other raise
+     * is, and refused the moment a non-Draft claim stands against the run.
+     */
+    if (body.quantity !== undefined) {
+      if (body.quantity === null) {
+        update.quantity = null
+      } else {
+        const quantity = Number(body.quantity)
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+          throw new MedusaError(
+            MedusaError.Types.INVALID_DATA,
+            "quantity must be a positive number, or null for a run with no agreed quantity"
+          )
+        }
+        update.quantity = quantity
+      }
+    }
+
+    /**
+     * The money gate on a quantity change, and the consequence it will have.
+     *
+     * Scoped by PARTNER, which is how every other claim guard in this module
+     * reads prior lines — a run belongs to exactly one partner, and a
+     * design-scoped read cannot see a run-sourced line at all (see
+     * `run-claims`). A run with no partner cannot have been claimed by anyone,
+     * so there is nothing to read.
+     *
+     * 🔴 A failed lookup is NOT "no claims". `claims_readable: false` refuses
+     * the change rather than letting an outage read as headroom.
+     */
+    if (touchesQuantity) {
+      let tally: any = null
+      let claimsReadable = true
+
+      if (run.partner_id) {
+        try {
+          const submissions: any = req.scope.resolve(PAYMENT_SUBMISSIONS_MODULE)
+          const priorLines = await listPartnerPriorLines(submissions, run.partner_id)
+          tally = foldRunClaimTallies(priorLines).get(id) ?? null
+        } catch {
+          claimsReadable = false
+        }
+      }
+
+      quantityCorrection = assessRunQuantityCorrection({
+        run,
+        next_quantity: (update.quantity ?? null) as number | null,
+        tally,
+        claims_readable: claimsReadable,
+      })
+
+      if (!quantityCorrection.allowed) {
+        throw new MedusaError(
+          MedusaError.Types.NOT_ALLOWED,
+          quantityCorrection.refusal as string
+        )
+      }
+    }
+    if (body.role !== undefined) update.role = body.role
+    if (body.run_type !== undefined) update.run_type = body.run_type
+  }
+
+  if (body.partner_cost_estimate !== undefined) {
+    update.partner_cost_estimate =
+      body.partner_cost_estimate === null ? null : Number(body.partner_cost_estimate)
+  }
+  if (body.cost_currency !== undefined) {
+    /**
+     * #1979 — the run says what its cost is DENOMINATED IN.
+     *
+     * Without this the cost was a bare number and approval had to guess the
+     * currency when it turned that number into a listed price; it guessed the
+     * store default, and on a EUR store listed ₹2,634.75 as €2,634.75 (~110×).
+     *
+     * `null` clears it back to unstated, which is a real state — approval then
+     * falls back to the design's `cost_currency` and finally to INR. Anything
+     * else must be a 3-letter code: a free-text currency is how you get a
+     * price labelled `"Rupees"` that no region can match.
+     */
+    if (body.cost_currency === null) {
+      update.cost_currency = null
+    } else {
+      const code = String(body.cost_currency).trim().toLowerCase()
+      if (!/^[a-z]{3}$/.test(code)) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          "cost_currency must be a 3-letter currency code (e.g. 'inr'), or null to clear it"
+        )
+      }
+      update.cost_currency = code
+    }
+  }
+  if (body.cost_type !== undefined) {
+    if (body.cost_type !== "total" && body.cost_type !== "per_unit") {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "cost_type must be 'total' or 'per_unit'"
+      )
+    }
+    update.cost_type = body.cost_type
+  }
+
+  /**
+   * The run must END UP with an explicit cost_type whenever it carries a cost
+   * — a per-piece rate stored as a total is paid once (#1554).
+   *
+   * Checked against the resulting state rather than the body, because a
+   * correction that only fixes the number on a run already labelled `per_unit`
+   * is legitimate and must keep working. Only a cost arriving with no type
+   * anywhere is refused.
+   */
+  if (update.partner_cost_estimate != null) {
+    const costTypeIssue = costTypeGuardMessage({
+      partner_cost_estimate: update.partner_cost_estimate as number,
+      cost_type: (update.cost_type as string) ?? run?.cost_type,
+    })
+    if (costTypeIssue) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, costTypeIssue)
+    }
+  }
+
+  // Corrections to the partner's self-reported output. `null` clears the field
+  // back to "not reported"; a number must be a non-negative, finite quantity.
+  const readQuantityCorrection = (field: string): number | null | undefined => {
+    const raw = body[field]
+    if (raw === undefined) return undefined
+    if (raw === null) return null
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value < 0) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        `${field} must be a non-negative number, or null to clear it`
+      )
+    }
+    return value
+  }
+
+  const producedCorrection = readQuantityCorrection("produced_quantity")
+  const rejectedCorrection = readQuantityCorrection("rejected_quantity")
+
+  if (producedCorrection !== undefined) update.produced_quantity = producedCorrection
+  if (rejectedCorrection !== undefined) update.rejected_quantity = rejectedCorrection
+
+  /**
+   * #1529 / #2111 S1 — attach (or clear) the goods this run is waiting on.
+   *
+   * Approval could already declare this per assignment; nothing could add it to
+   * a run that already existed, which is the ordinary case — the run is planned
+   * before anyone knows which supply order will feed it.
+   *
+   * 🔴 Gated the same way as `materials`, and for a stronger reason: the
+   * dependency is only ever consulted at DISPATCH (the guard) and at RELEASE
+   * (the subscriber, candidates limited to `approved`). Writing one onto a run
+   * the partner has already accepted or finished would record a wait that
+   * nothing will ever read — a field that looks set and means nothing.
+   *
+   * `[]` and `null` both CLEAR it, which is how a chain is unblocked by hand
+   * when an order is cancelled rather than delivered. Ids are not verified to
+   * exist here: an unreadable dependency already counts as UNMET in
+   * `resolveUnmetDependencies`, so a typo stalls the run rather than releasing
+   * it — the safe direction, and recoverable from this same route.
+   */
+  if (body.depends_on_inventory_order_ids !== undefined) {
+    if (run.accepted_at || run.started_at || run.status === "completed") {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "Cannot change what a production run is waiting on after it has been accepted, started or completed — the dependency is only read at dispatch and release."
+      )
+    }
+    const raw = body.depends_on_inventory_order_ids
+    if (raw === null) {
+      update.depends_on_inventory_order_ids = null
+    } else if (!Array.isArray(raw)) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "depends_on_inventory_order_ids must be an array of inventory order ids, or null to clear it"
+      )
+    } else {
+      const ids = raw
+        .map((v: unknown) => (typeof v === "string" ? v.trim() : ""))
+        .filter((v: string) => v.length > 0)
+      update.depends_on_inventory_order_ids = ids.length ? ids : null
+    }
+  }
+
+  /**
+   * #2306 — attach (or clear) the RUNS this run is waiting on.
+   *
+   * Approval derives `depends_on_run_ids` from the assignment `order`, which
+   * only links children of one parent that SPLIT the pieces. Two partners
+   * working the same pieces in turn (embroider, then stitch) could not be
+   * expressed at all, so the next stage had to be dispatched by hand. This lets
+   * the wait be added once both runs exist.
+   *
+   * Same gate as the goods edge, for the same reason: it is read only at
+   * dispatch and at release. The checks that matter more here — self, cancelled
+   * upstream, unknown id, a cycle — live in `checkRunDependencyAttach`, because
+   * each of them stalls a run forever while reading like a healthy wait.
+   */
+  if (body.depends_on_run_ids !== undefined) {
+    if (run.accepted_at || run.started_at || run.status === "completed") {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "Cannot change what a production run is waiting on after it has been accepted, started or completed — the dependency is only read at dispatch and release."
+      )
+    }
+    const check = await checkRunDependencyAttach(
+      id,
+      body.depends_on_run_ids,
+      (ids) => productionRunService.listProductionRuns({ id: ids } as any)
+    )
+    if (!check.ok) {
+      throw new MedusaError(MedusaError.Types.INVALID_DATA, check.message)
+    }
+    update.depends_on_run_ids = check.ids.length ? check.ids : null
+  }
+
+  /**
+   * #2306 — the templates a WAITING run will be dispatched with when released.
+   *
+   * A run approved with no templates (the ordinary case for a later stage,
+   * whose steps nobody chose up front) is released as `no_templates`: ready,
+   * and going nowhere until a person dispatches it by hand. Pairing a wait with
+   * its templates is what makes the hand-over automatic.
+   *
+   * Only while the run is still undispatched — once tasks exist, these ids
+   * would describe a dispatch that already happened differently. Ids are
+   * checked to exist, because an unknown one fails the RELEASE later, when
+   * nobody is watching.
+   */
+  if (body.dispatch_template_ids !== undefined) {
+    if (
+      run.status !== "approved" ||
+      run.dispatch_state === "completed" ||
+      run.accepted_at ||
+      run.started_at
+    ) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "Templates can only be chosen for an approved run that has not been dispatched yet."
+      )
+    }
+    const raw = body.dispatch_template_ids
+    if (raw !== null && !Array.isArray(raw)) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "dispatch_template_ids must be an array of task template ids, or null to clear it"
+      )
+    }
+    const ids: string[] = Array.from(
+      new Set(
+        (raw ?? [])
+          .map((v: unknown) => (typeof v === "string" ? v.trim() : ""))
+          .filter((v: string) => v.length > 0)
+      )
+    )
+    if (ids.length) {
+      const taskService: any = req.scope.resolve(TASKS_MODULE)
+      const found = await taskService.listTaskTemplates({ id: ids }, { take: null })
+      const known = new Set((found || []).map((t: any) => String(t.id)))
+      const missing = ids.filter((i) => !known.has(i))
+      if (missing.length) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          `No task template found for: ${missing.join(", ")}`
+        )
+      }
+    }
+    update.dispatch_template_ids = ids.length ? ids : null
+  }
+
+  // The allocation lives in link rows, not columns, so it is applied
+  // separately — and gated BEFORE anything is written, not after.
+  const touchesMaterials = body.materials !== undefined
+  if (touchesMaterials) {
+    /**
+     * #2111 — the freeze is ADD-ONLY, not absolute.
+     *
+     * It used to refuse every allocation edit once a partner had accepted or
+     * started. That protects the partner from having work retracted under them,
+     * which is right — but it also meant material bought AFTER a run starts
+     * could never be attached to it. We bought 2 pashminas for a tunic whose
+     * run had been running for a week, and that run was the one run that could
+     * never record them. The consignment gate keys on exactly that attachment,
+     * so the cloth could never come off our books either.
+     *
+     * Adding is now allowed; removing, shrinking and relocating are still
+     * refused. See `checkAllocationEdit`.
+     */
+    const accepted = Boolean(run.accepted_at || run.started_at)
+    if (accepted) {
+      const existing = await readRunAllocation(req.scope, id)
+      // `null` BOM on purpose: this normalise exists only to compare shapes.
+      // `setRunAllocation` re-validates against the design's real bill of
+      // materials moments later, and duplicating that read here would give two
+      // places that could disagree about what the BOM is.
+      const normalized = normalizeRunMaterials(body.materials, null)
+      if (!normalized.ok) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, normalized.error)
+      }
+      const labels = allocationLabels(existing)
+      const verdict = checkAllocationEdit(
+        existing.map((row) => ({
+          inventory_item_id: row.inventory_item_id,
+          planned_quantity: row.planned_quantity,
+          location_id: row.location_id,
+          resolved_raw_material_id: row.resolved_raw_material_id,
+          note: row.note,
+          metadata: row.metadata,
+        })),
+        normalized.materials,
+        { accepted: true, label: (itemId) => labels[itemId] }
+      )
+      if (!verdict.allowed) {
+        throw new MedusaError(MedusaError.Types.NOT_ALLOWED, verdict.reason)
+      }
+    }
+    if (run.status === "completed") {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "Cannot edit a completed production run"
+      )
+    }
+    await setRunAllocation(req.scope, {
+      production_run_id: id,
+      design_id: run.design_id ?? null,
+      materials: body.materials,
+    })
+  }
+
+  if (Object.keys(update).length === 0) {
+    if (touchesMaterials) {
+      const refreshed = await productionRunService.retrieveProductionRun(id)
+      return res.json({
+        production_run: refreshed,
+        materials: await readRunAllocation(req.scope, id),
+      })
+    }
+    return res.json({ production_run: run, message: "No changes" })
+  }
+
+  await productionRunService.updateProductionRuns({ id, ...update })
+  let updated = await productionRunService.retrieveProductionRun(id)
+
+  /**
+   * #2214 — a dependency attached to an upstream that is ALREADY met has no
+   * event left to release it.
+   *
+   * Release is driven by the upstream's TRANSITION: the subscriber fires when
+   * an inventory order reaches `Delivered`. Attach the order three days after
+   * it was delivered and that transition is in the past — the run waits
+   * forever, `approved`/`idle`, looking exactly like a run waiting correctly.
+   *
+   * 🔴 SO THIS PATCH CAN NOW COMMISSION A PARTNER. When every upstream turns
+   * out to be met, the run dispatches from here: tasks are created and the
+   * partner is messaged. That is the correct outcome — the cloth is demonstrably
+   * there — but it makes attaching a dependency an outward-facing act, and the
+   * response says which so the caller is never surprised by it.
+   *
+   * Only ever when the run ENDS UP with a dependency; clearing one leaves the
+   * run parked exactly as before. Best-effort: the attach above is committed,
+   * and a release that could not be evaluated must not fail the write.
+   */
+  let dependencyRelease: AttachReleaseOutcome | null = null
+  const attachedRunIds = (update.depends_on_run_ids as string[] | null) ?? null
+  const attachedOrderIds =
+    (update.depends_on_inventory_order_ids as string[] | null) ?? null
+  /*
+   * Either edge can be attached to an upstream that is ALREADY met (an order
+   * delivered last week, a stage completed yesterday) — asked once, after both
+   * are written, so a run carrying both is evaluated against the pair.
+   */
+  /*
+   * Choosing templates for a run whose upstream is already met is the same
+   * situation from the other side: it was released as `no_templates` and
+   * nothing will ever ask again. The helper does nothing for a run with no
+   * dependency, so this only ever finishes a hand-over that was stuck.
+   */
+  const choseTemplates = !!(update.dispatch_template_ids as string[] | null)?.length
+  if (attachedRunIds?.length || attachedOrderIds?.length || choseTemplates) {
+    const current = run as any
+    const runIds =
+      "depends_on_run_ids" in update ? attachedRunIds ?? [] : cleanIds(current.depends_on_run_ids)
+    const orderIds =
+      "depends_on_inventory_order_ids" in update
+        ? attachedOrderIds ?? []
+        : cleanIds(current.depends_on_inventory_order_ids)
+    dependencyRelease = await releaseRunOnDependencyAttach(req.scope, id, {
+      by: [...runIds, ...orderIds].join(", ") || "templates chosen",
+      kind: runIds.length ? "production run" : "inventory order",
+    })
+    /*
+     * Re-read when it actually went. A dispatch moves `dispatch_state`,
+     * `dispatched_template_ids` and the run's status, and returning the row as
+     * it looked BEFORE that would hand the caller a response whose
+     * `dependency_release` says "dispatched" beside a run that still reads
+     * idle — the two halves of one response disagreeing about what just
+     * happened.
+     */
+    if (dependencyRelease.result === "dispatched") {
+      updated = await productionRunService
+        .retrieveProductionRun(id)
+        .catch(() => updated)
+    }
+  }
+
+  /**
+   * A correction to the money must reach the DRAFT payout this run pre-filled.
+   *
+   * 🔴 `auto-draft-payment-submission` writes that Draft at completion using the
+   * figures of the moment. Correcting the run afterwards changed nothing about
+   * it, so the Draft kept the old numbers and went on looking authoritative —
+   * and no route could fix it, since `review` refuses anything that is not
+   * Pending or Under_Review. A reviewer would have approved a figure that no
+   * longer matched the run it came from.
+   *
+   * ⚠️ Draft ONLY. Every other status is a live claim someone has made, and
+   * rewriting one silently would change what a partner is owed without them
+   * seeing it. Best-effort: the correction above is already persisted and must
+   * not be rolled back because a draft could not be re-priced.
+   */
+  let refreshedDrafts: string[] = []
+  const touchesMoney =
+    update.partner_cost_estimate !== undefined ||
+    update.cost_type !== undefined ||
+    /**
+     * #1979 — stating (or clearing) the run's currency re-denominates every
+     * figure derived from its cost, so a Draft written earlier is now
+     * describing the same numbers in a different unit. It is deliberately NOT
+     * in `touchesPrice` below: saying what a cost was always measured in does
+     * not change what is owed, and must not manufacture a payout claim.
+     */
+    update.cost_currency !== undefined ||
+    update.produced_quantity !== undefined ||
+    /**
+     * 🔴 The agreed quantity belongs here too (#1695). `runPayableAmount` bills
+     * the ORDERED quantity, so a corrected quantity changes what an existing
+     * Draft is worth — and now that the quantity can be corrected AFTER the
+     * work is done, the draft that was written at completion is exactly the one
+     * left disagreeing with it. A correction that does not cascade just moves
+     * the disagreement somewhere new.
+     */
+    update.quantity !== undefined
+  if (touchesMoney) {
+    try {
+      const outcome = await refreshUnclaimedDraftPayouts(req.scope, id)
+      refreshedDrafts = outcome.refreshed
+    } catch {
+      // Non-fatal by design — see above.
+    }
+  }
+
+  /**
+   * The other half of that refresh: create a draft where none exists.
+   *
+   * 🔴 `auto-draft-payment-submission` fires on `production_run.completed`, and
+   * a run completed with NO agreed rate is skipped as `no_cost` — after which
+   * nothing ever looked at it again. 97 of 215 completed runs on the local
+   * database carry no cost: the partner finished the job and no price was
+   * recorded. Setting that price here, through the cost drawer, is the
+   * documented way to fix it, and it produced no draft. The work stayed unpaid
+   * unless somebody remembered to raise a submission by hand.
+   *
+   * Only when the PRICE moved. `runPayableAmount` bills the ORDERED quantity by
+   * design (#456), so an output correction does not change what is owed and
+   * must not manufacture a draft — `touchesMoney` above is deliberately wider
+   * than this condition, because re-pricing an existing draft and creating a
+   * new one are different questions.
+   *
+   * Best-effort and idempotent: `autoDraftRunPayout` asks whether the run is
+   * already claimed rather than relying on a guard to throw.
+   */
+  let autoDraftedSubmissionId: string | null = null
+  const touchesPrice =
+    update.partner_cost_estimate !== undefined || update.cost_type !== undefined
+  if (touchesPrice) {
+    try {
+      const outcome = await autoDraftRunPayout(
+        req.scope,
+        id,
+        "admin.production-run.priced"
+      )
+      autoDraftedSubmissionId = outcome.submission_id ?? null
+    } catch {
+      // Non-fatal by design — the correction is already persisted.
+    }
+  }
+
+  /**
+   * #1596 — an upward output correction REOPENS a short-closed run.
+   *
+   * The close said "nothing more was made". A correction raising
+   * `produced_quantity` is the evidence that it was wrong, and leaving the run
+   * closed would let a 30-day timer permanently cap a partner's claim on the
+   * strength of a figure that has since changed. Reversal is automatic;
+   * closing never is.
+   *
+   * Best-effort, and deliberately after the correction is persisted: failing to
+   * reopen must not roll back a figure an admin just corrected.
+   */
+  if (producedCorrection !== undefined && run.short_closed_at) {
+    const previousProduced = Number(run.produced_quantity)
+    const corrected = Number(producedCorrection)
+    const raised =
+      Number.isFinite(corrected) &&
+      (!Number.isFinite(previousProduced) || corrected > previousProduced)
+    if (raised) {
+      try {
+        await reopenProductionRun(req.scope, {
+          run_id: id,
+          actor_id: String((req as any).auth_context?.actor_id ?? "admin"),
+          actor_type: "admin",
+          reason: "Output corrected upward after the run was short-closed",
+        })
+      } catch {
+        /* non-fatal by design — see above */
+      }
+    }
+  }
+
+  // Audit the output correction. Best-effort: the correction itself is already
+  // persisted and must not be rolled back because the timeline write failed.
+  if (producedCorrection !== undefined || rejectedCorrection !== undefined) {
+    const changes: string[] = []
+    if (producedCorrection !== undefined) {
+      changes.push(`produced ${run.produced_quantity ?? "—"} → ${producedCorrection ?? "—"}`)
+    }
+    if (rejectedCorrection !== undefined) {
+      changes.push(`rejected ${run.rejected_quantity ?? "—"} → ${rejectedCorrection ?? "—"}`)
+    }
+    const reason =
+      typeof body.correction_reason === "string" && body.correction_reason.trim()
+        ? body.correction_reason.trim()
+        : null
+
+    try {
+      await productionRunService.createProductionRunActivities({
+        production_run_id: id,
+        activity_type: "note",
+        kind: "output_corrected",
+        actor_type: "admin",
+        actor_id: (req as any).auth_context?.actor_id ?? null,
+        partner_id: run.partner_id ?? null,
+        channel: null,
+        message_id: null,
+        template_name: null,
+        recipient: null,
+        summary: `Admin corrected reported output: ${changes.join(", ")}`,
+        payload: {
+          reason,
+          quantity: run.quantity ?? null,
+          previous: {
+            produced_quantity: run.produced_quantity ?? null,
+            rejected_quantity: run.rejected_quantity ?? null,
+          },
+          corrected: {
+            produced_quantity:
+              producedCorrection !== undefined
+                ? producedCorrection
+                : run.produced_quantity ?? null,
+            rejected_quantity:
+              rejectedCorrection !== undefined
+                ? rejectedCorrection
+                : run.rejected_quantity ?? null,
+          },
+        },
+        occurred_at: new Date(),
+      } as any)
+    } catch (e: any) {
+      req.scope
+        .resolve(ContainerRegistrationKeys.LOGGER)
+        .error(
+          `[admin.production-runs] output correction saved but activity write failed for run=${id}: ${e?.message}`
+        )
+    }
+  }
+
+  res.json({
+    production_run: updated,
+    ...(touchesMaterials
+      ? { materials: await readRunAllocation(req.scope, id) }
+      : {}),
+    /**
+     * What attaching the dependency DID, when one was attached (#2214). Null
+     * when this request did not touch `depends_on_inventory_order_ids`, or
+     * cleared it. `dispatched` here means a partner has just been messaged.
+     */
+    ...(dependencyRelease ? { dependency_release: dependencyRelease } : {}),
+    /**
+     * The Draft this correction CREATED, when pricing a completed run that had
+     * none. Stated for the same reason as `refreshed_draft_payouts` below: so
+     * the caller can see the money followed the run rather than having to go
+     * and look. Null when nothing was drafted.
+     */
+    auto_drafted_submission_id: autoDraftedSubmissionId,
+    /**
+     * Which unclaimed Draft payouts were re-priced to match this correction.
+     * Stated so the caller can see the money moved with the run rather than
+     * having to go and check. Empty when nothing needed it.
+     */
+    ...(refreshedDrafts.length ? { refreshed_draft_submissions: refreshedDrafts } : {}),
+    /**
+     * What the quantity change did to the billing ceiling, in the same shape
+     * the ops job reports (#1694) — before, after, already claimed, newly
+     * claimable and what that is worth.
+     *
+     * 🔑 Always stated when the quantity moved. A number changing next to money
+     * in silence is how a correction becomes a surprise on somebody's payout.
+     */
+    ...(quantityCorrection
+      ? {
+          ceiling: {
+            before: quantityCorrection.ceiling_before,
+            after: quantityCorrection.ceiling_after,
+            already_claimed: quantityCorrection.claimed_quantity,
+            newly_claimable: quantityCorrection.newly_claimable,
+            worth: quantityCorrection.worth,
+            note: correctionConsequenceNote(quantityCorrection),
+          },
+        }
+      : {}),
+  })
+}

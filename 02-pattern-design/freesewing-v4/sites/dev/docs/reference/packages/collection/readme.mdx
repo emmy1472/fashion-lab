@@ -1,0 +1,147 @@
+---
+title: '@freesewing/collection'
+---
+
+import * as all from '@freesewing/collection'
+
+FreeSewing's **collection** package bundles all FreeSewing designs as well as
+information about those designs.
+
+It is published on NPM as [@freesewing/collection
+](https://www.npmjs.com/package/@freesewing/collection).\
+The source code for this package is available in [our monorepo on Codeberg
+](https://codeberg.org/freesewing/freesewing) under [packages/collection
+](https://codeberg.org/freesewing/freesewing/src/branch/develop/packages/collection).
+
+:::note
+This package does not provide a default export.
+:::
+
+## Installation
+
+```sh
+npm install --save @freesewing/collection
+```
+
+## Named Exports
+
+### about
+
+Holds on object where the key is the design name and the value is an object
+holding a bunch of information about a Design.
+
+```js
+import { about } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.about} />
+
+### collection
+
+Holds an array of design names that are included in the package.
+
+```js
+import { collection } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.collection} />
+
+### designs
+
+An object holding all of our designs. The key is the design name, and the value
+the design instance.
+
+```js
+import { designs } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.designs} />
+
+### designers
+
+An array holding the various designers,
+which we use to filter designs based on the data in the `about` export.
+
+```js
+import { developers } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.designers} />
+
+### developers
+
+An array holding the various developers,
+which we use to filter designs based on the data in the `about` export.
+
+```js
+import { developers } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.developers} />
+
+### i18n
+
+An object holding English translations for all designs in our collection.
+
+```js
+import { i18n } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.i18n} />
+
+### measurements
+
+Holds an object where the key is the design name and the value is an array of
+all the consolidated measurements for that design.
+By consolidated, we mean the required measurements, plus the optional
+measurments.
+
+```js
+import { measurements } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.measurements} />
+
+### optionalMeasurements
+
+Holds an object where the key is the design name and the value is an array of
+all the optional measurements for that design.
+
+```js
+import { optionalMeasurements } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.optionalMeasurements} />
+
+### requiredMeasurements
+
+Holds an object where the key is the design name and the value is an array of
+all the required measurements for that design.
+
+```js
+import { requiredMeasurements } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.requiredMeasurements} />
+
+### tags
+
+An array holding the various tags,
+which we use to filter designs based on the data in the `about` export.
+
+```js
+import { tags } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.tags} />
+
+### techniques
+
+An array holding the various techniques,
+which we use to filter designs based on the data in the `about` export.
+
+```js
+import { techniques } from '@freesewing/collection'
+```
+
+<ConsoleButton data={all.techniques} />

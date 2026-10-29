@@ -1,0 +1,55 @@
+---
+title: Link
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.link.mjs'
+import { AnchorLinkExample, CardLinkExample, LinkExample, SuccessLinkExample } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+:::tip Styling and link behaviour
+
+##### Styling
+
+Due to the CSS reset used by Tailwind, one cannot assume links will be styled like you expect them to.
+Use a component from this For this and other reasons, Link components exist.
+
+##### Link behaviour
+
+Withing a single-page application (SPA) --- like Docusaurus or NextJS and so on --- there is often a
+`Link` component provided by the framework that provides client-side routing so that clicking a link
+does not completely reload the page/application.
+
+You can pass such a component in some of FreeSewing components to use it for links rather than a traditional `<a>` tag.
+:::
+
+The **Link** component family provides the following components:
+
+- [AnchorLink](#anchorlink)
+- [CardLink](#cardlink)
+- [Link](#link)
+- [SuccessLink](#successlink)
+
+## AnchorLink
+
+<ComponentDocs docs={jsdoc.jsdocAnchorLink} example={AnchorLinkExample} />
+
+## CardLink
+
+<ComponentDocs docs={jsdoc.jsdocCardLink} example={CardLinkExample} />
+
+## Link
+
+<ComponentDocs docs={jsdoc.jsdocLink} example={LinkExample} />
+
+## SuccessLink
+
+<ComponentDocs docs={jsdoc.jsdocSuccessLink} example={SuccessLinkExample} />
+
+</DocusaurusDoc>

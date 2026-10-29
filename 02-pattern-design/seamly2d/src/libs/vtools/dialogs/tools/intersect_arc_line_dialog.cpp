@@ -1,0 +1,356 @@
+//---------------------------------------------------------------------------------------------------------------------
+//  @file   intersect_arc_line_dialog.cpp
+//  @author Douglas S Caskey
+//  @date   14 Aug, 2024
+//
+//  @copyright
+//  Copyright (C) 2017 - 2026 Seamly, LLC
+//  https://github.com/fashionfreedom/seamly2d
+//
+//  @brief
+//  Seamly2D is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Seamly2D is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Seamly2D. If not, see <http://www.gnu.org/licenses/>.
+//---------------------------------------------------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------------------------------------------------
+//  @file   dialogpointofcontact.cpp
+//  @author Roman Telezhynskyi <dismine(at)gmail.com>
+//  @date   15 Nov, 2013
+//
+//  @copyright
+//  Copyright (C) 2013 Valentina project.
+//  This source code is part of the Valentina project, a pattern making
+//  program, whose allow create and modeling patterns of clothing.
+//  <https://bitbucket.org/dismine/valentina> All Rights Reserved.
+//
+//  Valentina is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published
+//  by the Free Software Foundation, either version 3 of the License,
+//  or (at your option) any later version.
+//
+//  Valentina is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Valentina.  If not, see <http://www.gnu.org/licenses/>.
+//---------------------------------------------------------------------------------------------------------------------
+
+#include "intersect_arc_line_dialog.h"
+
+#include <QColor>
+#include <QComboBox>
+#include <QDialog>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QPointer>
+#include <QPushButton>
+#include <QSet>
+#include <QToolButton>
+
+#include "../vpatterndb/vtranslatevars.h"
+#include "../../visualization/visualization.h"
+#include "../../visualization/line/intersect_arc_line_visual.h"
+#include "../ifc/xml/vabstractpattern.h"
+#include "../ifc/xml/vdomdocument.h"
+#include "../support/edit_formula_dialog.h"
+#include "../vmisc/vabstractapplication.h"
+#include "../vmisc/vcommonsettings.h"
+
+#include "ui_intersect_arc_line_dialog.h"
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief IntersectArcLineDialog create dialog
+/// @param data container with data
+/// @param parent parent widget
+//---------------------------------------------------------------------------------------------------------------------
+IntersectArcLineDialog::IntersectArcLineDialog(const VContainer *data, const quint32 &toolId, QWidget *parent)
+    : DialogTool(data, toolId, parent)
+    , ui(new Ui::IntersectArcLineDialog)
+    , radius(QString())
+{
+    ui->setupUi(this);
+    setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+    setWindowIcon(QIcon(":/toolicon/32x32/point_intersect_arc_line.png"));
+
+    // Set the position that the dialog opens based on user preference.
+    setDialogPosition();
+
+    ui->lineEditNamePoint->setClearButtonEnabled(true);
+
+    initializeFormulaUi(ui);
+    ui->lineEditNamePoint->setText(qApp->getCurrentDocument()->GenerateLabel(LabelType::NewLabel));
+    labelEditNamePoint = ui->labelEditNamePoint;
+    ui->plainTextEditFormula->installEventFilter(this);
+
+    initializeOkCancelApply(ui);
+    flagFormula = false;
+    DialogTool::CheckState();
+
+    fillComboBoxPoints(ui->comboBoxFirstPoint);
+    fillComboBoxPoints(ui->comboBoxSecondPoint);
+    fillComboBoxPoints(ui->comboBoxCenter);
+
+    connect(ui->toolButtonExprRadius, &QPushButton::clicked,        this, &IntersectArcLineDialog::FXRadius);
+    connect(ui->lineEditNamePoint,    &QLineEdit::textChanged,      this, &IntersectArcLineDialog::NamePointChanged);
+    connect(ui->plainTextEditFormula, &QPlainTextEdit::textChanged, this, &IntersectArcLineDialog::FormulaTextChanged);
+    connect(ui->comboBoxFirstPoint,   &QComboBox::currentTextChanged, this, &IntersectArcLineDialog::PointNameChanged);
+    connect(ui->comboBoxSecondPoint,  &QComboBox::currentTextChanged, this, &IntersectArcLineDialog::PointNameChanged);
+    connect(ui->comboBoxCenter,       &QComboBox::currentTextChanged, this, &IntersectArcLineDialog::PointNameChanged);
+
+    vis = new IntersectArcLineVisual(data);
+
+    ui->plainTextEditFormula->setFocus();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+IntersectArcLineDialog::~IntersectArcLineDialog()
+{
+    delete ui;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::FormulaTextChanged()
+{
+    this->FormulaChangedPlainText();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::PointNameChanged()
+{
+    QSet<quint32> set;
+    set.insert(getCurrentObjectId(ui->comboBoxFirstPoint));
+    set.insert(getCurrentObjectId(ui->comboBoxSecondPoint));
+    set.insert(getCurrentObjectId(ui->comboBoxCenter));
+
+    QColor color = okColor;
+    if (set.size() != 3)
+    {
+        flagError = false;
+        color = errorColor;
+    }
+    else
+    {
+        flagError = true;
+        color = okColor;
+    }
+    ChangeColor(ui->labelFirstPoint, color);
+    ChangeColor(ui->labelSecondPoint, color);
+    ChangeColor(ui->labelArcCenter, color);
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::FXRadius()
+{
+    EditFormulaDialog *dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit radius"));
+    dialog->SetFormula(getRadius());
+    dialog->setPostfix(UnitsToStr(qApp->patternUnit(), true));
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        setRadius(dialog->GetFormula());
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::ShowVisualization()
+{
+    AddVisualization<IntersectArcLineVisual>();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief ChosenObject gets id and type of selected object. Save right data and ignore wrong.
+/// @param id id of point or detail
+/// @param type type of object
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::ChosenObject(quint32 id, const SceneObject &type)
+{
+    if (prepare == false)// After first choose we ignore all objects
+    {
+        if (type == SceneObject::Point)
+        {
+            IntersectArcLineVisual *line = qobject_cast<IntersectArcLineVisual *>(vis);
+            SCASSERT(line != nullptr)
+
+            switch (number)
+            {
+                case 0:
+                    if (SetObject(id, ui->comboBoxFirstPoint, tr("Select second point of line")))
+                    {
+                        number++;
+                        line->VisualMode(id);
+                    }
+                    break;
+                case 1:
+                    if (getCurrentObjectId(ui->comboBoxFirstPoint) != id)
+                    {
+                        if (SetObject(id, ui->comboBoxSecondPoint, tr("Select point of center of arc")))
+                        {
+                            number++;
+                            line->setLineP2Id(id);
+                            line->RefreshGeometry();
+                        }
+                    }
+                    break;
+                case 2:
+                {
+                    QSet<quint32> set;
+                    set.insert(getCurrentObjectId(ui->comboBoxFirstPoint));
+                    set.insert(getCurrentObjectId(ui->comboBoxSecondPoint));
+                    set.insert(id);
+
+                    if (set.size() == 3)
+                    {
+                        if (SetObject(id, ui->comboBoxCenter, ""))
+                        {
+                            line->setRadiusId(id);
+                            line->RefreshGeometry();
+                            prepare = true;
+                            this->show();
+                        }
+                    }
+                }
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::SaveData()
+{
+    pointName = ui->lineEditNamePoint->text();
+    radius = ui->plainTextEditFormula->toPlainText();
+    radius.replace("\n", " ");
+
+    IntersectArcLineVisual *line = qobject_cast<IntersectArcLineVisual *>(vis);
+    SCASSERT(line != nullptr)
+
+    line->setObject1Id(GetFirstPoint());
+    line->setLineP2Id(GetSecondPoint());
+    line->setRadiusId(getCenter());
+    line->setRadius(radius);
+    line->RefreshGeometry();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::closeEvent(QCloseEvent *event)
+{
+    ui->plainTextEditFormula->blockSignals(true);
+    DialogTool::closeEvent(event);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief SetSecondPoint set id second point
+/// @param value id
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::SetSecondPoint(const quint32 &value)
+{
+    setCurrentPointId(ui->comboBoxSecondPoint, value);
+
+    IntersectArcLineVisual *line = qobject_cast<IntersectArcLineVisual *>(vis);
+    SCASSERT(line != nullptr)
+    line->setLineP2Id(value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief SetFirstPoint set id first point
+/// @param value id
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::SetFirstPoint(const quint32 &value)
+{
+    setCurrentPointId(ui->comboBoxFirstPoint, value);
+
+    IntersectArcLineVisual *line = qobject_cast<IntersectArcLineVisual *>(vis);
+    SCASSERT(line != nullptr)
+    line->setObject1Id(value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief SetCenter set id of center point
+/// @param value id
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::setCenter(const quint32 &value)
+{
+    setCurrentPointId(ui->comboBoxCenter, value);
+
+    IntersectArcLineVisual *line = qobject_cast<IntersectArcLineVisual *>(vis);
+    SCASSERT(line != nullptr)
+    line->setRadiusId(value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief setRadius set formula radius of arc
+/// @param value formula
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::setRadius(const QString &value)
+{
+    radius = qApp->translateVariables()->FormulaToUser(value, qApp->Settings()->getOsSeparator());
+    ui->plainTextEditFormula->setPlainText(radius);
+
+    IntersectArcLineVisual *line = qobject_cast<IntersectArcLineVisual *>(vis);
+    SCASSERT(line != nullptr)
+    line->setRadius(radius);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief SetPointName set name of point
+/// @param value name
+//---------------------------------------------------------------------------------------------------------------------
+void IntersectArcLineDialog::SetPointName(const QString &value)
+{
+    pointName = value;
+    ui->lineEditNamePoint->setText(pointName);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief getRadius return formula radius of arc
+/// @return formula
+//---------------------------------------------------------------------------------------------------------------------
+QString IntersectArcLineDialog::getRadius() const
+{
+    return qApp->translateVariables()->TryFormulaFromUser(radius, qApp->Settings()->getOsSeparator());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief GetCenter return id of center point
+/// @return id
+//---------------------------------------------------------------------------------------------------------------------
+quint32 IntersectArcLineDialog::getCenter() const
+{
+    return getCurrentObjectId(ui->comboBoxCenter);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief GetFirstPoint return id first point
+/// @return id
+//---------------------------------------------------------------------------------------------------------------------
+quint32 IntersectArcLineDialog::GetFirstPoint() const
+{
+    return getCurrentObjectId(ui->comboBoxFirstPoint);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief GetSecondPoint return id second point
+/// @return id
+//---------------------------------------------------------------------------------------------------------------------
+quint32 IntersectArcLineDialog::GetSecondPoint() const
+{
+    return getCurrentObjectId(ui->comboBoxSecondPoint);
+}

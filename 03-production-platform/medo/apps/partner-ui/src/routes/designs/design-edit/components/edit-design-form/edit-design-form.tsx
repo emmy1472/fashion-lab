@@ -1,0 +1,152 @@
+import { zodResolver } from "@hookform/resolvers/zod"
+import { Button, Input, Select, Textarea, toast } from "@medusajs/ui"
+import { useForm } from "react-hook-form"
+import { useTranslation } from "react-i18next"
+
+import { Form } from "../../../../../components/common/form"
+import { RouteDrawer, useRouteModal } from "../../../../../components/modals"
+import { KeyboundForm } from "../../../../../components/utilities/keybound-form"
+import {
+  PartnerDesign,
+  useUpdatePartnerDesign,
+} from "../../../../../hooks/api/partner-designs"
+import { designTypeLabel, priorityLabel } from "../../../../../lib/design-labels"
+import { CreateDesignSchema } from "../../../design-create/components/design-create-form/schema"
+
+const DESIGN_TYPES = ["Original", "Derivative", "Custom", "Collaboration"] as const
+const PRIORITIES = ["Low", "Medium", "High", "Urgent"] as const
+
+type Props = { design: PartnerDesign }
+
+export const EditDesignForm = ({ design }: Props) => {
+  const { t } = useTranslation()
+  const { handleSuccess } = useRouteModal()
+  const form = useForm<CreateDesignSchema>({
+    defaultValues: {
+      name: design.name ?? "",
+      description: design.description ?? "",
+      design_type: (design.design_type as any) ?? "Original",
+      priority: (design.priority as any) ?? "Medium",
+      designer_notes: design.designer_notes ?? "",
+    },
+    resolver: zodResolver(CreateDesignSchema),
+  })
+
+  const { mutateAsync, isPending } = useUpdatePartnerDesign(design.id)
+
+  const handleSubmit = form.handleSubmit(async (data) => {
+    await mutateAsync(data, {
+      onSuccess: () => {
+        toast.success(t("partner.designs.edit.updated"))
+        handleSuccess()
+      },
+      onError: (e) => toast.error(e.message),
+    })
+  })
+
+  return (
+    <RouteDrawer.Form form={form}>
+      <KeyboundForm onSubmit={handleSubmit} className="flex flex-1 flex-col">
+        <RouteDrawer.Body>
+          <div className="flex flex-col gap-y-4">
+            <Form.Field
+              control={form.control}
+              name="name"
+              render={({ field }) => (
+                <Form.Item>
+                  <Form.Label>{t("fields.name")}</Form.Label>
+                  <Form.Control>
+                    <Input {...field} />
+                  </Form.Control>
+                  <Form.ErrorMessage />
+                </Form.Item>
+              )}
+            />
+            <Form.Field
+              control={form.control}
+              name="description"
+              render={({ field }) => (
+                <Form.Item>
+                  <Form.Label optional>{t("fields.description")}</Form.Label>
+                  <Form.Control>
+                    <Textarea {...field} />
+                  </Form.Control>
+                </Form.Item>
+              )}
+            />
+            <Form.Field
+              control={form.control}
+              name="design_type"
+              render={({ field }) => (
+                <Form.Item>
+                  <Form.Label optional>{t("fields.type")}</Form.Label>
+                  <Form.Control>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <Select.Trigger>
+                        <Select.Value placeholder={t("general.select")} />
+                      </Select.Trigger>
+                      <Select.Content>
+                        {DESIGN_TYPES.map((v) => (
+                          <Select.Item key={v} value={v}>
+                            {designTypeLabel(t, v)}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select>
+                  </Form.Control>
+                </Form.Item>
+              )}
+            />
+            <Form.Field
+              control={form.control}
+              name="priority"
+              render={({ field }) => (
+                <Form.Item>
+                  <Form.Label optional>{t("partner.designs.fields.priority")}</Form.Label>
+                  <Form.Control>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <Select.Trigger>
+                        <Select.Value placeholder={t("general.select")} />
+                      </Select.Trigger>
+                      <Select.Content>
+                        {PRIORITIES.map((v) => (
+                          <Select.Item key={v} value={v}>
+                            {priorityLabel(t, v)}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select>
+                  </Form.Control>
+                </Form.Item>
+              )}
+            />
+            <Form.Field
+              control={form.control}
+              name="designer_notes"
+              render={({ field }) => (
+                <Form.Item>
+                  <Form.Label optional>{t("partner.designs.fields.designerNotes")}</Form.Label>
+                  <Form.Control>
+                    <Textarea {...field} />
+                  </Form.Control>
+                </Form.Item>
+              )}
+            />
+          </div>
+        </RouteDrawer.Body>
+        <RouteDrawer.Footer>
+          <div className="flex items-center justify-end gap-x-2">
+            <RouteDrawer.Close asChild>
+              <Button variant="secondary" size="small">
+                {t("actions.cancel")}
+              </Button>
+            </RouteDrawer.Close>
+            <Button isLoading={isPending} type="submit" variant="primary" size="small">
+              {t("actions.save")}
+            </Button>
+          </div>
+        </RouteDrawer.Footer>
+      </KeyboundForm>
+    </RouteDrawer.Form>
+  )
+}

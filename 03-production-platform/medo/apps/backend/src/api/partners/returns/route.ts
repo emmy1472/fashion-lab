@@ -1,0 +1,66 @@
+import { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import { beginReturnOrderWorkflow } from "@medusajs/medusa/core-flows"
+import { getPartnerSalesChannelId, tryGetPartnerSalesChannelId, validatePartnerOrderOwnership } from "../helpers"
+
+export const GET = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const { salesChannelId } = await tryGetPartnerSalesChannelId(req.auth_context, req.scope)
+  if (!salesChannelId) {
+    return res.json({ returns: [] })
+  }
+
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+  const filters: any = {}
+  const reqQuery = req.query as any
+  if (reqQuery.order_id) filters.order_id = reqQuery.order_id
+
+  const { data } = await query.graph({
+    entity: "return",
+    // query.graph's "expand relation" syntax is `relation.*`, not
+    // `*relation`. The asterisk-prefix form gets passed to MikroORM as a
+    // literal field name on certain entities (Return here) and throws
+    // "Entity 'Return' does not have property '*items'". Admin uses the
+    // suffix form throughout — see @medusajs/medusa/api/admin/returns/
+    // query-config.js defaultAdminDetailsReturnFields.
+    fields: ["*", "items.*", "items.item.*"],
+    filters,
+  })
+
+  // Filter to only returns whose order belongs to this partner's sales channel
+  const orderIds = [...new Set((data || []).map((r: any) => r.order_id).filter(Boolean))]
+  let validOrderIds: Set<string> = new Set()
+  if (orderIds.length > 0) {
+    const { data: orders } = await query.graph({
+      entity: "orders",
+      fields: ["id", "sales_channel_id"],
+      filters: { id: orderIds },
+    })
+    validOrderIds = new Set(
+      (orders || []).filter((o: any) => o.sales_channel_id === salesChannelId).map((o: any) => o.id)
+    )
+  }
+
+  const returns = (data || []).filter((r: any) => validOrderIds.has(r.order_id))
+
+  res.json({ returns })
+}
+
+export const POST = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const body = req.body as any
+  await validatePartnerOrderOwnership(req.auth_context, body.order_id, req.scope)
+
+  const { result } = await beginReturnOrderWorkflow(req.scope).run({
+    input: {
+      ...body,
+      created_by: req.auth_context.actor_id,
+    },
+  })
+
+  res.json({ return: result })
+}

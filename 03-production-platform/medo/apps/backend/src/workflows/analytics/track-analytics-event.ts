@@ -1,0 +1,302 @@
+import {
+  createWorkflow,
+  WorkflowResponse,
+  createStep,
+  StepResponse,
+} from "@medusajs/framework/workflows-sdk";
+import { ANALYTICS_MODULE } from "../../modules/analytics";
+import { Modules } from "@medusajs/framework/utils";
+import * as geoip from "geoip-lite";
+import { IEventBusService } from "@medusajs/types";
+import { resolveEventCountry } from "../../modules/analytics/country-from-timezone";
+
+// Helper to parse user agent
+function parseUserAgent(userAgent: string) {
+  const ua = userAgent.toLowerCase();
+  
+  // Detect browser
+  let browser = "unknown";
+  if (ua.includes("firefox")) browser = "Firefox";
+  else if (ua.includes("chrome") && !ua.includes("edg")) browser = "Chrome";
+  else if (ua.includes("safari") && !ua.includes("chrome")) browser = "Safari";
+  else if (ua.includes("edg")) browser = "Edge";
+  else if (ua.includes("opera") || ua.includes("opr")) browser = "Opera";
+  
+  // Detect OS (check iOS before macOS since iOS user agents contain "mac")
+  let os = "unknown";
+  if (ua.includes("android")) os = "Android";
+  else if (ua.includes("iphone") || ua.includes("ipad") || ua.includes("ipod")) os = "iOS";
+  else if (ua.includes("win")) os = "Windows";
+  else if (ua.includes("mac")) os = "macOS";
+  else if (ua.includes("linux")) os = "Linux";
+  
+  // Detect device type
+  let device_type: "desktop" | "mobile" | "tablet" | "unknown" = "unknown";
+  if (ua.includes("ipad")) device_type = "tablet";
+  else if (ua.includes("iphone") || ua.includes("ipod") || ua.includes("android") && ua.includes("mobile")) device_type = "mobile";
+  else if (ua.includes("tablet")) device_type = "tablet";
+  else if (browser !== "unknown") device_type = "desktop";
+  
+  return { browser, os, device_type };
+}
+
+// Helper to extract referrer source
+function extractReferrerSource(referrer: string | undefined): string | null {
+  if (!referrer) return "direct";
+  
+  try {
+    const url = new URL(referrer);
+    const hostname = url.hostname.toLowerCase();
+    
+    // Search engines
+    if (hostname.includes("google")) return "google";
+    if (hostname.includes("bing")) return "bing";
+    if (hostname.includes("yahoo")) return "yahoo";
+    if (hostname.includes("duckduckgo")) return "duckduckgo";
+    
+    // Social media
+    if (hostname.includes("facebook")) return "facebook";
+    if (hostname.includes("twitter") || hostname.includes("t.co")) return "twitter";
+    if (hostname.includes("linkedin")) return "linkedin";
+    if (hostname.includes("instagram")) return "instagram";
+    if (hostname.includes("pinterest")) return "pinterest";
+    if (hostname.includes("reddit")) return "reddit";
+    
+    // Return domain for other referrers
+    return hostname;
+  } catch {
+    return null;
+  }
+}
+
+// Helper to get country from IP address
+function getCountryFromIP(ipAddress: string): string | null {
+  if (!ipAddress) return null;
+  
+  try {
+    // Handle X-Forwarded-For header (may contain multiple IPs)
+    const ip = ipAddress.split(',')[0].trim();
+    
+    // Skip private/local IPs
+    if (ip === '::1' || ip === '127.0.0.1' || ip.startsWith('192.168.') || ip.startsWith('10.')) {
+      return null;
+    }
+    
+    // Lookup IP
+    const geo = geoip.lookup(ip);
+    return geo?.country || null;
+  } catch (error) {
+    console.error('GeoIP lookup error:', error);
+    return null;
+  }
+}
+
+type TrackAnalyticsEventInput = {
+  website_id: string;
+  event_type: "pageview" | "custom_event";
+  event_name?: string;
+  pathname: string;
+  referrer?: string;
+  visitor_id: string;
+  session_id: string;
+  user_agent: string;
+  ip_address: string;
+  timestamp: Date;
+  // Optional client-supplied idempotency key (set by the batch-ingest path / edge worker).
+  // Persisted to analytics_event.event_id so retried batches dedupe cross-request.
+  client_event_id?: string;
+  // Optional pre-resolved country (e.g. request.cf.country from the edge worker);
+  // when set, it takes precedence over timezone-derived + per-event GeoIP lookup.
+  country?: string;
+  // Browser-captured signals (#559 slice 6): IANA time zone (→ country) + locale.
+  timezone?: string;
+  locale?: string;
+  query_string?: string;
+  is_404?: boolean;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  metadata?: Record<string, any>;
+};
+
+// Step 1: Create analytics event
+const createAnalyticsEventStep = createStep(
+  "create-analytics-event",
+  async (input: TrackAnalyticsEventInput, { container }) => {
+    const analyticsService = container.resolve(ANALYTICS_MODULE) as any;
+    const eventBus:IEventBusService = container.resolve(Modules.EVENT_BUS);
+
+    // Parse user agent
+    const { browser, os, device_type } = parseUserAgent(input.user_agent);
+    
+    // Extract referrer source
+    const referrer_source = extractReferrerSource(input.referrer);
+    
+    // Country precedence (#559 slice 6): explicit client/edge country →
+    // browser-timezone-derived → GeoIP-of-IP fallback.
+    const country = resolveEventCountry({
+      clientCountry: input.country,
+      timezone: input.timezone,
+      ipCountry: getCountryFromIP(input.ip_address),
+    });
+
+    // Carry the browser locale into immutable event metadata (no schema column
+    // needed; analytics events are never updated, so the metadata-blob caveat
+    // doesn't apply here). Enables future language/region analytics.
+    const metadata = input.locale
+      ? { ...(input.metadata || {}), locale: input.locale }
+      : input.metadata || null;
+
+    // Create the event
+    const event = await analyticsService.createAnalyticsEvents({
+      website_id: input.website_id,
+      event_type: input.event_type,
+      event_name: input.event_name || null,
+      pathname: input.pathname,
+      referrer: input.referrer || null,
+      referrer_source,
+      visitor_id: input.visitor_id,
+      session_id: input.session_id,
+      user_agent: input.user_agent,
+      browser,
+      os,
+      device_type,
+      country,
+      event_id: input.client_event_id || null,
+      query_string: input.query_string || null,
+      is_404: input.is_404 || false,
+      utm_source: input.utm_source || null,
+      utm_medium: input.utm_medium || null,
+      utm_campaign: input.utm_campaign || null,
+      utm_term: input.utm_term || null,
+      utm_content: input.utm_content || null,
+      metadata,
+      timestamp: input.timestamp,
+    });
+
+    // Emit event for real-time subscribers
+    await eventBus.emit({
+      name: "analytics_event.created",
+      data: event,
+    });
+
+    return new StepResponse(event, event.id);
+  },
+  async (eventId, { container }) => {
+    if (!eventId) return;
+    
+    const analyticsService = container.resolve(ANALYTICS_MODULE) as any;
+    await analyticsService.deleteAnalyticsEvents(eventId);
+  }
+);
+
+// Step 2: Update or create session
+const updateSessionStep = createStep(
+  "update-analytics-session",
+  async (input: TrackAnalyticsEventInput & { event_id: string }, { container }) => {
+    const analyticsService = container.resolve(ANALYTICS_MODULE) as any;
+
+    // Parse user agent for session data
+    const { browser, os, device_type } = parseUserAgent(input.user_agent);
+    const referrer_source = extractReferrerSource(input.referrer);
+    // Same precedence as the event step so session geo matches its pageviews.
+    const country = resolveEventCountry({
+      clientCountry: input.country,
+      timezone: input.timezone,
+      ipCountry: getCountryFromIP(input.ip_address),
+    });
+
+    try {
+      // Try to find existing session
+      const [sessions] = await analyticsService.listAndCountAnalyticsSessions({
+        session_id: input.session_id,
+      });
+
+      if (sessions.length > 0) {
+        // Update existing session
+        const session = sessions[0];
+        const updated = await analyticsService.updateAnalyticsSessions({
+          id: session.id,
+          exit_page: input.pathname,
+          pageviews: session.pageviews + 1,
+          last_activity_at: input.timestamp,
+          is_bounce: false, // More than one pageview
+          // Backfill UTM fields only if they're not already set on the session
+          // (first-touch attribution — preserves the original campaign source).
+          ...(!(session as any).utm_campaign && input.utm_campaign
+            ? {
+                utm_source: input.utm_source || null,
+                utm_medium: input.utm_medium || null,
+                utm_campaign: input.utm_campaign,
+                utm_term: input.utm_term || null,
+                utm_content: input.utm_content || null,
+              }
+            : {}),
+        });
+
+        return new StepResponse({ session: updated, created: false });
+      } else {
+        // Create new session
+        const session = await analyticsService.createAnalyticsSessions({
+          website_id: input.website_id,
+          session_id: input.session_id,
+          visitor_id: input.visitor_id,
+          entry_page: input.pathname,
+          exit_page: input.pathname,
+          pageviews: 1,
+          duration_seconds: null,
+          is_bounce: true, // Single page visit initially
+          referrer: input.referrer || null,
+          referrer_source,
+          country,
+          device_type,
+          browser,
+          os,
+          // Capture UTM parameters from the first pageview so the ad-planning
+          // attribution workflow can link this session to a campaign.
+          utm_source: input.utm_source || null,
+          utm_medium: input.utm_medium || null,
+          utm_campaign: input.utm_campaign || null,
+          utm_term: input.utm_term || null,
+          utm_content: input.utm_content || null,
+          started_at: input.timestamp,
+          ended_at: null,
+          last_activity_at: input.timestamp,
+        });
+
+        return new StepResponse({ session, created: true }, session.id);
+      }
+    } catch (error) {
+      console.error("Session update error:", error);
+      return new StepResponse({ session: null, created: false });
+    }
+  },
+  async (sessionId, { container }) => {
+    if (!sessionId) return;
+    
+    const analyticsService = container.resolve(ANALYTICS_MODULE) as any;
+    await analyticsService.deleteAnalyticsSessions(sessionId);
+  }
+);
+
+// Main workflow
+export const trackAnalyticsEventWorkflow = createWorkflow(
+  "track-analytics-event",
+  (input: TrackAnalyticsEventInput) => {
+    // Create the event
+    const event = createAnalyticsEventStep(input);
+    
+    // Update or create session
+    const session = updateSessionStep({
+      ...input,
+      event_id: event.id,
+    });
+
+    return new WorkflowResponse({
+      event,
+      session,
+    });
+  }
+);

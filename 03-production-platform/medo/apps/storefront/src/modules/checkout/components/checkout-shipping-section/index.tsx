@@ -1,0 +1,475 @@
+"use client"
+
+import { useState, useEffect, useTransition, useMemo } from "react"
+import { setShippingMethod, updateCart, updateRegion } from "@lib/data/cart"
+import { calculatePriceForShippingOption } from "@lib/data/fulfillment"
+import { convertToLocale } from "@lib/util/money"
+import { getDeliveryDays, isPickupShippingOption } from "@lib/util/fulfillment"
+import { useCartUpdate } from "@modules/checkout/context/cart-update-context"
+import { Loader, CursorDefault } from "@medusajs/icons"
+import { DropdownMenu, RadioGroup, clx } from "@medusajs/ui"
+import type { HttpTypes } from "@medusajs/types"
+import { usePathname } from "next/navigation"
+
+type CountryOption = {
+  country: string
+  region: string
+  label: string
+}
+
+interface CheckoutShippingSectionProps {
+  cart: HttpTypes.StoreCart
+  availableShippingOptions:
+    | HttpTypes.StoreCartShippingOptionWithServiceZone[]
+    | null
+  regions: HttpTypes.StoreRegion[]
+  currentCountry: string
+}
+
+function getLocalizedCountryName(
+  isoCode: string,
+  fallback: string
+) {
+  try {
+    return (
+      new Intl.DisplayNames([], { type: "region" }).of(
+        isoCode.toUpperCase()
+      ) ?? fallback
+    )
+  } catch {
+    return fallback
+  }
+}
+
+export default function CheckoutShippingSection({
+  cart,
+  availableShippingOptions,
+  regions,
+  currentCountry,
+}: CheckoutShippingSectionProps) {
+  const currentPath = usePathname()
+  const [isPending, startTransition] = useTransition()
+  const { trackCartUpdate } = useCartUpdate()
+
+  const [isLoadingPrices, setIsLoadingPrices] = useState(true)
+  const [calculatedPricesMap, setCalculatedPricesMap] = useState<
+    Record<string, number>
+  >({})
+  const [shippingError, setShippingError] = useState<string | null>(null)
+  const [shippingMethodId, setShippingMethodId] = useState<string | null>(
+    cart.shipping_methods?.at(-1)?.shipping_option_id || null
+  )
+
+  const [now, setNow] = useState<Date | null>(null)
+  useEffect(() => {
+    setNow(new Date())
+  }, [])
+
+  const getDeliveryDate = (daysFromNow: number) => {
+    const date = new Date(now!)
+    date.setHours(0, 0, 0, 0)
+    date.setDate(date.getDate() + daysFromNow)
+    return date
+  }
+
+  const deliveryDateFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat(undefined, {
+        day: "numeric",
+        month: "long",
+      }),
+    []
+  )
+
+  const formatDeliveryDate = (daysFromNow: number) => {
+    return deliveryDateFormatter.format(getDeliveryDate(daysFromNow))
+  }
+
+  const formatDeliveryRange = (minDaysFromNow: number, maxDaysFromNow: number) => {
+    const startDate = getDeliveryDate(minDaysFromNow)
+    const endDate = getDeliveryDate(maxDaysFromNow)
+
+    if (typeof deliveryDateFormatter.formatRange === "function") {
+      return deliveryDateFormatter.formatRange(startDate, endDate)
+    }
+
+    return (
+      new Intl.DateTimeFormat(undefined, {
+        day: "numeric",
+        month: "long",
+      }).format(startDate) + ` – ${formatDeliveryDate(maxDaysFromNow)}`
+    )
+  }
+
+  const countryOptions = useMemo<CountryOption[]>(() => {
+    return regions
+      .flatMap((r) =>
+        (r.countries ?? []).map((c) => ({
+          country: c.iso_2 ?? "",
+          region: r.id,
+          label: getLocalizedCountryName(c.iso_2 ?? "", c.display_name ?? ""),
+        }))
+      )
+      .filter((o) => o.country)
+      .sort((a, b) => a.label.localeCompare(b.label))
+  }, [regions])
+
+  /**
+   * 🔴 NO `?? countryOptions[0]` fallback.
+   *
+   * This drives both the label on the trigger and which radio reads as
+   * selected. `countryOptions` is every country of every region sorted by
+   * name, so when the buyer's country was not matched the picker confidently
+   * announced the alphabetically-first country on the platform — a Swedish
+   * buyer on a `/se/` checkout was shown "Angola", selected.
+   *
+   * Undefined is the truthful answer, and the trigger already renders "—" for
+   * it. An unknown country should look unknown, not like somebody else's.
+   */
+  const selectedCountryOption = countryOptions.find(
+    (o) => o.country === currentCountry
+  )
+
+  const handleRegionChange = (countryCode: string) => {
+    const option = countryOptions.find((opt) => opt.country === countryCode)
+    if (!option) {
+      return
+    }
+
+    startTransition(() => {
+      updateRegion(option.country, currentPath)
+    })
+  }
+
+  /**
+   * 🔴 Hide an option that cannot be PRICED yet, rather than pricing it wrongly.
+   *
+   * Some carriers quote by destination postcode and will not answer without
+   * one. ShipGlobal is one: an admin-created design order carries a country and
+   * no postcode, so its rate call goes out with `destination_pincode: ""`, the
+   * carrier refuses, and the provider falls back. On a live Swedish checkout
+   * that fallback was `DEFAULT_FLAT_FALLBACK` — 200 — which `flat-fallback.ts`
+   * itself calls "an INR-shaped number and is almost certainly wrong in any
+   * other currency". The buyer was offered €200.00 beside a real €19.81.
+   *
+   * A made-up number the buyer can SELECT is worse than an option that is not
+   * there yet, so it is withheld until the cart can actually be quoted. It
+   * comes back on its own once the address step writes a postcode: that
+   * mutation revalidates the fulfillment tag and this list is refetched —
+   * which only works because the same change stopped force-caching it.
+   *
+   * Driven by the option's own `data`, not by a carrier name hardcoded here:
+   * which carriers need a postcode is the backend's fact to state, and
+   * Shiprocket beside it quotes country-level perfectly well (€19.81, not its
+   * €35 fallback).
+   */
+  const hasPostalCode = Boolean(
+    String(cart.shipping_address?.postal_code ?? "").trim()
+  )
+
+  const withheldForPostalCode = (availableShippingOptions ?? []).filter(
+    (o) => (o.data as Record<string, unknown> | null)?.requires_postal_code
+  ).length
+
+  const shippingOptions = hasPostalCode
+    ? availableShippingOptions
+    : (availableShippingOptions ?? []).filter(
+        (o) => !(o.data as Record<string, unknown> | null)?.requires_postal_code
+      )
+
+  useEffect(() => {
+    setIsLoadingPrices(true)
+    if (!shippingOptions?.length) {
+      setIsLoadingPrices(false)
+      return
+    }
+
+    const calculatedMethods = shippingOptions.filter(
+      (sm) => sm.price_type === "calculated"
+    )
+
+    if (!calculatedMethods.length) {
+      setIsLoadingPrices(false)
+      return
+    }
+
+    Promise.allSettled(
+      calculatedMethods.map((sm) =>
+        calculatePriceForShippingOption(sm.id, cart.id)
+      )
+    ).then((results) => {
+      const pricesMap: Record<string, number> = {}
+      results.forEach((r) => {
+        if (r.status === "fulfilled" && r.value?.id) {
+          pricesMap[r.value.id] = r.value.amount ?? 0
+        }
+      })
+      setCalculatedPricesMap(pricesMap)
+      setIsLoadingPrices(false)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availableShippingOptions, cart.id])
+
+  const handleSelectShipping = async (id: string) => {
+    setShippingError(null)
+    const prev = shippingMethodId
+    setShippingMethodId(id)
+    const err = await trackCartUpdate(() =>
+      setShippingMethod({
+        cartId: cart.id,
+        shippingMethodId: id,
+      })
+    ).catch((e: Error) => e.message)
+    if (err) {
+      setShippingMethodId(prev)
+      setShippingError(err as string)
+      return
+    }
+
+    const selectedOption = shippingOptions?.find((option) => option.id === id)
+    const addr = cart.shipping_address
+    const hasDeliveryFields = !!(
+      addr?.address_1 ||
+      addr?.address_2 ||
+      addr?.city ||
+      addr?.postal_code ||
+      addr?.province ||
+      addr?.company
+    )
+
+    if (isPickupShippingOption(selectedOption) && hasDeliveryFields) {
+      await trackCartUpdate(() =>
+        updateCart({
+          shipping_address: {
+            first_name: addr?.first_name || "",
+            last_name: addr?.last_name || "",
+            phone: addr?.phone || "",
+            country_code: addr?.country_code || "",
+            company: "",
+            address_1: "",
+            address_2: "",
+            city: "",
+            postal_code: "",
+            province: "",
+          },
+        } as HttpTypes.StoreUpdateCart)
+      ).catch((e: Error) => setShippingError(e.message))
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-y-4">
+      <div className="flex flex-row items-start justify-between gap-x-4">
+        <div className="flex flex-col">
+          <h2 className="h2-docs">Delivery</h2>
+          <p className="txt-compact-medium text-ui-fg-muted">
+            Select how you would like your order delivered
+          </p>
+        </div>
+
+        <DropdownMenu>
+          <DropdownMenu.Trigger
+            className={clx(
+              "mb-6 flex items-center gap-x-1.5 txt-compact-medium-plus text-ui-fg-subtle hover:text-ui-fg-base transition-colors",
+              isPending && "opacity-60 cursor-wait"
+            )}
+            disabled={isPending}
+            data-testid="checkout-country-select"
+          >
+            {isPending ? (
+              <Loader className="h-4 w-4 animate-spin" />
+            ) : (
+              <>
+                <CursorDefault />
+                <span>{selectedCountryOption?.label ?? "—"}</span>
+              </>
+            )}
+          </DropdownMenu.Trigger>
+
+          <DropdownMenu.Content
+            align="end"
+            className="w-48 max-h-60 overflow-y-auto no-scrollbar"
+          >
+            <DropdownMenu.RadioGroup
+              value={selectedCountryOption?.country}
+              onValueChange={handleRegionChange}
+            >
+              {countryOptions.map((opt) => (
+                <DropdownMenu.RadioItem key={opt.country} value={opt.country}>
+                  {opt.label}
+                </DropdownMenu.RadioItem>
+              ))}
+            </DropdownMenu.RadioGroup>
+          </DropdownMenu.Content>
+        </DropdownMenu>
+      </div>
+
+      {/*
+        Shipping method cards.
+
+        🔴 `min-w-0` is what makes `overflow-x-auto` mean anything. The cards
+        are `w-[180px] shrink-0`, and this scroller sits in a flex column whose
+        children default to `min-width: auto` — so instead of scrolling, it
+        grew to its content and pushed the whole grid column wide. On a live
+        Swedish checkout with 7 options that carried the order summary, and the
+        TOTAL, off the right edge of the screen; the page scrolled sideways.
+        India has 2 options, which is why local testing never showed it.
+
+        Same defect as `min-h-0` on the modal body, one axis over.
+      */}
+      {withheldForPostalCode > 0 && !hasPostalCode && (
+        <p className="txt-compact-small text-ui-fg-muted">
+          {withheldForPostalCode === 1
+            ? "One more delivery option appears once you add your postcode."
+            : `${withheldForPostalCode} more delivery options appear once you add your postcode.`}
+        </p>
+      )}
+
+      <div className="min-w-0 overflow-x-auto no-scrollbar px-px pb-1">
+        {shippingOptions && shippingOptions.length > 0 ? (
+          <RadioGroup
+            value={shippingMethodId ?? undefined}
+            onValueChange={handleSelectShipping}
+            className="flex items-stretch gap-x-2"
+          >
+            {shippingOptions.map((option) => {
+              const isSelected = option.id === shippingMethodId
+
+              const days = getDeliveryDays(option)
+              const deliveryLabel = !days
+                ? null
+                : days.max === 0
+                  ? "Delivery today"
+                  : !now
+                    ? null
+                    : days.min !== undefined && days.max !== undefined
+                      ? days.min === days.max
+                        ? formatDeliveryDate(days.min)
+                        : formatDeliveryRange(days.min, days.max)
+                      : days.max !== undefined
+                        ? `Delivery by ${formatDeliveryDate(days.max)}`
+                        : days.min !== undefined
+                          ? `Delivery from ${formatDeliveryDate(days.min)}`
+                          : null
+
+              /**
+               * 🔴 `?? null`, because `option.amount!` was a lie.
+               *
+               * The `!` is a TypeScript assertion and does nothing at runtime.
+               * A FLAT option carries no amount when it has no price in the
+               * cart's currency — an Australia-zone option priced only in AUD,
+               * offered on a EUR cart. `undefined` then walked straight through
+               * the `priceAmount !== null` guard below (`undefined !== null` is
+               * TRUE) and reached `Intl.NumberFormat.format(undefined)`, which
+               * renders "€NaN". The buyer was shown, and could select, a
+               * shipping method with no price.
+               *
+               * Normalising to null makes the existing guard do its job and the
+               * row falls through to "—". Note `??` and not `||`: a genuine
+               * amount of 0 is FREE shipping, not a missing price.
+               */
+              const priceAmount =
+                option.price_type === "flat"
+                  ? option.amount ?? null
+                  : calculatedPricesMap[option.id] ?? null
+              const isFreeShipping = priceAmount === 0
+              const price = isFreeShipping
+                ? "Free"
+                : priceAmount !== null
+                  ? convertToLocale({
+                      amount: priceAmount,
+                      currency_code: cart.currency_code,
+                    })
+                  : isLoadingPrices
+                    ? null
+                    : "—"
+
+              return (
+                <div
+                  key={option.id}
+                  className={clx(
+                    "relative flex w-[180px] shrink-0 flex-col gap-2 justify-between rounded-md border bg-ui-bg-base p-3 text-start transition-colors hover:bg-ui-bg-base-hover",
+                    isSelected
+                      ? "border-ui-border-interactive"
+                      : "border-ui-border-base hover:border-ui-border-interactive/50"
+                  )}
+                  data-testid="delivery-option-radio"
+                >
+                  {/*
+                    An option with no price in this currency cannot be chosen.
+                    It used to be fully selectable while displaying "€NaN".
+                  */}
+                  <RadioGroup.Item
+                    value={option.id}
+                    aria-label={option.name}
+                    disabled={priceAmount === null && !isLoadingPrices}
+                    className="absolute inset-0 z-10 h-full w-full cursor-pointer rounded-md bg-transparent outline-none [&>div]:hidden focus-visible:shadow-borders-interactive-with-focus"
+                  />
+                  {/*
+                    🔴 `break-words`. The card is a fixed `w-[180px] shrink-0`,
+                    and an option name can carry a ULID — "Quoted freight —
+                    01M0Q0AK64DQVYJR8G4CTFW75S". With the default
+                    `overflow-wrap: normal` that is ONE unbreakable token, so it
+                    rendered straight out of the card and over its neighbour:
+                    the box measured 180px wide with a 258px scrollWidth.
+                  */}
+                  <span className="txt-compact-medium-plus text-ui-fg-base break-words">
+                    {option.name}
+                  </span>
+                  <div className="flex flex-col gap-y-0">
+                    <div className="min-h-[20px]">
+                      {deliveryLabel && (
+                        <span className="txt-compact-small text-ui-fg-subtle">
+                          {deliveryLabel}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-end justify-between gap-x-3">
+                      <div
+                        className={clx(
+                          "txt-compact-small-plus flex min-h-[20px] items-end",
+                          isFreeShipping
+                            ? "text-ui-tag-green-icon"
+                            : "text-ui-fg-subtle"
+                        )}
+                      >
+                        {price === null ? (
+                          <Loader className="h-3 w-3 animate-spin" />
+                        ) : (
+                          price
+                        )}
+                      </div>
+
+                      <div className="flex h-5 w-5 shrink-0 items-center justify-center">
+                        <div
+                          className={clx(
+                            "flex h-3.5 w-3.5 items-center justify-center rounded-full border bg-ui-bg-base shadow-borders-base",
+                            isSelected
+                              ? "border-ui-border-interactive bg-ui-bg-interactive shadow-borders-interactive-with-shadow"
+                              : "border-ui-border-base"
+                          )}
+                        >
+                          {isSelected && (
+                            <div className="h-1.5 w-1.5 rounded-full bg-ui-bg-base shadow-details-contrast-on-bg-interactive" />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </RadioGroup>
+        ) : (
+          <p className="txt-compact-small text-ui-fg-subtle">
+            Shipping unavailable
+          </p>
+        )}
+      </div>
+
+      {shippingError && (
+        <p className="txt-compact-small text-rose-500">{shippingError}</p>
+      )}
+    </div>
+  )
+}

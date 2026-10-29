@@ -1,0 +1,46 @@
+---
+title: '@freesewing/prettier-config'
+---
+
+FreeSewing's **prettier-config** package holds FreeSewing's preferred
+configuration for the [Prettier](https://prettier.io/) code formatter.
+
+It is published on NPM as [@freesewing/prettier-config
+](https://www.npmjs.com/package/@freesewing/prettier-config).\
+The source code for this package is available in [our monorepo on Codeberg
+](https://codeberg.org/freesewing/freesewing) under [packages/prettier-config
+](https://codeberg.org/freesewing/freesewing/src/branch/develop/packages/prettier-config).
+
+## Usage
+
+This package only provides a default export, which is a JSON file.
+
+To use it, do not install it, but instead update you `package.json` file as such:
+
+```json
+{
+  // ...
+  "prettier": "@freesewing/prettier-config"
+}
+```
+
+## Prettier options
+
+The Prettier options configured by this package:
+
+| Option        | Value   |
+| ------------- | ------- |
+| semi          | `false` |
+| singleQuote   | `true`  |
+| trailingComma | "es5"   |
+| printWidth    | 100     |
+
+:::note RELATED
+
+Please see the
+[Prettier options documentation](https://prettier.io/docs/en/options.html)
+for information about the effects of each option.
+
+:::
+
+[1]: https://www.npmjs.com/package/@freesewing/prettier-config

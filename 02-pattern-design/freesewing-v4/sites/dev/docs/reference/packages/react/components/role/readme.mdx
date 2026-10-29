@@ -1,0 +1,29 @@
+---
+title: Role
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.role.mjs'
+import { RoleBlockExample, UserVisitorContentExample } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Role** component family provides the following components:
+
+- [RoleBlock](#roleblock)
+- [UserVisitorContent](#uservisitorcontent)
+
+### RoleBlock
+
+<ComponentDocs docs={jsdoc.jsdocRoleBlock} example={RoleBlockExample} />
+
+### UserVisitorContent
+
+<ComponentDocs docs={jsdoc.jsdocUserVisitorContent} example={UserVisitorContentExample} />
+
+</DocusaurusDoc>

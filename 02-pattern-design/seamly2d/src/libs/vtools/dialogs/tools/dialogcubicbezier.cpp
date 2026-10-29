@@ -1,0 +1,508 @@
+//-----------------------------------------------------------------------------
+//  @file   dialogcubicbezier.cpp
+//  @author Douglas S Caskey
+//  @date   14 Aug, 2024
+//
+//  @copyright
+//  Copyright (C) 2017 - 2024 Seamly, LLC
+//  https://github.com/fashionfreedom/seamly2d
+//
+//  @brief
+//  Seamly2D is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Seamly2D is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Seamly2D. If not, see <http://www.gnu.org/licenses/>.
+//-----------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------
+//  @file   dialogcubicbezier.cpp
+//  @author Roman Telezhynskyi <dismine(at)gmail.com>
+//  @date   November 15, 2013
+//
+//  @copyright
+//  Copyright (C) 2013 Valentina project.
+//  This source code is part of the Valentina project, a pattern making
+//  program, whose allow create and modeling patterns of clothing.
+//  <https://bitbucket.org/dismine/valentina> All Rights Reserved.
+//
+//  Valentina is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published
+//  by the Free Software Foundation, either version 3 of the License,
+//  or (at your option) any later version.
+//
+//  Valentina is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Valentina.  If not, see <http://www.gnu.org/licenses/>.
+//-----------------------------------------------------------------------------
+
+#include "dialogcubicbezier.h"
+
+#include <QColor>
+#include <QComboBox>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QPointer>
+#include <QPushButton>
+#include <QTimer>
+#include <new>
+
+#include "../../tools/vabstracttool.h"
+#include "../ifc/ifcdef.h"
+#include "../../visualization/path/vistoolcubicbezier.h"
+#include "../../visualization/visualization.h"
+#include "../support/edit_formula_dialog.h"
+#include "../vgeometry/vpointf.h"
+#include "../vmisc/vabstractapplication.h"
+#include "../vmisc/vcommonsettings.h"
+#include "../vpatterndb/vcontainer.h"
+#include "dialogtool.h"
+#include "ui_dialogcubicbezier.h"
+#include "vtranslatevars.h"
+
+//---------------------------------------------------------------------------------------------------------------------
+DialogCubicBezier::DialogCubicBezier(const VContainer *data, const quint32 &toolId, QWidget *parent)
+    : DialogTool(data, toolId, parent)
+    , ui(new Ui::DialogCubicBezier)
+    , spl()
+    , m_computedSpl()
+    , m_hasComputedSpl(false)
+    , newDuplicate(-1)
+    , timerCurveLength(new QTimer(this))
+    , flagCurveLength(true)
+{
+    ui->setupUi(this);
+    setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+    setWindowIcon(QIcon(":/toolicon/32x32/cubic_bezier.png"));
+
+    // Set the position that the dialog opens based on user preference.
+    setDialogPosition();
+
+    initializeOkCancelApply(ui);
+
+    fillComboBoxPoints(ui->comboBoxP1);
+    fillComboBoxPoints(ui->comboBoxP2);
+    fillComboBoxPoints(ui->comboBoxP3);
+    fillComboBoxPoints(ui->comboBoxP4);
+
+    int index = ui->lineType_ComboBox->findData(LineTypeNone);
+    if (index != -1)
+    {
+        ui->lineType_ComboBox->removeItem(index);
+    }
+
+    index = ui->lineColor_ComboBox->findData(qApp->getCurrentDocument()->getDefaultLineColor());
+    if (index != -1)
+    {
+        ui->lineColor_ComboBox->setCurrentIndex(index);
+    }
+
+    index = ui->lineWeight_ComboBox->findData(qApp->getCurrentDocument()->getDefaultLineWeight());
+    if (index != -1)
+    {
+        ui->lineWeight_ComboBox->setCurrentIndex(index);
+    }
+
+    index = ui->lineType_ComboBox->findData(qApp->getCurrentDocument()->getDefaultLineType());
+    if (index != -1)
+    {
+        ui->lineType_ComboBox->setCurrentIndex(index);
+    }
+
+    CheckState();
+
+    connect(ui->comboBoxP1, &QComboBox::currentTextChanged, this, &DialogCubicBezier::PointNameChanged);
+    connect(ui->comboBoxP2, &QComboBox::currentTextChanged, this, &DialogCubicBezier::PointNameChanged);
+    connect(ui->comboBoxP3, &QComboBox::currentTextChanged, this, &DialogCubicBezier::PointNameChanged);
+    connect(ui->comboBoxP4, &QComboBox::currentTextChanged, this, &DialogCubicBezier::PointNameChanged);
+
+    connect(ui->toolButtonExprCurveLength, &QPushButton::clicked, this, &DialogCubicBezier::FXCurveLength);
+    connect(timerCurveLength, &QTimer::timeout, this, &DialogCubicBezier::EvalCurveLength);
+    connect(ui->comboBoxLengthMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &DialogCubicBezier::updateCurveLengthEnabled);
+    connect(ui->plainTextEditCurveLength, &QPlainTextEdit::textChanged, this, &DialogCubicBezier::CurveLengthChanged);
+    updateCurveLengthEnabled();
+
+    vis = new VisToolCubicBezier(data);
+
+    ui->plainTextEditCurveLength->setFocus();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+DialogCubicBezier::~DialogCubicBezier()
+{
+    delete ui;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+VCubicBezier DialogCubicBezier::GetSpline() const
+{
+    return spl;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+bool DialogCubicBezier::GetAutoSmooth() const
+{
+    return ui->comboBoxAutoSmooth->currentIndex() == 1;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::SetAutoSmooth(bool value)
+{
+    ui->comboBoxAutoSmooth->setCurrentIndex(value ? 1 : 0);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+int DialogCubicBezier::GetLengthMode() const
+{
+    return ui->comboBoxLengthMode->currentIndex();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::SetLengthMode(int value)
+{
+    ui->comboBoxLengthMode->setCurrentIndex(value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString DialogCubicBezier::GetTargetLength() const
+{
+    return ui->plainTextEditCurveLength->toPlainText().trimmed();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::SetTargetLength(const QString &formula)
+{
+    if (formula.isEmpty())
+    {
+        return;
+    }
+    const QString f = qApp->translateVariables()->FormulaToUser(formula, qApp->Settings()->getOsSeparator());
+    ui->plainTextEditCurveLength->blockSignals(true);
+    ui->plainTextEditCurveLength->setPlainText(f);
+    ui->plainTextEditCurveLength->blockSignals(false);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::FXCurveLength()
+{
+    auto dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit curve length"));
+    QString lengthF = qApp->translateVariables()->TryFormulaFromUser(ui->plainTextEditCurveLength->toPlainText(),
+                                                         qApp->Settings()->getOsSeparator());
+    dialog->SetFormula(lengthF);
+    dialog->setPostfix(UnitsToStr(qApp->patternUnit(), true));
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        lengthF = qApp->translateVariables()->FormulaToUser(dialog->GetFormula(), qApp->Settings()->getOsSeparator());
+        ui->plainTextEditCurveLength->setPlainText(lengthF);
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::CheckState()
+{
+    SCASSERT(ok_Button != nullptr)
+    ok_Button->setEnabled(flagCurveLength && flagError);
+    if (apply_Button != nullptr)
+    {
+        apply_Button->setEnabled(ok_Button->isEnabled());
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::CurveLengthChanged()
+{
+    if (ui->comboBoxLengthMode->currentIndex() == 0)
+    {
+        ui->comboBoxLengthMode->setCurrentIndex(3);
+    }
+    labelEditFormula = ui->labelEditCurveLength;
+    labelResultCalculation = ui->labelResultCurveLength;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    formulaValueChanged(flagCurveLength, ui->plainTextEditCurveLength, timerCurveLength, postfix);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::EvalCurveLength()
+{
+    labelEditFormula = ui->labelEditCurveLength;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    const qreal length = Eval(ui->plainTextEditCurveLength->toPlainText(), flagCurveLength,
+                              ui->labelResultCurveLength, postfix, false);
+
+    if (length < 0)
+    {
+        flagCurveLength = false;
+        ChangeColor(labelEditFormula, Qt::red);
+        ui->labelResultCurveLength->setText(tr("Error") + " (" + postfix + ")");
+        ui->labelResultCurveLength->setToolTip(tr("Length can't be negative"));
+
+        DialogCubicBezier::CheckState();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::updateCurveLengthEnabled()
+{
+    if (ui->comboBoxLengthMode->currentIndex() == 0
+        && ui->plainTextEditCurveLength->toPlainText().trimmed().isEmpty())
+    {
+        flagCurveLength = true;
+    }
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::SetSpline(const VCubicBezier &spline)
+{
+    spl = spline;
+
+    setCurrentPointId(ui->comboBoxP1, spl.GetP1().id());
+    setCurrentPointId(ui->comboBoxP2, spl.GetP2().id());
+    setCurrentPointId(ui->comboBoxP3, spl.GetP3().id());
+    setCurrentPointId(ui->comboBoxP4, spl.GetP4().id());
+
+    ui->lineEditSplineName->setText(qApp->translateVariables()->VarToUser(spl.name()));
+
+    const QString curLen = QString::number(qApp->fromPixel(spl.GetLength()));
+    const QString unit = UnitsToStr(qApp->patternUnit(), true);
+    ui->plainTextEditCurveLength->blockSignals(true);
+    ui->plainTextEditCurveLength->setPlainText(curLen);
+    ui->plainTextEditCurveLength->blockSignals(false);
+    ui->labelResultCurveLength->setText(curLen + QLatin1Char(' ') + unit);
+
+    auto path = qobject_cast<VisToolCubicBezier *>(vis);
+    SCASSERT(path != nullptr)
+
+    path->setObject1Id(spl.GetP1().id());
+    path->setObject2Id(spl.GetP2().id());
+    path->setObject3Id(spl.GetP3().id());
+    path->setObject4Id(spl.GetP4().id());
+    path->setShowPoints(static_cast<QPointF>(spl.GetP1()),
+                        static_cast<QPointF>(spl.GetP2()),
+                        static_cast<QPointF>(spl.GetP3()),
+                        static_cast<QPointF>(spl.GetP4()));
+    path->SetMode(Mode::Show);
+
+    m_computedSpl = spline;
+    m_hasComputedSpl = true;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString DialogCubicBezier::getPenStyle() const
+{
+    return getComboBoxCurrentData(ui->lineType_ComboBox, LineTypeSolidLine);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::setPenStyle(const QString &value)
+{
+    changeCurrentData(ui->lineType_ComboBox, value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief getLineWeight return weight of the lines
+ * @return type
+ */
+QString DialogCubicBezier::getLineWeight() const
+{
+        return getComboBoxCurrentData(ui->lineWeight_ComboBox, DefaultLineWeight);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief setLineWeight set weight of the lines
+ * @param value type
+ */
+void DialogCubicBezier::setLineWeight(const QString &value)
+{
+    changeCurrentData(ui->lineWeight_ComboBox, value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString DialogCubicBezier::getLineColor() const
+{
+    return getComboBoxCurrentData(ui->lineColor_ComboBox, ColorBlack);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::setLineColor(const QString &value)
+{
+    changeCurrentData(ui->lineColor_ComboBox, value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::ChosenObject(quint32 id, const SceneObject &type)
+{
+    if (prepare == false)// After first choose we ignore all objects
+    {
+        if (type == SceneObject::Point)
+        {
+            auto *path = qobject_cast<VisToolCubicBezier *>(vis);
+            SCASSERT(path != nullptr)
+
+            switch (number)
+            {
+                case 0:
+                    if (SetObject(id, ui->comboBoxP1, tr("Select the second point of curve")))
+                    {
+                        ++number;
+                        path->VisualMode(id);
+                    }
+                    break;
+                case 1:
+                    if (SetObject(id, ui->comboBoxP2, tr("Select the third point of curve")))
+                    {
+                        ++number;
+
+                        path->setObject2Id(id);
+                        path->RefreshGeometry();
+                    }
+                    break;
+                case 2:
+                    if (SetObject(id, ui->comboBoxP3, tr("Select the fourth point of curve")))
+                    {
+                        ++number;
+
+                        path->setObject3Id(id);
+                        path->RefreshGeometry();
+                    }
+                    break;
+                case 3:
+                    if (getCurrentObjectId(ui->comboBoxP1) != id)
+                    {
+                        if (SetObject(id, ui->comboBoxP4, ""))
+                        {
+                            ++number;
+
+                            path->setObject4Id(id);
+                            path->RefreshGeometry();
+                            prepare = true;
+                            DialogAccepted();
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::PointNameChanged()
+{
+    QColor color = okColor;
+    if (getCurrentObjectId(ui->comboBoxP1) == getCurrentObjectId(ui->comboBoxP4))
+    {
+        flagError = false;
+        color = errorColor;
+
+        ui->lineEditSplineName->setText(tr("Invalid spline"));
+    }
+    else
+    {
+        flagError = true;
+        color = okColor;
+
+        if (getCurrentObjectId(ui->comboBoxP1) == spl.GetP1().id() &&
+            getCurrentObjectId(ui->comboBoxP4) == spl.GetP4().id())
+        {
+            newDuplicate = -1;
+            ui->lineEditSplineName->setText(qApp->translateVariables()->VarToUser(spl.name()));
+        }
+        else
+        {
+            VCubicBezier spline(*GetP1(), *GetP2(), *GetP3(), *GetP4());
+
+            if (not data->IsUnique(spline.name()))
+            {
+                newDuplicate = static_cast<qint32>(DNumber(spline.name()));
+                spline.SetDuplicate(static_cast<quint32>(newDuplicate));
+            }
+            ui->lineEditSplineName->setText(qApp->translateVariables()->VarToUser(spline.name()));
+        }
+    }
+    ChangeColor(ui->labelName, color);
+    ChangeColor(ui->labelFirstPoint, color);
+    ChangeColor(ui->labelSecondPoint, color);
+    ChangeColor(ui->labelThirdPoint, color);
+    ChangeColor(ui->labelForthPoint, color);
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::ShowVisualization()
+{
+    AddVisualization<VisToolCubicBezier>();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogCubicBezier::SaveData()
+{
+    const auto p1 = GetP1();
+    const auto p2 = GetP2();
+    const auto p3 = GetP3();
+    const auto p4 = GetP4();
+
+    spl = VCubicBezier(*p1, *p2, *p3, *p4);
+
+    const quint32 d = spl.GetDuplicate();//Save previous value
+    newDuplicate <= -1 ? spl.SetDuplicate(d) : spl.SetDuplicate(static_cast<quint32>(newDuplicate));
+
+    auto path = qobject_cast<VisToolCubicBezier *>(vis);
+    SCASSERT(path != nullptr)
+
+    path->setObject1Id(p1->id());
+    path->setObject2Id(p2->id());
+    path->setObject3Id(p3->id());
+    path->setObject4Id(p4->id());
+
+    // Preview the final geometry: the Hobby-computed spline when auto-smooth is on,
+    // otherwise the spline built directly from the selected canvas points.
+    const VCubicBezier &preview = (GetAutoSmooth() && m_hasComputedSpl) ? m_computedSpl : spl;
+    path->setShowPoints(static_cast<QPointF>(preview.GetP1()),
+                        static_cast<QPointF>(preview.GetP2()),
+                        static_cast<QPointF>(preview.GetP3()),
+                        static_cast<QPointF>(preview.GetP4()));
+    path->SetMode(Mode::Show);
+    path->RefreshGeometry();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+const QSharedPointer<VPointF> DialogCubicBezier::GetP1() const
+{
+    return data->GeometricObject<VPointF>(getCurrentObjectId(ui->comboBoxP1));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+const QSharedPointer<VPointF> DialogCubicBezier::GetP2() const
+{
+    return data->GeometricObject<VPointF>(getCurrentObjectId(ui->comboBoxP2));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+const QSharedPointer<VPointF> DialogCubicBezier::GetP3() const
+{
+    return data->GeometricObject<VPointF>(getCurrentObjectId(ui->comboBoxP3));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+const QSharedPointer<VPointF> DialogCubicBezier::GetP4() const
+{
+    return data->GeometricObject<VPointF>(getCurrentObjectId(ui->comboBoxP4));
+}

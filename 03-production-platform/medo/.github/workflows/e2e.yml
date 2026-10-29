@@ -1,0 +1,375 @@
+name: E2E (admin UI)
+
+# Browser-level verification of admin UI extensions (Playwright, headless
+# Chromium). Boots a real `medusa develop` server against a fresh Postgres,
+# seeds demo commerce infra + a fixture admin/order, then drives the admin.
+# Kept as its own workflow (separate from Test and Release) so the heavier
+# browser run can be gated to the paths that actually affect admin UI.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'apps/backend/src/admin/**'
+      # The graph spines RENDER INTO ADMIN PAGES, so a change here can break an
+      # admin spec while touching nothing under src/admin. #2205 changed them
+      # and ran NO e2e at all; #2199 broke an admin spec and was caught only
+      # because it happened to also touch src/admin/**.
+      - 'apps/backend/src/lib/graph/**'
+      - 'apps/backend/src/scripts/seed.ts'
+      # #2264 — work orders are READ by partner-ui and redirected by the admin
+      # through these, none of which live under src/admin. Without them a PR
+      # that changes what a partner's order page receives runs no browser test.
+      - 'apps/backend/src/lib/work-orders/**'
+      - 'apps/backend/src/api/admin/orders/**'
+      - 'apps/backend/src/api/partners/orders/**'
+      - 'apps/backend/src/workflows/orders/**'
+      - 'apps/partner-ui/src/routes/orders/**'
+      - 'apps/partner-ui/src/components/work-orders/**'
+      # A dependency bump (a Medusa upgrade above all) changes every screen
+      # at once; without these the upgrade PR ran no browser test.
+      - 'pnpm-lock.yaml'
+      - 'apps/backend/package.json'
+      - 'apps/partner-ui/package.json'
+      - 'apps/backend/src/api/middlewares.ts'
+      - 'e2e/**'
+      - '.github/workflows/e2e.yml'
+  pull_request:
+  # 🔴 NO `branches:` filter, deliberately.
+  #
+  # This used to read `branches: [ main ]`, which meant a PR based on another
+  # PR's branch — a stack — triggered NOTHING. #2095 and #2097 sat with zero
+  # check runs, and `gh pr checks` reported them CLEAN, because an empty check
+  # list is indistinguishable from a passing one. Two PRs came within one
+  # command of merging completely untested.
+  #
+  # Retargeting a stacked PR to main does NOT rescue it either: `pull_request`
+  # fires on opened/synchronize/reopened, and changing the base is `edited`.
+  #
+  # The `paths:` filter below is what keeps the cost down; the branch filter
+  # was only ever excluding work that most needed checking.
+    paths:
+      - 'apps/backend/src/admin/**'
+      # The graph spines RENDER INTO ADMIN PAGES, so a change here can break an
+      # admin spec while touching nothing under src/admin. #2205 changed them
+      # and ran NO e2e at all; #2199 broke an admin spec and was caught only
+      # because it happened to also touch src/admin/**.
+      - 'apps/backend/src/lib/graph/**'
+      - 'apps/backend/src/scripts/seed.ts'
+      # #2264 — work orders are READ by partner-ui and redirected by the admin
+      # through these, none of which live under src/admin. Without them a PR
+      # that changes what a partner's order page receives runs no browser test.
+      - 'apps/backend/src/lib/work-orders/**'
+      - 'apps/backend/src/api/admin/orders/**'
+      - 'apps/backend/src/api/partners/orders/**'
+      - 'apps/backend/src/workflows/orders/**'
+      - 'apps/partner-ui/src/routes/orders/**'
+      - 'apps/partner-ui/src/components/work-orders/**'
+      # A dependency bump (a Medusa upgrade above all) changes every screen
+      # at once; without these the upgrade PR ran no browser test.
+      - 'pnpm-lock.yaml'
+      - 'apps/backend/package.json'
+      - 'apps/partner-ui/package.json'
+      - 'apps/backend/src/api/middlewares.ts'
+      - 'e2e/**'
+      - '.github/workflows/e2e.yml'
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:latest
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      # No REDIS_URL → the backend falls back to an in-memory (fake) redis, the
+      # same path the seed uses locally. A single-worker e2e needs no real bus.
+      DATABASE_URL: postgresql://runner@localhost:5432/postgres
+      POSTGRES_USER: runner
+      POSTGRES_PASSWORD: runner
+      # The CRM is a Hyperbee node, not Postgres. Without this the module is
+      # not registered at all and the CRM screens render an empty state — which
+      # a spec would pass against. The embedded store is single-writer and
+      # dev-only, which is exactly what a single-worker e2e is.
+      CRM_HYPERBEE: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Workspace plugins ship built output under .medusa/; the backend can't
+      # boot until they're built (mirrors the Test and Release workflow).
+      - name: Build workspace plugins
+        run: pnpm --filter "@jytextiles/medusa-plugin-etsy-sync" build
+
+      - name: Setup database user
+        run: |
+          psql -h localhost -U postgres -d postgres -c "CREATE USER runner SUPERUSER CREATEDB CREATEROLE;"
+          psql -h localhost -U postgres -d postgres -c "GRANT ALL PRIVILEGES ON DATABASE postgres TO runner;"
+
+      - name: Create backend env file
+        run: |
+          # Written to BOTH .env and .env.test so every entrypoint finds config
+          # whether it resolves NODE_ENV=test (medusa exec / integration) or
+          # development (medusa develop).
+          cat << 'EOF' > apps/backend/.env.test
+          DATABASE_TYPE=postgres
+          DATABASE_URL=postgresql://runner@localhost:5432/postgres
+          JWT_SECRET=secret
+          COOKIE_SECRET=secret
+          ADMIN_CORS=http://localhost:9000
+          STORE_CORS=http://localhost:9000
+          # The partner UI runs on :5173 and calls this backend cross-origin.
+          # PARTNER_CORS is what createCorsPartnerMiddleware reads first;
+          # AUTH_CORS has to admit :5173 too or partner LOGIN is blocked before
+          # any /partners route is reached.
+          AUTH_CORS=http://localhost:9000,http://localhost:5173
+          PARTNER_CORS=http://localhost:5173
+          NODE_ENV=test
+          ENCRYPTION_KEY=bPH59JuZDRQULLeDD62+NiwqwcChpOLN/j7aqu3A+Hw=
+          EOF
+          cp apps/backend/.env.test apps/backend/.env
+
+      - name: Run migrations
+        working-directory: apps/backend
+        run: pnpm exec medusa db:migrate --execute-safe-links
+
+      # Demo commerce infra (region / sales channel / manual shipping option /
+      # products) the e2e order fixture depends on. e2e:seed throws a clear
+      # error if this hasn't run first.
+      - name: Seed demo commerce data
+        working-directory: apps/backend
+        run: pnpm run seed
+
+      - name: Install Playwright browser
+        working-directory: apps/backend
+        run: pnpm exec playwright install --with-deps chromium
+
+      # e2e:seed (fixture admin + order) then e2e:test (Playwright boots
+      # `medusa develop` on :9000 and drives the admin headlessly).
+      # `apps/partner-ui` has no e2e coverage on CI at all: the Playwright
+      # config excludes @partnerui because nothing served :5173. So partner
+      # specs were written, committed, and never executed — the #1571 spec
+      # included, on the very PR that added it.
+      #
+      # Booting the dev server here is what makes those specs real. Vite's
+      # default VITE_MEDUSA_BACKEND_URL is already http://localhost:9000, which
+      # is where Playwright's webServer puts the backend.
+      # 🔴 apps/partner-ui/.env is GITIGNORED, so it does not exist on CI — and
+      # vite.config.mts defaults VITE_MEDUSA_ADMIN_AUTH_TYPE to "session" when
+      # it is absent. `client.ts` reads that as `__AUTH_TYPE__ ?? "jwt"`, and
+      # `??` does NOT fire on the string "session", so the SDK stops sending
+      # `Authorization: Bearer …` and relies on cross-origin cookies instead.
+      #
+      # The failure that produces is genuinely nasty to read: login SUCCEEDS and
+      # the token lands in localStorage (the storage key falls back to the right
+      # value via `||`), so the specs sail through beforeEach — then every data
+      # call 401s and each screen renders its empty state. Two independent specs
+      # failed as "element not found", pointing at the assertions rather than at
+      # auth.
+      - name: Create partner UI env file
+        run: |
+          cat << 'EOF' > apps/partner-ui/.env
+          VITE_MEDUSA_ADMIN_AUTH_TYPE=jwt
+          VITE_MEDUSA_ADMIN_JWT_TOKEN_STORAGE_KEY=partner_ui_auth_token
+          VITE_MEDUSA_BACKEND_URL=http://localhost:9000
+          EOF
+
+      - name: Start partner UI
+        run: pnpm --filter @jyt/partner-ui dev --host 127.0.0.1 --port 5173 &
+
+      - name: Wait for partner UI
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:5173 > /dev/null; then
+              echo "partner UI up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::partner UI did not come up on :5173 within 60s"
+          exit 1
+
+      - name: Run e2e
+        working-directory: apps/backend
+        # PARTNER_UI opts the @partnerui specs back in — see playwright.config.ts.
+        #
+        # SHIPROCKET_STUB injects the deterministic transport into the backend
+        # this step boots (#1576). Without it the carrier-modal specs call the
+        # LIVE Shiprocket API: `shiprocket-attach-awb` validates the waybill via
+        # `provider.track()` and throws, so those cases could not pass here
+        # whatever the selectors said. Scoped to this step rather than the job,
+        # so nothing else silently acquires a fake carrier.
+        env:
+          PARTNER_UI: "1"
+          SHIPROCKET_STUB: "1"
+          # 🔴 The stub flag ALONE is not enough. `resolveShippingProvider`
+          # reads credentials and THROWS "Shiprocket credentials not
+          # configured" before it ever looks at SHIPROCKET_STUB — so the attach
+          # 500s and the stub never gets a chance. These are placeholders; the
+          # stub's /auth/login returns a token without validating them. Same
+          # pairing the integration specs use (retail-order-international-
+          # shiprocket.spec.ts sets all three).
+          SHIPROCKET_EMAIL: "e2e@shiprocket.example"
+          SHIPROCKET_PASSWORD: "e2e-stub-secret"
+        run: pnpm run e2e
+
+      # #2264 — the work-order specs AGAIN, with reads served from `work_order`
+      # (WORK_ORDER_READS=true), the state prod moves to when the flag flips.
+      # The step above ran them with the flag OFF — what prod serves today — so
+      # both sources are exercised on every run.
+      #
+      # No re-seed: the @workorders fixture is read-only. Playwright boots a
+      # fresh `medusa develop` for this invocation and it inherits this step's
+      # env, and the spec reads the same variable to assert WHICH source
+      # answered (sales_channel_id is null only when work_order served it), so
+      # a flag that silently did not reach the server fails rather than passes.
+      #
+      # `!cancelled()`: a red suite above must not hide this result.
+      - name: Run e2e — work orders read from work_order
+        if: ${{ !cancelled() }}
+        working-directory: apps/backend
+        env:
+          PARTNER_UI: "1"
+          WORK_ORDER_READS: "true"
+        run: pnpm run e2e:test --grep @workorders
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # Make a red e2e VISIBLE (#1963).
+  #
+  # This suite was red on every run on `main` from 2026-09-04 to 2026-09-10 —
+  # the same 9 failures, ~40 runs — and nobody was told. Three of those specs
+  # were marked 🔑 by their own authors and two turned out to be real production
+  # defects. Nothing gated on the check and nothing reported it, so the only way
+  # to learn it was red was to go and look.
+  #
+  # Deliberately a NOTIFIER, not a gate: `main` has no branch protection and
+  # adding a required check here would also block direct pushes. This opens or
+  # updates ONE sticky issue instead, so a week of redness cannot pass quietly.
+  #
+  # Sticky by design — it reuses the single open issue carrying the marker
+  # below rather than filing one per run, which is how this kind of job turns
+  # into noise that gets muted.
+  # ===========================================================================
+  notify-on-red:
+    needs: e2e
+    # Only `main`, and only a genuine failure. `cancelled()` is excluded on
+    # purpose: this workflow's own concurrency group cancels superseded runs,
+    # and reporting those as breakage is how a notifier loses its credibility.
+    if: ${{ failure() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the sticky "e2e is red" issue
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        with:
+          script: |
+            const MARKER = '<!-- e2e-red-sticky -->'
+            const TITLE = '🔴 E2E (admin UI) is red on main'
+            const { owner, repo } = context.repo
+            const runUrl = process.env.RUN_URL
+            const sha = (process.env.SHA || '').slice(0, 9)
+
+            // Find the sticky by TITLE + marker, with no label filter.
+            // Deliberately label-free: this repo has no `ci` label, and
+            // `issues.create` 422s on a label that does not exist — which would
+            // leave the notifier silently unable to notify, the exact failure
+            // this job exists to prevent. Titles we control; labels we do not.
+            const existing = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            )
+            const sticky = existing.find(
+              (i) => !i.pull_request && i.title === TITLE && (i.body || '').includes(MARKER)
+            )
+
+            const line = `- 🔴 \`${sha}\` failed — [run](${runUrl})`
+
+            if (sticky) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: sticky.number,
+                body: `${line}\n\nStill red. This is the same sticky issue, not a new one.`,
+              })
+              core.notice(`Updated sticky issue #${sticky.number}`)
+              return
+            }
+
+            const body = [
+              MARKER,
+              '## `E2E (admin UI)` is red on `main`',
+              '',
+              line,
+              '',
+              'This issue is **sticky**: while the suite stays red, each failing run on',
+              '`main` adds a comment here instead of filing a new issue. Close it once',
+              '`main` is green again — the next failure will open a fresh one.',
+              '',
+              '### Why this exists',
+              '',
+              'This suite was red on ~40 consecutive runs on `main` (2026-09-04 →',
+              '2026-09-10) with the same 9 failures and nobody was told. Two of those',
+              'turned out to be real production defects and one an operator dead-end',
+              '(#1963, fixed in #1964). Nothing gates on this check, so silence was',
+              'indistinguishable from success.',
+              '',
+              '### What to do',
+              '',
+              '1. Open the run above and read the **totals line**, not just the `●`',
+              '   assertion blocks — a spec\'s own diagnostic output (e.g. a printed',
+              '   response body) often sits thousands of lines earlier in the log.',
+              '2. A developer machine cannot reproduce CI by default: it may hold',
+              '   credentials CI lacks. Clear those and make a control fail first.',
+              '3. CI sets `PARTNER_UI=1` and boots :5173, so it runs a different spec',
+              '   population than a bare local run.',
+            ].join('\n')
+
+            const created = await github.rest.issues.create({
+              owner, repo, title: TITLE, body,
+            })
+            core.notice(`Opened sticky issue #${created.data.number}`)

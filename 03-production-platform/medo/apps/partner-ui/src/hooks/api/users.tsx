@@ -1,0 +1,300 @@
+import { FetchError } from "@medusajs/js-sdk"
+import { HttpTypes } from "@medusajs/types"
+import {
+  QueryKey,
+  UseMutationOptions,
+  UseQueryOptions,
+  useMutation,
+  useQuery,
+} from "@tanstack/react-query"
+import { sdk } from "../../lib/client"
+import { queryClient } from "../../lib/query-client"
+import { queryKeysFactory } from "../../lib/query-key-factory"
+
+const USERS_QUERY_KEY = "users" as const
+const usersQueryKeys = {
+  ...queryKeysFactory(USERS_QUERY_KEY),
+  me: () => [USERS_QUERY_KEY, "me"],
+  // Under "me" so a profile save (which may change the phone) refreshes it.
+  phonePin: () => [USERS_QUERY_KEY, "me", "phone-pin"],
+}
+
+export type PartnerAdmin = {
+  id: string
+  first_name?: string | null
+  last_name?: string | null
+  email?: string | null
+  phone?: string | null
+  role?: string | null
+  preferred_language?: string | null
+  metadata?: Record<string, any> | null
+}
+
+type PartnerDetails = {
+  id: string
+  name?: string | null
+  handle?: string | null
+  logo?: string | null
+  status?: string | null
+  is_verified?: boolean | null
+  metadata?: Record<string, any> | null
+  admins?: PartnerAdmin[] | null
+}
+
+type PartnerDetailsResponse = {
+  partner?: PartnerDetails | null
+  current_admin_id?: string | null
+}
+
+export type PartnerUser = PartnerAdmin & {
+  partner_id: string
+  partner?: PartnerDetails
+}
+
+export type PartnerUserResponse = {
+  user: PartnerUser | null
+}
+
+const fetchPartnerUser = async (): Promise<PartnerUserResponse> => {
+  const response = await sdk.client.fetch<PartnerDetailsResponse>(
+    "/partners/details",
+    {
+      method: "GET",
+    }
+  )
+  return mapPartnerResponseToUser(response)
+}
+
+const mapPartnerResponseToUser = (
+  response: PartnerDetailsResponse
+): PartnerUserResponse => {
+  const partner = response.partner
+  const currentAdminId = response.current_admin_id
+
+  if (!partner) {
+    return { user: null }
+  }
+
+  const admins = Array.isArray(partner.admins)
+    ? partner.admins.filter((admin): admin is PartnerAdmin => Boolean(admin))
+    : []
+
+  // Pick the currently logged-in admin, fall back to owner, then first admin
+  const currentAdmin = currentAdminId
+    ? admins.find((admin) => admin.id === currentAdminId)
+    : null
+  const resolvedAdmin =
+    currentAdmin ??
+    admins.find((admin) => admin.role === "owner") ??
+    admins[0] ??
+    null
+
+  if (!resolvedAdmin) {
+    return {
+      user: {
+        id: partner.id,
+        first_name: partner.name ?? undefined,
+        last_name: undefined,
+        email:
+          (partner.metadata as Record<string, any> | undefined)?.contact_email ??
+          undefined,
+        metadata: partner.metadata ?? undefined,
+        partner_id: partner.id,
+        partner,
+      },
+    }
+  }
+
+  return {
+    user: {
+      ...resolvedAdmin,
+      partner_id: partner.id,
+      partner,
+    },
+  }
+}
+
+export const useMe = (
+  // The hook owns queryKey/queryFn; callers only tune behaviour (enabled, retry).
+  options?: Omit<
+    UseQueryOptions<PartnerUserResponse, FetchError, PartnerUserResponse, QueryKey>,
+    "queryKey" | "queryFn"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: fetchPartnerUser,
+    queryKey: usersQueryKeys.me(),
+    ...options,
+  })
+
+  return {
+    ...data,
+    user: data?.user ?? null,
+    ...rest,
+  }
+}
+
+export const useUser = (
+  id: string,
+  query?: HttpTypes.AdminUserParams,
+  options?: Omit<
+    UseQueryOptions<
+      HttpTypes.AdminUserResponse,
+      FetchError,
+      HttpTypes.AdminUserResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: () => sdk.admin.user.retrieve(id, query),
+    queryKey: usersQueryKeys.detail(id),
+    ...options,
+  })
+
+  return { ...data, ...rest }
+}
+
+export const useUsers = (
+  query?: HttpTypes.AdminUserListParams,
+  options?: Omit<
+    UseQueryOptions<
+      HttpTypes.AdminUserListResponse,
+      FetchError,
+      HttpTypes.AdminUserListResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: () => sdk.admin.user.list(query),
+    queryKey: usersQueryKeys.list(query),
+    ...options,
+  })
+
+  return { ...data, ...rest }
+}
+
+export const useUpdateUser = (
+  id: string,
+  query?: HttpTypes.AdminUserParams,
+  options?: UseMutationOptions<
+    HttpTypes.AdminUserResponse,
+    FetchError,
+    HttpTypes.AdminUpdateUser,
+    QueryKey
+  >
+) => {
+  return useMutation({
+    mutationFn: (payload) => sdk.admin.user.update(id, payload, query),
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: usersQueryKeys.detail(id) })
+      queryClient.invalidateQueries({ queryKey: usersQueryKeys.lists() })
+
+      // We invalidate the me query in case the user updates their own profile
+      queryClient.invalidateQueries({ queryKey: usersQueryKeys.me() })
+
+      options?.onSuccess?.(...args)
+    },
+    ...options,
+  })
+}
+
+export type UpdateMePayload = {
+  first_name?: string | null
+  last_name?: string | null
+  phone?: string | null
+  preferred_language?: string | null
+}
+
+type UpdateMeResponse = {
+  admin: PartnerAdmin
+}
+
+export const useUpdateMe = (
+  options?: UseMutationOptions<
+    UpdateMeResponse,
+    FetchError,
+    UpdateMePayload
+  >
+) => {
+  return useMutation({
+    mutationFn: (payload) =>
+      sdk.client.fetch<UpdateMeResponse>("/partners/me", {
+        method: "PATCH",
+        body: payload,
+      }),
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: usersQueryKeys.me() })
+      options?.onSuccess?.(...args)
+    },
+    ...options,
+  })
+}
+
+export const useDeleteUser = (
+  id: string,
+  options?: UseMutationOptions<
+    HttpTypes.AdminUserDeleteResponse,
+    FetchError,
+    void
+  >
+) => {
+  return useMutation({
+    mutationFn: () => sdk.admin.user.delete(id),
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: usersQueryKeys.detail(id) })
+      queryClient.invalidateQueries({ queryKey: usersQueryKeys.lists() })
+
+      // We invalidate the me query in case the user updates their own profile
+      queryClient.invalidateQueries({ queryKey: usersQueryKeys.me() })
+
+      options?.onSuccess?.(...args)
+    },
+    ...options,
+  })
+}
+
+/** Phone login (#2320): the number it uses and whether a PIN is set. */
+export type PhonePinStatus = {
+  phone: string | null
+  pin_set: boolean
+  pin_set_at: string | null
+}
+
+export const usePhonePinStatus = (
+  options?: Omit<
+    UseQueryOptions<PhonePinStatus, FetchError, PhonePinStatus, QueryKey>,
+    "queryKey" | "queryFn"
+  >
+) => {
+  return useQuery({
+    queryFn: () =>
+      sdk.client.fetch<PhonePinStatus>("/partners/me/pin", { method: "GET" }),
+    queryKey: usersQueryKeys.phonePin(),
+    ...options,
+  })
+}
+
+export const useSetPhonePin = (
+  options?: UseMutationOptions<
+    { phone: string; pin_set: boolean },
+    FetchError,
+    { pin: string }
+  >
+) => {
+  return useMutation({
+    mutationFn: (payload) =>
+      sdk.client.fetch<{ phone: string; pin_set: boolean }>("/partners/me/pin", {
+        method: "POST",
+        body: payload,
+      }),
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({ queryKey: usersQueryKeys.phonePin() })
+      options?.onSuccess?.(...args)
+    },
+    ...options,
+  })
+}

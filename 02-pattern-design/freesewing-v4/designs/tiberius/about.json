@@ -1,0 +1,16 @@
+{
+  "id": "tiberius",
+  "name": "Tiberius tunica",
+  "code": "Rika Tamaike",
+  "description": "A FreeSewing pattern for a tunica, a historical Roman tunic",
+  "design": "Rika Tamaike",
+  "difficulty": 1,
+  "tags": [
+    "tops",
+    "historical"
+  ],
+  "techniques": [],
+  "version": "4.2.0",
+  "pkg": "@freesewing/tiberius",
+  "collection": true
+}

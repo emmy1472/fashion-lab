@@ -1,0 +1,258 @@
+import { zodResolver } from "@hookform/resolvers/zod"
+import { Button, Heading, Input, Select, Text, toast } from "@medusajs/ui"
+import { useForm } from "react-hook-form"
+import { useTranslation } from "react-i18next"
+import { z } from "zod"
+
+import { Form } from "../../../../components/common/form"
+import { RouteFocusModal } from "../../../../components/modals/route-focus-modal"
+import { KeyboundForm } from "../../../../components/utilities/keybound-form"
+import { useRouteModal } from "../../../../components/modals"
+import {
+  useCreatePaymentConfig,
+  type CreatePaymentConfigPayload,
+} from "../../../../hooks/api/payment-config"
+
+const CreatePaymentConfigSchema = z
+  .object({
+    provider_id: z.enum(["pp_payu_payu", "pp_stripe_stripe"]),
+    // PayU fields
+    merchant_key: z.string().optional(),
+    merchant_salt: z.string().optional(),
+    mode: z.enum(["test", "live"]).optional(),
+    // Stripe fields
+    api_key: z.string().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.provider_id === "pp_payu_payu") {
+      if (!data.merchant_key) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Merchant key is required for PayU",
+          path: ["merchant_key"],
+        })
+      }
+      if (!data.merchant_salt) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Merchant salt is required for PayU",
+          path: ["merchant_salt"],
+        })
+      }
+    }
+    if (data.provider_id === "pp_stripe_stripe") {
+      if (!data.api_key) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "API key is required for Stripe",
+          path: ["api_key"],
+        })
+      }
+    }
+  })
+
+type FormValues = z.infer<typeof CreatePaymentConfigSchema>
+
+export const PaymentConfigCreate = () => {
+  return (
+    <RouteFocusModal>
+      <PaymentConfigCreateForm />
+    </RouteFocusModal>
+  )
+}
+
+const PaymentConfigCreateForm = () => {
+  const { t } = useTranslation()
+  const { handleSuccess } = useRouteModal()
+  const { mutateAsync: createConfig, isPending } = useCreatePaymentConfig()
+
+  const form = useForm<FormValues>({
+    defaultValues: {
+      provider_id: "pp_stripe_stripe",
+      merchant_key: "",
+      merchant_salt: "",
+      mode: "test",
+      api_key: "",
+    },
+    resolver: zodResolver(CreatePaymentConfigSchema),
+  })
+
+  const selectedProvider = form.watch("provider_id")
+
+  const handleSubmit = form.handleSubmit(async (values) => {
+    let payload: CreatePaymentConfigPayload
+
+    if (values.provider_id === "pp_payu_payu") {
+      payload = {
+        provider_id: "pp_payu_payu",
+        credentials: {
+          merchant_key: values.merchant_key,
+          merchant_salt: values.merchant_salt,
+          mode: values.mode,
+        },
+        is_active: true,
+      }
+    } else {
+      payload = {
+        provider_id: "pp_stripe_stripe",
+        credentials: {
+          api_key: values.api_key,
+        },
+        is_active: true,
+      }
+    }
+
+    await createConfig(payload, {
+      onSuccess: () => {
+        toast.success(t("partner.paymentProviders.toast.saved"))
+        handleSuccess()
+      },
+      onError: (e) => {
+        toast.error(e.message || t("partner.paymentProviders.toast.saveFailed"))
+      },
+    })
+  })
+
+  return (
+    <RouteFocusModal.Form form={form}>
+      <KeyboundForm
+        onSubmit={handleSubmit}
+        className="flex h-full flex-col overflow-hidden"
+      >
+        <RouteFocusModal.Header />
+        <RouteFocusModal.Body className="flex flex-1 flex-col items-center overflow-y-auto">
+          <div className="flex w-full max-w-[720px] flex-col gap-y-8 px-2 py-16">
+            <div>
+              <Heading>{t("partner.paymentProviders.form.heading")}</Heading>
+              <Text size="small" className="text-ui-fg-subtle mt-1">
+                {t("partner.paymentProviders.form.description")}
+              </Text>
+            </div>
+
+            <Form.Field
+              control={form.control}
+              name="provider_id"
+              render={({ field: { onChange, ...field } }) => (
+                <Form.Item>
+                  <Form.Label>{t("partner.paymentProviders.form.provider")}</Form.Label>
+                  <Form.Control>
+                    <Select {...field} onValueChange={onChange}>
+                      <Select.Trigger ref={field.ref}>
+                        <Select.Value />
+                      </Select.Trigger>
+                      <Select.Content>
+                        <Select.Item value="pp_stripe_stripe">
+                          Stripe
+                        </Select.Item>
+                        <Select.Item value="pp_payu_payu">PayU</Select.Item>
+                      </Select.Content>
+                    </Select>
+                  </Form.Control>
+                  <Form.ErrorMessage />
+                </Form.Item>
+              )}
+            />
+
+            {selectedProvider === "pp_payu_payu" && (
+              <>
+                <Form.Field
+                  control={form.control}
+                  name="merchant_key"
+                  render={({ field }) => (
+                    <Form.Item>
+                      <Form.Label>{t("partner.paymentProviders.form.merchantKey")}</Form.Label>
+                      <Form.Control>
+                        <Input
+                          placeholder={t("partner.paymentProviders.form.merchantKeyPlaceholder")}
+                          {...field}
+                        />
+                      </Form.Control>
+                      <Form.ErrorMessage />
+                    </Form.Item>
+                  )}
+                />
+                <Form.Field
+                  control={form.control}
+                  name="merchant_salt"
+                  render={({ field }) => (
+                    <Form.Item>
+                      <Form.Label>{t("partner.paymentProviders.form.merchantSalt")}</Form.Label>
+                      <Form.Control>
+                        <Input
+                          type="password"
+                          placeholder={t("partner.paymentProviders.form.merchantSaltPlaceholder")}
+                          {...field}
+                        />
+                      </Form.Control>
+                      <Form.ErrorMessage />
+                    </Form.Item>
+                  )}
+                />
+                <Form.Field
+                  control={form.control}
+                  name="mode"
+                  render={({ field: { onChange, ...field } }) => (
+                    <Form.Item>
+                      <Form.Label>{t("partner.paymentProviders.form.mode")}</Form.Label>
+                      <Form.Control>
+                        <Select {...field} onValueChange={onChange}>
+                          <Select.Trigger ref={field.ref}>
+                            <Select.Value />
+                          </Select.Trigger>
+                          <Select.Content>
+                            <Select.Item value="test">
+                              {t("partner.paymentProviders.form.modeTest")}
+                            </Select.Item>
+                            <Select.Item value="live">
+                              {t("partner.paymentProviders.form.modeLive")}
+                            </Select.Item>
+                          </Select.Content>
+                        </Select>
+                      </Form.Control>
+                      <Form.ErrorMessage />
+                    </Form.Item>
+                  )}
+                />
+              </>
+            )}
+
+            {selectedProvider === "pp_stripe_stripe" && (
+              <Form.Field
+                control={form.control}
+                name="api_key"
+                render={({ field }) => (
+                  <Form.Item>
+                    <Form.Label>{t("partner.paymentProviders.form.stripeApiKey")}</Form.Label>
+                    <Form.Control>
+                      <Input
+                        type="password"
+                        placeholder={t("partner.paymentProviders.form.stripeApiKeyPlaceholder")}
+                        {...field}
+                      />
+                    </Form.Control>
+                    <Form.Hint>
+                      {t("partner.paymentProviders.form.stripeApiKeyHint")}
+                    </Form.Hint>
+                    <Form.ErrorMessage />
+                  </Form.Item>
+                )}
+              />
+            )}
+          </div>
+        </RouteFocusModal.Body>
+        <RouteFocusModal.Footer>
+          <div className="flex items-center justify-end gap-x-2">
+            <RouteFocusModal.Close asChild>
+              <Button size="small" variant="secondary">
+                {t("actions.cancel")}
+              </Button>
+            </RouteFocusModal.Close>
+            <Button size="small" type="submit" isLoading={isPending}>
+              {t("actions.save")}
+            </Button>
+          </div>
+        </RouteFocusModal.Footer>
+      </KeyboundForm>
+    </RouteFocusModal.Form>
+  )
+}

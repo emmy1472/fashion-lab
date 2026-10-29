@@ -1,0 +1,1024 @@
+import {
+  Badge,
+  Button,
+  CommandBar,
+  DataTable,
+  Heading,
+  ProgressStatus,
+  ProgressTabs,
+  Select,
+  Text,
+  createDataTableColumnHelper,
+  toast,
+  useDataTable,
+  type DataTablePaginationState,
+  type DataTableRowSelectionState,
+} from "@medusajs/ui"
+import { keepPreviousData } from "@tanstack/react-query"
+import { useEffect, useMemo, useState } from "react"
+import { useForm } from "react-hook-form"
+
+import { Combobox } from "../inputs/combobox/combobox"
+import { DataGrid } from "../data-grid/data-grid"
+import { DataGridCurrencyCell, DataGridReadOnlyCell } from "../data-grid/components"
+import { createDataGridHelper } from "../data-grid/helpers/create-data-grid-column-helper"
+import { KeyboundForm } from "../utilitites/key-bound-form"
+import { DesignOrderCreatedPanel, type CreatedDesignOrder } from "./design-order-created-panel"
+import { useDesignOrderCurrencies } from "../../hooks/api/designs"
+import {
+  useBuyerWithAddresses,
+  useCustomerSearch,
+} from "../../hooks/api/design-orders"
+import { RouteFocusModal } from "../modal/route-focus-modal"
+import { useRouteModal } from "../modal/use-route-modal"
+import { sdk } from "../../lib/config"
+import { useDesigns } from "../../hooks/api/designs"
+import {
+  buyerCountry,
+  suggestCurrencyForCountry,
+  designOrderCreateBody,
+  designOrderRoutes,
+  resolveDesignOrderTarget,
+  type DesignForOrder,
+} from "./design-order-draft"
+
+/**
+ * Start a design order — as a stepped RouteFocusModal.
+ *
+ * What this replaces: a plain `FocusModal` holding a hand-rolled checkbox list
+ * with its own search box and its own "load more". That list could not sort,
+ * filter, or tell you how many designs it was choosing from, and it was a
+ * second implementation of a table this admin already has.
+ *
+ * Now it is the platform's `DataTable` — table view, pagination, global search
+ * — with row selection surfaced through the `CommandBar`, the same shape the
+ * Designs list itself uses. Nothing about the BACKEND changes: it still calls
+ * `/admin/designs/draft-order{,/preview}` (or the customer twins) and still
+ * takes the who-is-this-for rule from `design-order-draft`, so an order started
+ * here and one started from the designs page remain the same object priced the
+ * same way.
+ *
+ * 🔑 Two steps, not three. The buyer is DERIVED from the chosen designs
+ * (`resolveDesignOrderTarget`) rather than picked — a design carries a customer
+ * only when it was made for somebody, and a cart on the WRONG buyer is worse
+ * than a cart on none. A design order with no buyer is ordinary (#1817); one
+ * is attached later on the detail page. Offering a buyer picker here would
+ * invite exactly the wrong-buyer mistake the rule exists to prevent.
+ */
+
+enum Step {
+  DESIGNS = "designs",
+  /**
+   * WHO is buying, in WHAT currency, and from WHERE.
+   *
+   * Its own step because these three decide each other and each one of them
+   * has cost us a real order: the currency fixes the region, the region fixes
+   * which countries may be picked, and the country is what makes the checkout
+   * link resolvable and the courier list correct. Stacked above the design
+   * table they read as decoration on a screen whose job is picking garments,
+   * and the country in particular was simply never asked.
+   */
+  BUYER = "buyer",
+  REVIEW = "review",
+  /**
+   * The links the create returned. A third step rather than a toast: the
+   * operator was previously told to "share the checkout link" and handed
+   * nothing, because both call sites discarded the response.
+   */
+  CREATED = "created",
+}
+
+type EstimateRow = {
+  design_id: string
+  name?: string | null
+  /** null when the design cannot be priced — NOT zero. See the grid below. */
+  total_estimated?: number | null
+  unit_price?: number | null
+  confidence?: string | null
+  material_cost?: number | null
+  production_cost?: number | null
+}
+
+type PreviewResponse = {
+  estimates: EstimateRow[]
+  currency_code: string
+  total: number
+  /** Designs the estimator could not price at all. */
+  unpriceable?: Array<{ design_id?: string; name?: string; reason?: string }> | string[]
+  /** False when `total` omits something — the total is then a PARTIAL sum. */
+  total_is_complete?: boolean
+}
+
+/**
+ * 10, matching every other picker table in this admin (link-design,
+ * send-to-partner, link-design-partner). A page that does not fit the modal
+ * is worse than a shorter one: the rows below the fold are invisible and the
+ * pagination sits under a list that looks complete.
+ */
+/** One editable review row. `price` is what the order will actually list. */
+type LineForm = {
+  design_id: string
+  name: string
+  /** What the estimator said. null when it could not price the design. */
+  estimated: number | null
+  confidence: string
+  /** Editable. Seeded from `estimated`; any change becomes a price override. */
+  price: number
+}
+
+type WizardForm = { lines: LineForm[] }
+
+const PAGE_SIZE = 10
+const columnHelper = createDataTableColumnHelper<any>()
+const gridHelper = createDataGridHelper<LineForm, WizardForm>()
+
+const money = (amount: number, currency: string) => {
+  const n = Number(amount)
+  if (!Number.isFinite(n)) return "—"
+  try {
+    return new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: (currency || "inr").toUpperCase(),
+      minimumFractionDigits: 2,
+    }).format(n)
+  } catch {
+    return `${n} ${(currency || "").toUpperCase()}`
+  }
+}
+
+/** A money cell that says "—" for absent rather than printing a zero. */
+const Money = ({ value, currency }: { value?: number | null; currency: string }) => (
+  <Text size="small" leading="compact" className="text-ui-fg-subtle">
+    {value == null || !Number.isFinite(Number(value)) ? "—" : money(Number(value), currency)}
+  </Text>
+)
+
+export const StartDesignOrderWizard = () => {
+  const { handleSuccess } = useRouteModal()
+
+  const [step, setStep] = useState<Step>(Step.DESIGNS)
+  const [search, setSearch] = useState("")
+  const [pagination, setPagination] = useState<DataTablePaginationState>({
+    pageIndex: 0,
+    pageSize: PAGE_SIZE,
+  })
+  const [rowSelection, setRowSelection] = useState<DataTableRowSelectionState>({})
+
+  const [isPreviewing, setIsPreviewing] = useState(false)
+  const [isCreating, setIsCreating] = useState(false)
+  const [preview, setPreview] = useState<PreviewResponse | null>(null)
+  const [created, setCreated] = useState<CreatedDesignOrder | null>(null)
+  /**
+   * Frozen at preview time. The basket stays editable behind the review step,
+   * so what the create button posts must be what was actually estimated —
+   * otherwise an operator prices one selection and creates another.
+   */
+  const [target, setTarget] = useState<{
+    customer_id: string | null
+    design_ids: string[]
+  } | null>(null)
+
+  const { designs, count, isLoading } = useDesigns(
+    {
+      limit: pagination.pageSize,
+      offset: pagination.pageIndex * pagination.pageSize,
+      ...(search ? { q: search } : {}),
+    } as any,
+    { placeholderData: keepPreviousData } as any
+  )
+
+  const rows = (designs ?? []) as any[]
+  const selectedIds = useMemo(
+    () => Object.keys(rowSelection).filter((id) => rowSelection[id]),
+    [rowSelection]
+  )
+
+  /**
+   * 🔴 Selected designs are accumulated across PAGES, not read off the current
+   * one. `rows.filter(selected)` loses every pick the moment the operator
+   * turns the page or types in the search box — and it loses them silently,
+   * because the CommandBar count comes from the selection state and would
+   * still say "3 selected" while only one survived into the order.
+   */
+  const [pickedById, setPickedById] = useState<Record<string, DesignForOrder>>({})
+  const onRowSelectionChange = (next: DataTableRowSelectionState) => {
+    setRowSelection(next)
+    setPickedById((prev) => {
+      const merged = { ...prev }
+      // Only rows on THIS page are reconciled; picks made on other pages are
+      // left alone, which is what makes the selection survive paging.
+      for (const row of rows) {
+        if (next[row.id]) {
+          merged[row.id] = { id: row.id, customer_id: row.customer_id ?? null }
+        } else {
+          delete merged[row.id]
+        }
+      }
+      return merged
+    })
+  }
+
+  const picked = useMemo(() => Object.values(pickedById), [pickedById])
+
+  const columns = useMemo(
+    () => [
+      columnHelper.select(),
+      columnHelper.accessor("name", {
+        header: "Design",
+        cell: ({ getValue }) => (
+          <Text size="small" leading="compact">
+            {getValue() as string}
+          </Text>
+        ),
+      }),
+      columnHelper.accessor("status", {
+        header: "Status",
+        cell: ({ getValue }) => (
+          <Badge size="2xsmall" color="grey">
+            {String(getValue() ?? "—").replace(/_/g, " ")}
+          </Badge>
+        ),
+      }),
+      columnHelper.accessor("estimated_cost", {
+        header: "Estimated cost",
+        cell: ({ getValue }) => {
+          const v = Number(getValue())
+          return (
+            <Text size="small" leading="compact" className="text-ui-fg-subtle">
+              {Number.isFinite(v) && v > 0 ? v : "—"}
+            </Text>
+          )
+        },
+      }),
+    ],
+    []
+  )
+
+  const table = useDataTable({
+    columns,
+    data: rows,
+    getRowId: (row) => row.id as string,
+    rowCount: count ?? 0,
+    isLoading,
+    rowSelection: { state: rowSelection, onRowSelectionChange },
+    pagination: { state: pagination, onPaginationChange: setPagination },
+    search: { state: search, onSearchChange: setSearch },
+  })
+
+  const estimateRows = preview?.estimates ?? []
+  /**
+   * #2176 item 5 — the operator CHOOSES the currency; it is no longer read back
+   * off whatever the preview happened to return.
+   *
+   * 🔴 Every design order was INR because nothing ever sent one: the preview
+   * body was `{ design_ids }` and the create workflow falls through to
+   * `currency_code || "inr"`. A European buyer was therefore quoted in rupees
+   * and routed to PayU, the India region's only payment provider — a cart he
+   * could not pay at any price.
+   *
+   * The preview's answer still wins once it exists, because that is the
+   * currency the estimate was actually computed in; disagreeing with it would
+   * label one number with another currency, which is the whole family of bug
+   * this sits in.
+   */
+  const { currencies, regions } = useDesignOrderCurrencies()
+  const [chosenCurrency, setChosenCurrency] = useState<string>("inr")
+  /**
+   * 🔴 Where the buyer is buying FROM. Asked at mint time because a cart
+   * without it is BROKEN, not merely incomplete: the checkout link cannot be
+   * built, a hand-written one is re-regioned to `countries[0]` (prod sent a
+   * Swedish buyer to /al/ — Albania), and `/store/shipping-options` cannot
+   * geo-filter, so that buyer was offered Delhivery and a Dharamshala pickup.
+   */
+  const [chosenCountry, setChosenCountry] = useState<string>("")
+  /**
+   * Has the operator touched the currency? A suggestion must never overwrite a
+   * deliberate choice — that is the difference between a helpful default and
+   * the platform quietly deciding what somebody pays in.
+   */
+  const [currencyTouched, setCurrencyTouched] = useState(false)
+  const currency = preview?.currency_code ?? chosenCurrency
+
+  /**
+   * The countries the CHOSEN currency's region actually serves.
+   *
+   * ⚠️ Offering anything else would be a trap: the backend refuses a country
+   * the region does not serve (it would leave the storefront re-regioning
+   * while reporting success), so a picker listing every country on earth would
+   * let an operator choose one that silently does nothing.
+   */
+  const countryOptions = useMemo(() => {
+    const region = (regions ?? []).find(
+      (r: any) =>
+        String(r?.currency_code ?? "").trim().toLowerCase() === currency
+    )
+    const seen = new Set<string>()
+    const out: { value: string; label: string }[] = []
+    for (const c of (region as any)?.countries ?? []) {
+      const iso = String(c?.iso_2 ?? "").trim().toLowerCase()
+      if (!iso || seen.has(iso)) continue
+      seen.add(iso)
+      out.push({
+        value: iso,
+        label: `${c?.display_name ?? c?.name ?? iso.toUpperCase()} (${iso.toUpperCase()})`,
+      })
+    }
+    return out.sort((a, b) => a.label.localeCompare(b.label))
+  }, [regions, currency])
+
+  /**
+   * A country chosen for one currency is usually wrong for the next, and a
+   * stale one would be silently dropped by the backend guard. Clear it rather
+   * than carry it across.
+   */
+  useEffect(() => {
+    if (chosenCountry && !countryOptions.some((o) => o.value === chosenCountry)) {
+      setChosenCountry("")
+    }
+  }, [countryOptions, chosenCountry])
+
+  /**
+   * #2176 item 3 — the buyer.
+   *
+   * The wizard DERIVES one from the chosen designs and never asked for one, so
+   * an order whose designs imply nobody was created buyer-less with a toast,
+   * and the operator went hunting for it afterwards. The derivation is kept —
+   * a design that was made for somebody names them, and a cart on the WRONG
+   * buyer is worse than a cart on none — but where it resolves to nobody, we
+   * now ask instead of shrugging.
+   */
+  const derivedCustomerId = useMemo(() => {
+    const r = resolveDesignOrderTarget(picked)
+    return r.ok ? r.customer_id : null
+  }, [picked])
+  const [pickedCustomerId, setPickedCustomerId] = useState<string | null>(null)
+  // The derivation WINS. It comes from the designs themselves; a manual choice
+  // only fills the gap it leaves.
+  const customerId = derivedCustomerId ?? pickedCustomerId
+  const [customerQuery, setCustomerQuery] = useState("")
+  const { data: customerResults } = useCustomerSearch(customerQuery)
+  const { buyer } = useBuyerWithAddresses(customerId)
+
+  /**
+   * The currency follows the BUYER, not the platform. Every design order was
+   * INR because nothing ever chose — a buyer in the EU was quoted in rupees and
+   * routed to PayU, the India region's only payment provider.
+   *
+   * Only ever a SUGGESTION: it seeds the control until the operator touches it,
+   * and a buyer whose country no region covers leaves the existing value alone
+   * rather than inventing one.
+   */
+  useEffect(() => {
+    if (currencyTouched || !buyer) return
+    const suggested = suggestCurrencyForCountry(buyerCountry(buyer), regions)
+    if (suggested && suggested !== chosenCurrency) {
+      setChosenCurrency(suggested)
+      setPreview(null)
+    }
+  }, [buyer, regions, currencyTouched, chosenCurrency])
+
+  /**
+   * The review rows are a FORM, not a read-only summary.
+   *
+   * 🔴 The modal this replaces could override a price before creating the
+   * order (`price_overrides` on both create doors). Rebuilding the review as a
+   * static table silently removed that — the operator could see a wrong
+   * estimate and had no way to correct it without abandoning the flow. An
+   * editable `DataGrid` is what that capability looks like in this admin, and
+   * it is the same component `create-inventory-order` uses for order lines.
+   */
+  const form = useForm<WizardForm>({ defaultValues: { lines: [] } })
+  const lines = form.watch("lines") ?? []
+
+  useEffect(() => {
+    if (!preview) return
+    form.reset({
+      lines: preview.estimates.map((e) => ({
+        design_id: e.design_id,
+        name: e.name ?? e.design_id,
+        estimated: e.total_estimated ?? null,
+        confidence: String(e.confidence ?? "none"),
+        // Seeded from the estimate. `?? 0` ONLY as the starting value of an
+        // editable cell — an unpriceable design opens at 0 so it can be typed
+        // over, and the grid marks it so nobody mistakes it for a real figure.
+        price: e.total_estimated ?? 0,
+      })),
+    })
+  }, [preview])
+
+  const gridColumns = useMemo(
+    () => [
+      gridHelper.column({
+        id: "name",
+        name: "Design",
+        header: "Design",
+        cell: (context: any) => (
+          <DataGridReadOnlyCell context={context}>
+            <Text size="small" leading="compact">
+              {lines[context.row.index]?.name ?? "—"}
+            </Text>
+          </DataGridReadOnlyCell>
+        ),
+        disableHiding: true,
+      }),
+      gridHelper.column({
+        id: "confidence",
+        name: "Confidence",
+        header: "Confidence",
+        cell: (context: any) => {
+          const c = lines[context.row.index]?.confidence ?? "none"
+          return (
+            <DataGridReadOnlyCell context={context}>
+              <Badge size="2xsmall" color={c === "none" ? "red" : c === "low" ? "orange" : "green"}>
+                {c}
+              </Badge>
+            </DataGridReadOnlyCell>
+          )
+        },
+      }),
+      gridHelper.column({
+        id: "estimated",
+        name: "Estimated",
+        header: "Estimated",
+        cell: (context: any) => {
+          /**
+           * 🔴 `null` is NOT zero. The estimator returns null for a design it
+           * could not price; rendering that through a `?? 0` would put a
+           * confident ₹0.00 beside it — the #1900 shape, in the one place an
+           * operator decides whether the number is right.
+           */
+          const v = lines[context.row.index]?.estimated
+          return (
+            <DataGridReadOnlyCell context={context}>
+              {v == null ? (
+                <Badge size="2xsmall" color="red">Not priceable</Badge>
+              ) : (
+                <Text size="small" leading="compact" className="text-ui-fg-subtle">
+                  {money(v, currency)}
+                </Text>
+              )}
+            </DataGridReadOnlyCell>
+          )
+        },
+      }),
+      gridHelper.column({
+        id: "price",
+        name: "Price",
+        header: "Price",
+        field: (context: any) => `lines.${context.row.index}.price` as const,
+        type: "number",
+        cell: (context: any) => (
+          <DataGridCurrencyCell context={context} code={currency} />
+        ),
+        disableHiding: true,
+      }),
+    ],
+    [lines, currency]
+  )
+
+  /**
+   * Widths, the way `inventory-order-lines-grid` does it. Left at the default
+   * the design name — the only column that tells you WHICH garment you are
+   * pricing — truncates to about twenty characters, and two fixtures with the
+   * same prefix become indistinguishable at the moment money is entered.
+   */
+  const sizedGridColumns = useMemo(
+    () =>
+      gridColumns.map((col: any) => {
+        // 320, not 460: the four columns then fit inside a ~900px modal, so the
+        // editable Price cell is on screen without scrolling. It is the one
+        // cell the operator must reach.
+        if (col.id === "name") return { ...col, size: 320, maxSize: 640 }
+        if (col.id === "confidence") return { ...col, size: 150, maxSize: 180 }
+        if (col.id === "estimated") return { ...col, size: 180, maxSize: 220 }
+        if (col.id === "price") return { ...col, size: 200, maxSize: 260 }
+        return col
+      }),
+    [gridColumns]
+  )
+
+  /** Only prices the operator actually changed travel as overrides. */
+  const overrides = useMemo(() => {
+    const out: Record<string, number> = {}
+    for (const l of lines) {
+      const n = Number(l.price)
+      if (!Number.isFinite(n) || n <= 0) continue
+      if (l.estimated == null || n !== Number(l.estimated)) out[l.design_id] = n
+    }
+    return out
+  }, [lines])
+
+  const grandTotal = useMemo(
+    () => lines.reduce((sum, l) => sum + (Number(l.price) || 0), 0),
+    [lines]
+  )
+
+  /**
+   * Designs -> Buyer. No estimate yet: the buyer step can still change the
+   * currency, and an estimate computed before that is one this wizard would
+   * have to throw away — the exact relabel-without-recompute defect the
+   * currency picker's own comment warns about.
+   */
+  const goToBuyer = () => {
+    const resolved = resolveDesignOrderTarget(picked)
+    if (!resolved.ok) {
+      toast.error(resolved.error.title, { description: resolved.error.description })
+      return
+    }
+    setStep(Step.BUYER)
+  }
+
+  const goToReview = async () => {
+    const resolved = resolveDesignOrderTarget(picked)
+    if (!resolved.ok) {
+      toast.error(resolved.error.title, { description: resolved.error.description })
+      return
+    }
+    // A buyer the operator picked stands in where the designs named nobody.
+    const buyerId = resolved.customer_id ?? pickedCustomerId
+
+    setIsPreviewing(true)
+    try {
+      const routes = designOrderRoutes(buyerId)
+      const data = await sdk.client.fetch<PreviewResponse>(routes.preview, {
+        method: "POST",
+        body: { design_ids: resolved.design_ids, currency_code: chosenCurrency },
+      })
+      setTarget({ customer_id: buyerId, design_ids: resolved.design_ids })
+      setPreview(data)
+      setStep(Step.REVIEW)
+    } catch (err: any) {
+      // Rendered, not swallowed — the message names what is missing.
+      toast.error("Failed to estimate order", {
+        description: err?.message || "An unexpected error occurred.",
+      })
+    } finally {
+      setIsPreviewing(false)
+    }
+  }
+
+  const create = async () => {
+    if (!target) return
+    setIsCreating(true)
+    try {
+      const routes = designOrderRoutes(target.customer_id)
+      const created = await sdk.client.fetch<CreatedDesignOrder>(routes.create, {
+        method: "POST",
+        body: designOrderCreateBody({
+          design_ids: target.design_ids,
+          price_overrides: overrides,
+          // The CART's currency — the region it is created in follows from it.
+          currency_code: currency,
+          // The cart's currency is the estimate's currency; sending a price in
+          // any other would be valued by one number and labelled by another.
+          override_currency: currency,
+          // Omitted rather than sent empty — the backend treats absent as
+          // "not known yet", which is a different thing from a blank string.
+          ...(chosenCountry ? { country_code: chosenCountry } : {}),
+        }),
+      })
+      toast.success("Design order created", {
+        description: target.customer_id
+          ? undefined
+          : "No buyer is attached yet — attach one from the order, or it is collected at checkout.",
+      })
+      // Show the links rather than dismissing. `handleSuccess` runs from the panel.
+      setCreated(created)
+      setStep(Step.CREATED)
+    } catch (err: any) {
+      toast.error("Failed to create design order", {
+        description: err?.message || "An unexpected error occurred.",
+      })
+    } finally {
+      setIsCreating(false)
+    }
+  }
+
+  const designsStatus: ProgressStatus =
+    step === Step.BUYER || step === Step.REVIEW
+      ? "completed"
+      : picked.length
+        ? "in-progress"
+        : "not-started"
+  const buyerStatus: ProgressStatus =
+    step === Step.REVIEW
+      ? "completed"
+      : step === Step.BUYER
+        ? "in-progress"
+        : "not-started"
+  const reviewStatus: ProgressStatus =
+    step === Step.REVIEW ? "in-progress" : "not-started"
+
+  /**
+   * The links REPLACE the wizard rather than becoming a third tab. The basket
+   * and its estimate are spent by the time this shows, and a tab the operator
+   * could click back into would offer to create the same order a second time.
+   */
+  if (step === Step.CREATED && created) {
+    return (
+      <div className="flex h-full flex-col overflow-hidden">
+        <RouteFocusModal.Header>
+          {/* Radix refuses a DialogContent with no DialogTitle; see below. */}
+          <RouteFocusModal.Title asChild>
+            <span className="sr-only">Design order created</span>
+          </RouteFocusModal.Title>
+        </RouteFocusModal.Header>
+        <RouteFocusModal.Body className="size-full overflow-auto">
+          <DesignOrderCreatedPanel result={created} />
+        </RouteFocusModal.Body>
+        {/*
+          🔴 The primary action belongs in the FOOTER, where it is on both other
+          steps. It used to sit at the bottom of this scrollable Body — beneath
+          the checkout link, the payment link and up to three Alerts — so on a
+          short window it was below the fold and the modal read as stuck after
+          creating the order. #2176
+        */}
+        <RouteFocusModal.Footer>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {/*
+              `() => handleSuccess()`, not `onClick={handleSuccess}`.
+              `handleSuccess` takes an optional `path`, so wiring it directly
+              hands it the click EVENT as that path. The old panel button had
+              the same shape.
+            */}
+            <Button size="small" onClick={() => handleSuccess()}>
+              Done
+            </Button>
+          </div>
+        </RouteFocusModal.Footer>
+      </div>
+    )
+  }
+
+  return (
+    <RouteFocusModal.Form form={form}>
+      <KeyboundForm
+        onSubmit={(e) => e.preventDefault()}
+        className="flex h-full flex-col overflow-hidden"
+      >
+    <ProgressTabs
+      value={step}
+      onValueChange={(v) => {
+        /*
+          BACKWARD movement only. Forward must go through `goToBuyer` (which
+          validates the selection) and `goToReview` (which builds the estimate),
+          so clicking a tab can never skip either — a Review tab reached by
+          click would show the previous currency's numbers, or none.
+        */
+        if (v === Step.DESIGNS) setStep(Step.DESIGNS)
+        if (v === Step.BUYER && step === Step.REVIEW) setStep(Step.BUYER)
+      }}
+      className="flex h-full flex-col overflow-hidden"
+    >
+      <RouteFocusModal.Header>
+        {/*
+          Title, not a bare Heading. Radix refuses a DialogContent with no
+          DialogTitle as accessible and logs it on every open — the drawer then
+          announces itself to a screen reader with no name. `sr-only` because
+          the ProgressTabs are the visible heading here.
+        */}
+        <RouteFocusModal.Title asChild>
+          <span className="sr-only">Start a design order</span>
+        </RouteFocusModal.Title>
+        {/*
+          Laid out exactly like every other stepped RouteFocusModal
+          (create-inventory-order, create-social-post-steps, create-blog, …):
+          `-my-2 w-full border-l` on the wrapper and `w-full` on the List. The
+          negative margin is what makes the triggers meet the header's top and
+          bottom edges; without it they float and the steps read as oddly
+          spaced beside any other wizard. #2176
+        */}
+        <div className="-my-2 w-full border-l">
+          <ProgressTabs.List className="flex w-full items-center justify-start">
+            <ProgressTabs.Trigger status={designsStatus} value={Step.DESIGNS}>
+              Designs
+            </ProgressTabs.Trigger>
+            <ProgressTabs.Trigger status={buyerStatus} value={Step.BUYER}>
+              Buyer
+            </ProgressTabs.Trigger>
+            <ProgressTabs.Trigger
+              status={reviewStatus}
+              value={Step.REVIEW}
+              disabled={!preview}
+            >
+              Review
+            </ProgressTabs.Trigger>
+          </ProgressTabs.List>
+        </div>
+      </RouteFocusModal.Header>
+
+      <RouteFocusModal.Body className="size-full overflow-hidden">
+        <ProgressTabs.Content
+          value={Step.DESIGNS}
+          /*
+            🔴 NO `flex` on a ProgressTabs.Content. Radix hides the inactive
+            panel with the `hidden` ATTRIBUTE, which is only `display: none`
+            from the UA stylesheet — a Tailwind `flex` class beats it on
+            specificity, so the hidden panel keeps its box and its full height.
+            The other tab's content is then pushed below the fold and the step
+            looks blank. Sizing here, layout on an inner div.
+          */
+          className="h-full overflow-y-auto"
+        >
+          <div className="flex h-full flex-col px-4 py-4 md:px-6">
+          <DataTable instance={table}>
+            {/* Wraps to two rows when the modal is narrow, rather than
+                crushing the search field against the heading. */}
+            <DataTable.Toolbar className="flex flex-col items-stretch gap-2 px-0 md:flex-row md:items-center md:justify-between">
+              <Heading level="h2">Choose designs</Heading>
+              <DataTable.Search placeholder="Search designs…" />
+            </DataTable.Toolbar>
+            <DataTable.Table />
+            <DataTable.Pagination />
+          </DataTable>
+          </div>
+        </ProgressTabs.Content>
+
+        <ProgressTabs.Content
+          value={Step.BUYER}
+          /* Sizing here, layout on the inner div — see the DESIGNS panel. */
+          className="h-full overflow-y-auto"
+        >
+          <div className="flex h-full flex-col px-4 py-4 md:px-6">
+          {/*
+            #2176 item 5 — the currency of the ORDER, chosen before the estimate
+            is built rather than inherited from the platform's house store.
+
+            🔴 Only currencies that HAVE A REGION are offered. The create step
+            refuses any other outright ("No region is configured for X"), and a
+            picker that can produce that refusal moves it to after the operator
+            has chosen their designs.
+
+            Locked once a preview exists: the estimate was computed in this
+            currency, and changing the label without recomputing the number is
+            the exact defect this order type keeps hitting. Go back to Designs
+            to change it and the estimate is rebuilt.
+          */}
+          {/*
+            #2176 item 3 — WHO the order is for, asked on the first step.
+            
+            The buyer is still DERIVED from the designs where they name one, and
+            that derivation wins: a design made for somebody carries them, and a
+            cart on the wrong buyer is worse than a cart on none. What changes is
+            the case where the designs name NOBODY — that used to produce a cart
+            with no buyer and a toast telling the operator to go and attach one.
+          */}
+          <div className="mb-3 flex items-center justify-between gap-x-4">
+            <div>
+              <Text size="small" weight="plus">Buyer</Text>
+              <Text size="small" className="text-ui-fg-subtle">
+                {derivedCustomerId
+                  ? "Taken from the designs — they were made for this customer."
+                  : "These designs name no customer. Pick one, or leave it for checkout."}
+              </Text>
+            </div>
+            <div className="w-[220px]">
+              {/*
+                🔴 The buyer picker is a Combobox driving the SERVER query, not
+                a Select over a fixed array. `useCustomerSearch` fetches
+                `limit: 10`, and nothing was bound to `setCustomerQuery` at all,
+                so it showed the first ten customers and the buyer you wanted
+                was unreachable unless they happened to be in that page. Same
+                family as the partner lookup that searched 5 of 31.
+              */}
+              {derivedCustomerId ? (
+                <Text size="small" className="text-right">
+                  {buyer
+                    ? `${[buyer.first_name, buyer.last_name].filter(Boolean).join(" ") || buyer.email}`
+                    : derivedCustomerId}
+                </Text>
+              ) : (
+                <Combobox
+                  options={(customerResults?.customers ?? []).map((c) => ({
+                    label:
+                      [c.first_name, c.last_name].filter(Boolean).join(" ") ||
+                      c.email,
+                    value: c.id,
+                  }))}
+                  value={pickedCustomerId ?? ""}
+                  onChange={(v) => setPickedCustomerId((v as string) || null)}
+                  searchValue={customerQuery}
+                  onSearchValueChange={setCustomerQuery}
+                  allowClear
+                  placeholder="Search customers by name or email"
+                />
+              )}
+            </div>
+          </div>
+
+          <div className="mb-3 flex items-center justify-between gap-x-4">
+            <div>
+              <Text size="small" weight="plus">Currency</Text>
+              <Text size="small" className="text-ui-fg-subtle">
+                {buyer && !currencyTouched
+                  ? "Suggested from the buyer's address. Change it if that is wrong."
+                  : "The buyer pays in this currency, and the order is created in its region."}
+              </Text>
+            </div>
+            <div className="w-[220px]">
+              <Select
+                value={chosenCurrency}
+                onValueChange={(v) => {
+                  setChosenCurrency(v)
+                  setCurrencyTouched(true)
+                  /*
+                    The estimate belongs to the OLD currency, so it is dropped
+                    rather than relabelled — the operator goes back through
+                    Review and the numbers are recomputed. `overrides` derives
+                    from the preview's lines, so it clears with it; there is no
+                    separate state to reset.
+                  */
+                  setPreview(null)
+                }}
+              >
+                <Select.Trigger>
+                  <Select.Value placeholder="Select currency" />
+                </Select.Trigger>
+                <Select.Content>
+                  {currencies.map((c) => (
+                    <Select.Item key={c.code} value={c.code}>
+                      {c.code.toUpperCase()} — {c.region_name}
+                    </Select.Item>
+                  ))}
+                </Select.Content>
+              </Select>
+            </div>
+          </div>
+
+          <div className="mb-3 flex items-center justify-between gap-x-4">
+            <div>
+              <Text size="small" weight="plus">Buying from</Text>
+              <Text size="small" className="text-ui-fg-subtle">
+                {chosenCountry
+                  ? "Decides the checkout link and which couriers are offered."
+                  : "Optional — but without it the checkout link cannot be built, and the buyer is offered every courier we have."}
+              </Text>
+            </div>
+            <div className="w-[220px]">
+              {/*
+                Only the chosen currency's own region is offered: the backend
+                refuses a country the region does not serve, so a wider list
+                would let an operator pick one that silently does nothing.
+              */}
+              <Combobox
+                options={countryOptions}
+                value={chosenCountry}
+                onChange={(v) => setChosenCountry((v as string) || "")}
+                allowClear
+                placeholder={
+                  countryOptions.length
+                    ? "Search countries"
+                    : "No countries on this region"
+                }
+              />
+            </div>
+          </div>
+          </div>
+        </ProgressTabs.Content>
+
+        <ProgressTabs.Content
+          value={Step.REVIEW}
+          /*
+            Sizing on the Content, layout on an inner div — the shape
+            create-inventory-order uses. `h-full` + `flex-col` on the same
+            element bottom-pinned the rows behind a screenful of blank; no
+            `h-full` at all collapsed it to nothing.
+          */
+          className="h-full overflow-y-auto"
+        >
+          <div className="flex flex-col gap-y-4 px-4 py-4 md:px-6">
+          <div className="flex flex-col gap-y-1">
+            <Heading level="h2">Review</Heading>
+            {/* `max-w-prose` so the sentence wraps at a readable measure
+                instead of running the full width of a wide modal. */}
+            <Text size="small" leading="compact" className="max-w-prose text-ui-fg-subtle">
+              {target?.customer_id
+                ? "This order is for the customer these designs belong to."
+                : "No buyer yet. A design order without one is ordinary — attach a buyer from the order, or it is collected at checkout."}
+            </Text>
+          </div>
+
+          {/*
+            The grid keeps its column widths and scrolls sideways on a narrow
+            screen. Letting it shrink instead squeezes the editable Price cell
+            until the figure is unreadable — the one cell that must not be.
+          */}
+          <div className="min-w-0 overflow-x-auto">
+            <DataGrid data={lines} columns={sizedGridColumns} state={form} />
+          </div>
+          <Text size="xsmall" leading="compact" className="max-w-prose text-ui-fg-muted">
+            Prices are editable — Enter moves between cells. Anything you change
+            is sent as a price override; untouched rows keep the estimate.
+          </Text>
+
+          <div className="flex flex-col gap-y-2 rounded-md border border-ui-border-base bg-ui-bg-subtle px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-y-0">
+            <div className="flex min-w-0 flex-col">
+              <Text size="small" weight="plus">
+                {Object.keys(overrides).length
+                  ? "Total (with your prices)"
+                  : preview?.total_is_complete === false
+                    ? "Total (partial)"
+                    : "Total"}
+              </Text>
+              {preview?.total_is_complete === false && (
+                /*
+                  🔴 Said out loud. When the estimator could not price every
+                  design, `total` is a SUM OF WHAT IT COULD — a number that
+                  looks like the order's value and is not. Presenting it
+                  unqualified is how an operator commits to a figure the
+                  customer will exceed.
+                */
+                <Text size="xsmall" leading="compact" className="max-w-prose text-ui-fg-subtle">
+                  Some designs could not be priced. This is the sum of the rest.
+                </Text>
+              )}
+            </div>
+            <Text size="small" weight="plus" className="tabular-nums">
+              {money(grandTotal, currency)}
+            </Text>
+          </div>
+          </div>
+        </ProgressTabs.Content>
+      </RouteFocusModal.Body>
+
+      <RouteFocusModal.Footer>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <RouteFocusModal.Close asChild>
+            <Button size="small" variant="secondary">
+              Cancel
+            </Button>
+          </RouteFocusModal.Close>
+          {step === Step.DESIGNS && (
+            <Button size="small" onClick={goToBuyer} disabled={!picked.length}>
+              Continue
+            </Button>
+          )}
+          {step === Step.BUYER && (
+            <>
+              <Button
+                size="small"
+                variant="secondary"
+                onClick={() => setStep(Step.DESIGNS)}
+              >
+                Back
+              </Button>
+              {/*
+                The estimate is built HERE, on leaving the buyer step, because
+                this is the last point the currency can still change.
+              */}
+              <Button size="small" onClick={goToReview} isLoading={isPreviewing}>
+                Continue
+              </Button>
+            </>
+          )}
+          {step === Step.REVIEW && (
+            <>
+              <Button
+                size="small"
+                variant="secondary"
+                onClick={() => setStep(Step.BUYER)}
+                disabled={isCreating}
+              >
+                Back
+              </Button>
+              <Button size="small" onClick={create} isLoading={isCreating}>
+                Create order
+              </Button>
+            </>
+          )}
+        </div>
+      </RouteFocusModal.Footer>
+
+      {/*
+        The selection lives in the CommandBar rather than in a line of text, so
+        the count and the way to clear it are in the same place — and it stays
+        visible while the operator pages through or searches, which is exactly
+        when a cross-page selection is easy to forget about.
+      */}
+      <CommandBar open={picked.length > 0}>
+        <CommandBar.Bar>
+          <CommandBar.Value>
+            {picked.length} design{picked.length === 1 ? "" : "s"} selected
+          </CommandBar.Value>
+          <CommandBar.Seperator />
+          <CommandBar.Command
+            action={() => {
+              setRowSelection({})
+              setPickedById({})
+            }}
+            label="Clear"
+            shortcut="c"
+          />
+          {step === Step.DESIGNS && (
+            <>
+              <CommandBar.Seperator />
+              <CommandBar.Command action={goToBuyer} label="Continue" shortcut="r" />
+            </>
+          )}
+        </CommandBar.Bar>
+      </CommandBar>
+    </ProgressTabs>
+      </KeyboundForm>
+    </RouteFocusModal.Form>
+  )
+}

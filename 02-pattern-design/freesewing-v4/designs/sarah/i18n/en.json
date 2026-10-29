@@ -1,0 +1,88 @@
+{
+  "t": "Sarah Skirt Block",
+  "d": "A FreeSewing pattern for a basic skirt block pattern based on Aldrich",
+  "p": {
+    "back": "Back",
+    "front": "Front",
+    "base": "Base"
+  },
+  "s": { },
+  "o": {
+    "cutFrontOnFold": {
+      "t": "Cut Front On Fold",
+      "d": "Disable to add seam at center front."
+    },
+    "cutFrontOnFoldYes": {
+      "t": "Cut Front On Fold",
+      "d": "Creates a flat front panel."
+    },
+    "cutFrontOnFoldNo": {
+      "t": "Add Seam To Center Front",
+      "d": "Allows a zipper to be added at center front."
+    },
+    "cutBackOnFold": {
+      "t": "Cut Back On Fold",
+      "d": "Disable to add seam at center back."
+    },
+    "cutBackOnFoldYes": {
+      "t": "Cut Back On Fold",
+      "d": "Creates a flat back panel."
+    },
+    "cutBackOnFoldNo": {
+      "t": "Add Seam To Center Back",
+      "d": "Allows a zipper to be added at center back."
+    },
+    "waistDrop": {
+      "t": "Waist Drop",
+      "d": "Waistline drop from waist toward hips"
+    },
+    "seatEase": {
+      "t": "Seat Ease",
+      "d": "Ease added to seat measurement"
+    },
+    "waistEaseFront": {
+      "t": "Front Waist Ease",
+      "d": "Ease added to front waistline"
+    },
+    "waistEaseBack": {
+      "t": "Back Waist Ease",
+      "d": "Ease added to back waistline."
+    },
+    "extraSeatEase": {
+      "t": "Extra Seat Ease",
+      "d": "Ease added to seat measurement to account for fabric stretch and closure style."
+    },
+    "extraWaistEase": {
+      "t": "Extra Waist Ease",
+      "d": "Ease added to waistline"
+    },
+    "waistRise": {
+      "t": "Waist Rise",
+      "d": "Rise of waistline between front/back center and sides"
+    },
+    "sideSeamCurveOffset": {
+      "t": "Side Seam Curve Offset",
+      "d": "Offset from line between side seat and front/back side top to shape hip/seat curve"
+    },
+    "backOutsideDartLength": {
+      "t": "Back Outside Dart Length",
+      "d": "Length of the outside darts on the back"
+    },
+    "backInsideDartLength": {
+      "t": "Back Inside Dart Length",
+      "d": "Length of inside darts on back"
+    },
+    "frontDartLength": {
+      "t": "Front Dart Length",
+      "d": "Length of darts on front"
+    },
+    "length": {
+      "t": "Length",
+      "d": "Skirt length"
+    },
+    "hem": {
+      "t": "Hem",
+      "d": "Hem width"
+    }
+  }
+}

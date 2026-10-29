@@ -1,0 +1,713 @@
+/**
+ * JYT Analytics - Privacy-focused website analytics with real-time support
+ *
+ * Features:
+ * - Automatic pageview tracking
+ * - SPA navigation support
+ * - Custom event tracking
+ * - Session management
+ * - Real-time heartbeat for live visitor tracking
+ * - Conversion tracking (purchases, leads, add to cart)
+ * - Customer journey tracking
+ * - Scroll depth and engagement tracking
+ *
+ * Usage:
+ * <script src="/analytics.js" data-website-id="your_website_id" defer></script>
+ */
+
+(function() {
+  'use strict';
+
+  // Configuration
+  //
+  // `document.currentScript` is null inside a module script and in any deferred
+  // callback. Reading an attribute off null throws, which kills the tracker
+  // before it sends anything — the silent-death case that looks identical to
+  // "analytics is fine, this page just had no traffic". Fall back to locating
+  // our own tag by the attribute only we set.
+  const script =
+    document.currentScript ||
+    document.querySelector('script[data-website-id]');
+
+  if (!script) {
+    if (console && console.warn) {
+      console.warn('[Analytics] Could not locate the tracking script tag');
+    }
+    return;
+  }
+
+  const websiteId = script.getAttribute('data-website-id');
+  const apiUrl = script.getAttribute('data-api-url') || 'https://v3.jaalyantra.com';
+  const enableJourney = script.getAttribute('data-enable-journey') !== 'false';
+  const enableScrollTracking = script.getAttribute('data-enable-scroll') !== 'false';
+  const enableEngagement = script.getAttribute('data-enable-engagement') !== 'false';
+
+  // Endpoints
+  const analyticsEndpoint = `${apiUrl}/web/analytics/track`;
+  const conversionEndpoint = `${apiUrl}/web/ad-planning/track-conversion`;
+  const journeyEndpoint = `${apiUrl}/web/ad-planning/track-journey`;
+
+  const heartbeatInterval = 30000; // 30 seconds
+
+  if (!websiteId) {
+    console.warn('[Analytics] Missing data-website-id attribute');
+    return;
+  }
+
+  // localStorage and sessionStorage do not merely return null when they are
+  // unavailable — they THROW: Safari private mode, a sandboxed iframe, and any
+  // browser where the user has blocked site data. Every read below is evaluated
+  // inside the object literal being sent, so an unguarded throw does not
+  // degrade one field, it destroys the whole event.
+  function storageGet(store, key) {
+    try {
+      return window[store].getItem(key);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function storageSet(store, key, value) {
+    try {
+      window[store].setItem(key, value);
+    } catch (e) {
+      // An id we cannot persist is still perfectly usable for this page load.
+    }
+  }
+
+  function storageRemove(store, key) {
+    try {
+      window[store].removeItem(key);
+    } catch (e) {
+      // Nothing to remove if the store is unreachable.
+    }
+  }
+
+  // When storage is unreachable these keep one id for the life of the page.
+  // Without them every call would mint a fresh id and a single pageview would
+  // report as several unrelated visitors — worse data than the crash.
+  let cachedVisitorId = null;
+  let cachedSessionId = null;
+
+  // Generate or retrieve visitor ID (persistent across sessions)
+  function getVisitorId() {
+    const key = 'jyt_visitor_id';
+    let visitorId = storageGet('localStorage', key) || cachedVisitorId;
+
+    if (!visitorId) {
+      visitorId = 'visitor_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+      storageSet('localStorage', key, visitorId);
+    }
+
+    cachedVisitorId = visitorId;
+    return visitorId;
+  }
+
+  // Generate or retrieve session ID (expires after 30 minutes of inactivity)
+  function getSessionId() {
+    const key = 'jyt_session_id';
+    const timestampKey = 'jyt_session_timestamp';
+    const sessionTimeout = 30 * 60 * 1000; // 30 minutes
+
+    const now = Date.now();
+    const storedActivity = storageGet('sessionStorage', timestampKey);
+
+    // Only expire on a timestamp we actually read. Treating an ABSENT one as 0
+    // would expire the session on every single call once storage is
+    // unreachable, which is exactly when the cache below is holding the id.
+    if (storedActivity && now - parseInt(storedActivity) > sessionTimeout) {
+      storageRemove('sessionStorage', key);
+      cachedSessionId = null;
+    }
+
+    let sessionId = storageGet('sessionStorage', key) || cachedSessionId;
+
+    if (!sessionId) {
+      sessionId = 'session_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+      storageSet('sessionStorage', key, sessionId);
+    }
+
+    cachedSessionId = sessionId;
+
+    // Update last activity timestamp
+    storageSet('sessionStorage', timestampKey, now.toString());
+
+    return sessionId;
+  }
+
+  // Extract UTM parameters from URL
+  function getUTMParams() {
+    const params = new URLSearchParams(window.location.search);
+    const utm = {};
+
+    const utmParams = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+    utmParams.forEach(function(param) {
+      const value = params.get(param);
+      if (value) {
+        utm[param] = value;
+      }
+    });
+
+    // Store UTM params for later use (for conversions)
+    if (Object.keys(utm).length > 0) {
+      storageSet('sessionStorage', 'jyt_utm', JSON.stringify(utm));
+    }
+
+    return Object.keys(utm).length > 0 ? utm : undefined;
+  }
+
+  // Get stored UTM params (for conversions that happen after initial landing)
+  function getStoredUTMParams() {
+    try {
+      const stored = storageGet('sessionStorage', 'jyt_utm');
+      return stored ? JSON.parse(stored) : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // Get query string (without leading ?)
+  function getQueryString() {
+    const search = window.location.search;
+    return search ? search.substring(1) : undefined;
+  }
+
+  // Browser IANA time zone — lets the backend derive country without an edge
+  // GeoIP service (#559 slice 6).
+  function getTimezone() {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  // Browser locale (e.g. en-US) — carried into event metadata for future
+  // language/region analytics (#559 slice 6).
+  function getLocale() {
+    try {
+      return (
+        (navigator.languages && navigator.languages[0]) ||
+        navigator.language ||
+        undefined
+      );
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  // Detect 404 errors
+  function is404Page() {
+    const title = document.title.toLowerCase();
+    const body = document.body ? document.body.textContent.toLowerCase() : '';
+
+    return title.includes('404') ||
+           title.includes('not found') ||
+           body.includes('page not found') ||
+           body.includes('404 error');
+  }
+
+  // Send data to endpoint
+  function sendData(endpoint, data) {
+    const body = JSON.stringify(data);
+
+    // Use sendBeacon for reliability (works even when page is closing).
+    // It returns FALSE when the user agent refuses the payload — over the queue
+    // limit, or the queue is full — and the event is then dropped on the floor.
+    // Treat that as "not sent" and fall through to fetch rather than assuming it
+    // went. sendBeacon can never see the response, so a rejected request is
+    // invisible on this path by design.
+    if (navigator.sendBeacon) {
+      const blob = new Blob([body], { type: 'application/json' });
+      if (navigator.sendBeacon(endpoint, blob)) {
+        return;
+      }
+    }
+
+    // fetch: the fallback for old browsers AND the retry when sendBeacon
+    // refused the payload above.
+    fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: body,
+      keepalive: true,
+    })
+      .then(function(res) {
+        // The server answers 400 only when the REQUEST was wrong (#1884); its
+        // own failures still come back 200 so that our outage never surfaces as
+        // an error on a customer's page. So a 4xx here is always our tracking
+        // setup at fault and is worth one line — `fetch` does not reject on it,
+        // which is why this went unnoticed.
+        if (!res.ok && console && console.warn) {
+          console.warn(
+            '[Analytics] Event rejected (' + res.status + '), dropped:',
+            endpoint
+          );
+        }
+      })
+      .catch(function(err) {
+        if (console && console.error) {
+          console.error('[Analytics] Failed to send data:', err);
+        }
+      });
+  }
+
+  // Track pageview
+  function trackPageview() {
+    const data = {
+      website_id: websiteId,
+      event_type: 'pageview',
+      pathname: window.location.pathname,
+      referrer: document.referrer || undefined,
+      visitor_id: getVisitorId(),
+      session_id: getSessionId(),
+      query_string: getQueryString(),
+      is_404: is404Page(),
+      timezone: getTimezone(),
+      locale: getLocale(),
+    };
+
+    // Add UTM parameters if present
+    const utmParams = getUTMParams();
+    if (utmParams) {
+      Object.assign(data, utmParams);
+    }
+
+    sendData(analyticsEndpoint, data);
+
+    // Track as journey event if enabled
+    if (enableJourney) {
+      trackJourney('page_view', {
+        page_url: window.location.href,
+        page_title: document.title,
+        referrer: document.referrer,
+      });
+    }
+  }
+
+  // Track custom event
+  function trackEvent(eventName, metadata) {
+    const data = {
+      website_id: websiteId,
+      event_type: 'custom_event',
+      event_name: eventName,
+      pathname: window.location.pathname,
+      visitor_id: getVisitorId(),
+      session_id: getSessionId(),
+      timezone: getTimezone(),
+      locale: getLocale(),
+      metadata: metadata || undefined,
+    };
+
+    sendData(analyticsEndpoint, data);
+  }
+
+  // Track customer journey event
+  function trackJourney(eventType, eventData, options = {}) {
+    if (!enableJourney) return;
+
+    const utmParams = getStoredUTMParams();
+
+    const data = {
+      website_id: websiteId,
+      event_type: eventType,
+      event_name: options.event_name || eventType,
+      event_data: eventData || null,
+      channel: options.channel || 'web',
+      stage: options.stage || undefined,
+      visitor_id: getVisitorId(),
+      person_id: options.person_id || null,
+      page_url: window.location.href,
+      utm_source: utmParams.utm_source || undefined,
+      utm_campaign: utmParams.utm_campaign || undefined,
+      source_type: options.source_type || null,
+      source_id: options.source_id || null,
+      metadata: options.metadata || null,
+    };
+
+    sendData(journeyEndpoint, data);
+  }
+
+  // Track conversion
+  function trackConversion(conversionType, options = {}) {
+    const utmParams = getStoredUTMParams();
+
+    const data = {
+      website_id: websiteId,
+      conversion_type: conversionType,
+      conversion_name: options.name || null,
+      pathname: window.location.pathname,
+      visitor_id: getVisitorId(),
+      session_id: getSessionId(),
+      conversion_value: options.value || null,
+      currency: options.currency || 'INR',
+      order_id: options.orderId || null,
+      utm_source: utmParams.utm_source || undefined,
+      utm_medium: utmParams.utm_medium || undefined,
+      utm_campaign: utmParams.utm_campaign || undefined,
+      utm_term: utmParams.utm_term || undefined,
+      utm_content: utmParams.utm_content || undefined,
+      metadata: options.metadata || null,
+    };
+
+    sendData(conversionEndpoint, data);
+
+    // Track as custom event for analytics
+    trackEvent('conversion', {
+      conversion_type: conversionType,
+      value: options.value,
+      currency: options.currency,
+      order_id: options.orderId,
+    });
+
+    // Track in journey if enabled
+    if (enableJourney) {
+      let stage = 'conversion';
+      if (conversionType === 'add_to_cart') stage = 'intent';
+      if (conversionType === 'begin_checkout') stage = 'intent';
+      if (conversionType === 'lead_form_submission') stage = 'consideration';
+
+      trackJourney(conversionType === 'purchase' ? 'purchase' : 'custom', {
+        conversion_type: conversionType,
+        value: options.value,
+        order_id: options.orderId,
+      }, { stage });
+    }
+  }
+
+  // Convenience methods for common conversions
+  function trackPurchase(orderId, value, currency = 'INR', metadata = {}) {
+    trackConversion('purchase', {
+      orderId,
+      value,
+      currency,
+      metadata,
+    });
+  }
+
+  function trackLeadForm(formName, metadata = {}) {
+    trackConversion('lead_form_submission', {
+      name: formName,
+      metadata: { form_name: formName, ...metadata },
+    });
+
+    // Also track as journey event
+    if (enableJourney) {
+      trackJourney('form_submit', {
+        form_name: formName,
+        ...metadata,
+      }, { stage: 'consideration' });
+    }
+  }
+
+  function trackAddToCart(productId, value, currency = 'INR', metadata = {}) {
+    trackConversion('add_to_cart', {
+      value,
+      currency,
+      metadata: { product_id: productId, ...metadata },
+    });
+  }
+
+  function trackBeginCheckout(value, currency = 'INR', metadata = {}) {
+    trackConversion('begin_checkout', {
+      value,
+      currency,
+      metadata,
+    });
+  }
+
+  // Track scroll depth
+  let maxScrollDepth = 0;
+  let scrollDepthMilestones = [25, 50, 75, 90, 100];
+  let trackedMilestones = new Set();
+
+  function trackScrollDepth() {
+    if (!enableScrollTracking) return;
+
+    const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+    const docHeight = Math.max(
+      document.body.scrollHeight,
+      document.documentElement.scrollHeight
+    ) - window.innerHeight;
+
+    if (docHeight <= 0) return;
+
+    const scrollPercent = Math.round((scrollTop / docHeight) * 100);
+
+    if (scrollPercent > maxScrollDepth) {
+      maxScrollDepth = scrollPercent;
+
+      // Check milestones
+      scrollDepthMilestones.forEach(function(milestone) {
+        if (scrollPercent >= milestone && !trackedMilestones.has(milestone)) {
+          trackedMilestones.add(milestone);
+
+          trackConversion('scroll_depth', {
+            name: `Scroll ${milestone}%`,
+            metadata: { depth: milestone, page: window.location.pathname },
+          });
+        }
+      });
+    }
+  }
+
+  // Track time on page
+  let pageLoadTime = Date.now();
+  let timeOnPageMilestones = [30, 60, 120, 300]; // seconds
+  let trackedTimeMilestones = new Set();
+
+  function trackTimeOnPage() {
+    if (!enableEngagement) return;
+
+    const timeOnPage = Math.round((Date.now() - pageLoadTime) / 1000);
+
+    timeOnPageMilestones.forEach(function(milestone) {
+      if (timeOnPage >= milestone && !trackedTimeMilestones.has(milestone)) {
+        trackedTimeMilestones.add(milestone);
+
+        trackConversion('time_on_site', {
+          name: `Time ${milestone}s`,
+          metadata: { seconds: milestone, page: window.location.pathname },
+        });
+      }
+    });
+  }
+
+  // Track initial pageview
+  trackPageview();
+
+  // Track pageviews on SPA navigation
+  let lastPath = window.location.pathname;
+
+  function checkPathChange() {
+    const currentPath = window.location.pathname;
+    if (currentPath !== lastPath) {
+      lastPath = currentPath;
+
+      // Reset scroll and time tracking for new page
+      maxScrollDepth = 0;
+      trackedMilestones = new Set();
+      pageLoadTime = Date.now();
+      trackedTimeMilestones = new Set();
+
+      trackPageview();
+    }
+  }
+
+  // Listen for history changes (SPA navigation)
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+
+  history.pushState = function() {
+    originalPushState.apply(this, arguments);
+    checkPathChange();
+  };
+
+  history.replaceState = function() {
+    originalReplaceState.apply(this, arguments);
+    checkPathChange();
+  };
+
+  window.addEventListener('popstate', checkPathChange);
+
+  // Scroll tracking with throttle
+  let scrollThrottleTimer = null;
+  window.addEventListener('scroll', function() {
+    if (scrollThrottleTimer) return;
+    scrollThrottleTimer = setTimeout(function() {
+      scrollThrottleTimer = null;
+      trackScrollDepth();
+    }, 250);
+  }, { passive: true });
+
+  // Time on page tracking
+  setInterval(trackTimeOnPage, 10000); // Check every 10 seconds
+
+  // Heartbeat for live visitor tracking
+  let heartbeatTimer = null;
+
+  function startHeartbeat() {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+    }
+
+    heartbeatTimer = setInterval(function() {
+      if (document.visibilityState === 'visible') {
+        trackEvent('heartbeat', {
+          page: window.location.pathname,
+          active: true,
+          scroll_depth: maxScrollDepth,
+          time_on_page: Math.round((Date.now() - pageLoadTime) / 1000),
+        });
+      }
+    }, heartbeatInterval);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  }
+
+  // Handle visibility changes
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'visible') {
+      startHeartbeat();
+    } else {
+      stopHeartbeat();
+    }
+  });
+
+  // Start heartbeat on load
+  startHeartbeat();
+
+  // Stop heartbeat and send final data on page unload
+  window.addEventListener('beforeunload', function() {
+    stopHeartbeat();
+
+    // Send final engagement data
+    if (enableEngagement && maxScrollDepth > 0) {
+      trackEvent('page_engagement', {
+        page: window.location.pathname,
+        max_scroll_depth: maxScrollDepth,
+        time_on_page: Math.round((Date.now() - pageLoadTime) / 1000),
+      });
+    }
+  });
+
+  // Auto-track form submissions
+  function setupFormTracking() {
+    document.addEventListener('submit', function(e) {
+      const form = e.target;
+      if (form.tagName !== 'FORM') return;
+
+      const formName = form.getAttribute('name') ||
+                       form.getAttribute('id') ||
+                       form.getAttribute('data-form-name') ||
+                       'unnamed_form';
+
+      // Check if it should be tracked as lead form
+      const isLeadForm = form.getAttribute('data-track-lead') === 'true' ||
+                         form.classList.contains('lead-form') ||
+                         form.classList.contains('contact-form');
+
+      if (isLeadForm) {
+        trackLeadForm(formName, {
+          form_action: form.action,
+          form_method: form.method,
+        });
+      } else {
+        // Track as journey event
+        if (enableJourney) {
+          trackJourney('form_submit', {
+            form_name: formName,
+            form_action: form.action,
+          }, { stage: 'consideration' });
+        }
+      }
+    }, true);
+  }
+
+  // Auto-track outbound link clicks
+  function setupOutboundTracking() {
+    document.addEventListener('click', function(e) {
+      const link = e.target.closest('a');
+      if (!link) return;
+
+      const href = link.getAttribute('href');
+      if (!href) return;
+
+      // Check if outbound
+      try {
+        const url = new URL(href, window.location.origin);
+        if (url.hostname !== window.location.hostname) {
+          // Track external link clicks as a `link_out` custom event. The full
+          // resolved destination URL is stored under metadata.href so the
+          // backend can aggregate top outbound links (#569 S5a).
+          trackEvent('link_out', {
+            href: url.href,
+            text: link.textContent ? link.textContent.substring(0, 100) : undefined,
+            page: window.location.pathname,
+          });
+        }
+      } catch (e) {
+        // Invalid URL, ignore
+      }
+    }, true);
+  }
+
+  // Initialize auto-tracking
+  setupFormTracking();
+  setupOutboundTracking();
+
+  // Identify user (for logged-in users)
+  function identify(personId, traits = {}) {
+    // Store person ID for journey tracking
+    storageSet('sessionStorage', 'jyt_person_id', personId);
+
+    trackEvent('identify', {
+      person_id: personId,
+      traits,
+    });
+
+    // Track as journey event
+    if (enableJourney) {
+      trackJourney('custom', {
+        action: 'identify',
+        traits,
+      }, {
+        person_id: personId,
+        event_name: 'user_identified',
+        stage: 'retention',
+      });
+    }
+  }
+
+  // Get stored person ID
+  function getPersonId() {
+    return storageGet('sessionStorage', 'jyt_person_id') || null;
+  }
+
+  // Expose API for custom tracking
+  window.jytAnalytics = {
+    // Basic tracking
+    track: trackEvent,
+    trackPageview: trackPageview,
+
+    // Conversion tracking
+    trackConversion: trackConversion,
+    trackPurchase: trackPurchase,
+    trackLeadForm: trackLeadForm,
+    trackAddToCart: trackAddToCart,
+    trackBeginCheckout: trackBeginCheckout,
+
+    // Journey tracking
+    trackJourney: trackJourney,
+
+    // User identification
+    identify: identify,
+    getPersonId: getPersonId,
+
+    // Utility
+    getVisitorId: getVisitorId,
+    getSessionId: getSessionId,
+    getUTMParams: getStoredUTMParams,
+
+    // Heartbeat control
+    startHeartbeat: startHeartbeat,
+    stopHeartbeat: stopHeartbeat,
+  };
+
+  // Log initialization
+  if (console && console.log) {
+    console.log('[Analytics] Initialized for website:', websiteId);
+    console.log('[Analytics] Features enabled:', {
+      journey: enableJourney,
+      scroll: enableScrollTracking,
+      engagement: enableEngagement,
+    });
+  }
+})();

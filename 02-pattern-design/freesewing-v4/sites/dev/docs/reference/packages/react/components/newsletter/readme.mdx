@@ -1,0 +1,29 @@
+---
+title: Newsletter
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.newsletter.mjs'
+import { NewsletterSignup, NewsletterUnsubscribe } from '@freesewing/react/components/Newsletter'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Newsletter** component family provides the following components:
+
+- [NewsletterSignup](#newslettersignup)
+- [NewsletterUnsubscribe](#newsletterunsubscribe)
+
+### NewsletterSignup
+
+<ComponentDocs docs={jsdoc.jsdocNewsletterSignup} example={NewsletterSignup} />
+
+### NewsletterUnsubscribe
+
+<ComponentDocs docs={jsdoc.jsdocNewsletterUnsubscribe} example={NewsletterUnsubscribe} />
+
+</DocusaurusDoc>

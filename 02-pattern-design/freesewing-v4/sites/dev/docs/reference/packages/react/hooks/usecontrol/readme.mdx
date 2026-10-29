@@ -1,0 +1,58 @@
+---
+title: useControl
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { MiniTip } from '@freesewing/react/components/Mini'
+import { Popout } from '@freesewing/react/components/Popout'
+
+<DocusaurusDoc>
+
+The **useControl** hook provides access to the control setting of a FreeSewing user.
+Use this hook whether you have a UI element that should be hidden or shown
+based on the control setting.
+
+<Popout type="tip" title="useControl vs useAccount">
+  The **useControl** hook guarantees that a control value will always be available, even if no user
+  is authenticated. As such, it is recommended to use this rather than the
+  [useAccount](/reference/packages/react/hooks/useaccount/) hook when all you need is a control
+  value, and no access to the user account.
+</Popout>
+
+## Example
+
+```js
+import { useControl } from '@freesewing/react/hooks/useControl'
+
+const MyComponent = () => {
+  const {
+    control,
+    setControl,
+  } = useControl()
+
+  // ...
+}
+```
+
+## Return value
+
+Calling the hook returns an object with the following properties which are all methods:
+
+- [control](#control)
+- [setControl](#setControl)
+
+### control
+
+The control value.
+
+### setControl
+
+A method to set the new control value.
+
+```js
+function setControl (
+  Number control // The new control value to set
+)
+```
+
+</DocusaurusDoc>

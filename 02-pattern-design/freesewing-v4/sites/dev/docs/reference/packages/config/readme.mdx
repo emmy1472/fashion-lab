@@ -1,0 +1,160 @@
+---
+title: '@freesewing/config'
+---
+
+import * as all from '@freesewing/config'
+
+FreeSewing's **config** package bundles configuration data for FreeSewing's websites
+and infrastructure.
+
+It is published on NPM as [@freesewing/config
+](https://www.npmjs.com/package/@freesewing/config).\
+The source code for this package is available in [our monorepo on Codeberg
+](https://codeberg.org/freesewing/freesewing) under [packages/config
+](https://codeberg.org/freesewing/freesewing/src/branch/develop/packages/config).
+
+:::note
+This package does not provide a default export.
+:::
+
+## Installation
+
+```sh
+npm install --save @freesewing/config
+```
+
+## Named Exports
+
+### apikeyLevels
+
+Holds an object where the key is the permission level for an API key (a number
+from 0 t0 8), and the value is a textual description of that access level.
+
+```js
+import { apikeyLevels } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.apikeyLevels} />
+
+### cloudflare
+
+Holds an object with information about Cloudflare's image service which
+FreeSewing uses for hosting images.
+
+```js
+import { cloudflare } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.cloudflare} />
+
+### control
+
+Holds an object with the configuration of FreeSewing's control setting.
+This setting determines which level of UX complexity hides/reveals what features
+on the website.
+
+```js
+import { control } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.control} />
+
+### controlDesc
+
+Holds an object with the textual description of the various control levels
+used by FreeSewing.
+
+```js
+import { controlDesc } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.controlDesc} />
+
+### degreeMeasurements
+
+Holds an array of measurements that measure an angle, rather than a distance.
+
+```js
+import { degreeMeasurements } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.degreeMeasurements} />
+
+### isDegreeMeasurement
+
+A helper method to determine whether a measurement is a degree measurement.
+In other words, a measurement that captures an angle, rather than a distance.
+
+<ParamsTable
+  params={{
+    measurement: { type: 'string', dflt: 'undefined', desc: 'The ID of a FreeSewing measurement' },
+  }}
+  returns={{ type: 'boolean', desc: 'true of it is a degree measurement, false if not' }}
+/>
+```js
+import {isDegreeMeasurement} from '@freesewing/config'
+
+const result = isDegreeMeasurement('shoulderSlope')
+// result now holds: true
+```
+
+### logoPath
+
+Holds a string that is the SVG pathstring for the FreeSewing logo, Skully.
+
+```js
+import { logoPath } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.logoPath} />
+
+### measurements
+
+Holds an array of (the IDs of) all measurements used by FreeSewing designs.
+
+```js
+import { measurements } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.measurements} />
+
+### roles
+
+Holds an object detailing the roles for role-based access control (RBAC) on the
+FreeSewing backend.
+
+```js
+import { roles } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.roles} />
+
+### sewingTechniques
+
+Holds an array of (the IDs of) all the sewing techniques used by FreeSewing designs.
+
+```js
+import { sewingTechniques } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.sewingTechniques} />
+
+### uiRoles
+
+Holds an array of all the roles used on the FreeSewing website.
+
+```js
+import { uiRoles } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.uiRoles} />
+
+### urls
+
+Holds an array of all the roles used on the FreeSewing website.
+
+```js
+import { urls } from '@freesewing/config'
+```
+
+<ConsoleButton data={all.urls} />

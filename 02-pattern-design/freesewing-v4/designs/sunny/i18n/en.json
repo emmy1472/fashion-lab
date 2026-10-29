@@ -1,0 +1,67 @@
+{
+  "t": "Sunny",
+  "d": "An 18th century split-side skirt",
+  "p": {
+    "panel": "Front/back skirt panels",
+    "binding": "Binding",
+    "waistband": "Waistband"
+  },
+  "s": {
+    "cutPanel.t": "The skirt front/back panels are not shown",
+    "cutPanel.d": "Each **panel** is a rectangles of fabric {{{ width }}} wide and {{{ length }}} long",
+    "ribbonLength.t": "A ribbon is selected for waistband ties",
+    "ribbonLength.d": "This will require two lengths of ribbon approximately {{{ waistbandLength }}} long",
+    "cutWaistband.t": "The waistband is not shown",
+    "cutWaistband.d": "The **waistband** is two rectangles of fabric {{{ width }}} wide and {{{ length }}} long",
+    "cutBinding.t": "The binding is not shown",
+    "cutBinding.d": "Each **binding** is two rectangles of fabric {{{ width }}} wide and {{{ length }}} long",
+    "fabricWaistbandSelected.t": "A fabric waistband is selected",
+    "fabricWaistbandSelected.d": "Extra waistband length may be required depending on fabric used and waistband width"
+  },
+  "o": {
+    "waistEase": {
+      "t": "Waist Ease",
+      "d": "Ease added to waistline."
+    },
+    "pleatOverlap": {
+      "t": "Pleat Overlap",
+      "d": "Percentage overlap with the previous pleat."
+    },
+    "sideOpeningLength": {
+      "t": "Side Opening Length",
+      "d": "Length of opening in the side seams."
+    },
+    "length": {
+      "t": "Length",
+      "d": "Skirt length"
+    },
+    "waistbandWidth": {
+      "t": "Waistband Width",
+      "d": "Width of the fabric waistband."
+    },
+    "bindingWidth": {
+      "t": "Waistband Width",
+      "d": "Width of the fabric waistband."
+    },
+    "fabricBinding": {
+      "t": "Fabric Binding",
+      "d": "Use a fabric binding to secure and finish the pleats."
+    },
+    "fabricWaistband": {
+      "t": "Fabric Waistband",
+      "d": "Construct a fabric waistband instead of using a ribbon."
+    },
+    "numPleats": {
+      "t": "Number of Pleats",
+      "d": "Number of pleats per side"
+    },
+    "waistbandLength": {
+      "t": "Waistband Length",
+      "d": "Length of waistband."
+    },
+    "hem": {
+      "t": "Hem",
+      "d": "Hem width"
+    }
+  }
+}

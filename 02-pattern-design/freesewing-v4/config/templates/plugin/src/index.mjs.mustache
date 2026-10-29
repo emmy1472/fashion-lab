@@ -1,0 +1,23 @@
+import about from '../about.json' with { type: 'json' }
+
+/*
+ * This is plugin-{{ name }}
+ *
+ * This skeleton file was auto-generated.
+ * For help on writing plugins, see the plugin guide at:
+ * https://freesewing.dev/guides/plugins/
+ */
+
+export const plugin = {
+  name: about.id,
+  version: about.version,
+  hooks: { },
+  macros: { },
+  store: [ ],
+}
+
+/*
+ * More specifically named exports
+ */
+export const {{name}}Plugin = plugin
+export const plugin{{capitalized_name}} = plugin

@@ -1,0 +1,79 @@
+import { base as brianBase } from '@freesewing/brian'
+
+export const base = {
+  name: 'devon.base',
+  from: brianBase,
+  hide: {
+    self: true,
+    from: true,
+    inherited: true,
+  },
+  measurements: [
+    'biceps',
+    'chest',
+    'highBust',
+    'hips',
+    'hpsToBust',
+    'hpsToWaistBack',
+    'neck',
+    'seat',
+    'seatBack',
+    // 'seatFront',
+    'shoulderToShoulder',
+    'shoulderSlope',
+    'waistToArmpit',
+    'waistToHips',
+    'waist',
+    'waistBack',
+    // 'waistFront',
+  ],
+
+  options: {
+    // Constants
+    draftForHighBust: true,
+    pocketHeight: 0.5,
+    frontPocketOpening: 160 / 197,
+
+    // Parameters
+    armholeDepth: {
+      pct: 12,
+      min: -10,
+      max: 50,
+      menu: (settings, mergedOptions) => (mergedOptions?.legacyArmholeDepth ? false : 'advanced'),
+    },
+    bicepsEase: { pct: 15, min: 0, max: 50, menu: 'fit' },
+    chestEase: { pct: 20, min: 0, max: 35, menu: 'fit' },
+    cuffEase: { pct: 40, min: 0, max: 200, menu: 'fit' },
+    cuffWidth: { pct: 7.5, min: 0, max: 10, menu: 'style' },
+    hemEase: { pct: 12, min: 0, max: 20, menu: 'fit' },
+    lengthBonus: { pct: 9, min: 0, max: 40, menu: 'style' },
+    neckDrop: { pct: 6, min: 0, max: 10, menu: 'style' },
+    shoulderEase: { pct: 20, min: -2, max: 26, menu: 'fit' },
+    shoulderShift: { pct: 2.6, min: 0, max: 6, menu: 'style' },
+    s3Collar: { pct: 75, min: 0, max: 100, menu: 'style' },
+    s3Armhole: { pct: 75, min: 0, max: 100, menu: 'style' },
+    waistbandWidth: { pct: 4.67, min: 1, max: 10, menu: 'style' },
+    waistAdjustment: { bool: true, menu: 'style' },
+    fullBustAdjustment: { bool: false, menu: 'style' },
+    frontPocket: { bool: true, menu: 'style' },
+    yokeDrop: { pct: 33.5, min: 17, max: 50, menu: 'style' },
+  },
+  draft: ({ options, points, snippets, Point, macro, part }) => {
+    for (const i in snippets) {
+      delete snippets[i]
+    }
+    macro('rmtitle')
+
+    points.cbYoke = points.cbNeck.shiftFractionTowards(points.cbWaist, options.yokeDrop)
+
+    for (let key of ['Shoulder', 'Armhole', 'Chest', 'Waist', 'Hips', 'Hem', 'Yoke']) {
+      points[`cf${key}`] = new Point(points[`cb${key}`].x, points[`cb${key}`].y)
+    }
+
+    points.cfNeckOrg = points.cfNeck.clone()
+    points.cfNeck = points.cfNeck.shiftFractionTowards(points.cfWaist, options.neckDrop)
+    points.cfNeckCp1 = points.cfNeckCp1.shift(270, points.cfNeckOrg.dist(points.cfNeck))
+
+    return part
+  },
+}

@@ -1,0 +1,34 @@
+---
+description: Suggest updates to FreeSewing documentation or site content
+labels: [':+1: good first issue', ':book: documentation']
+name: '📝 Documentation or content update'
+title: '[docs]: '
+body:
+  - type: markdown
+    attributes:
+      value: 'Found an issue in our documentation, a blog post, showcase or other content? Please complete the information below so we can fix it :point_down:'
+  - type: input
+    id: url
+    attributes:
+      label: 'Where can we see the problem? 🤔'
+      description: Provide a link here to the page to be updated. If the page provides an anchor link to the section of interest (indicated by a chain icon next to a heading) please copy that link if possible.
+      placeholder: 'https://freesewing/docs/patterns/aaron/cutting'
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested content
+      description: Do you have any changes you'd like to suggest to improve the documentation?
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Add any other context or screenshots about the issue you found here.
+  - type: markdown
+    attributes:
+      value: Looking to tackle this issue? Check out our [markdown guide](https://freesewing.dev/guides/markdown) to learn how to format documentation.
+  - type: markdown
+    attributes:
+      value: |
+        Please keep in mind that **FreeSewing is a non-profit project** that depends on **[your support](https://freesewing.org/patrons/join/)**.
+---
+

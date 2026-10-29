@@ -1,0 +1,92 @@
+---
+title: Draft Pattern (draft view)
+---
+
+import { PatternDiagram } from '@site/src/components/editor-docs.js'
+
+The Pattern Editors **draft view** is where you will end up spending most of
+your time.
+
+#### Purpose of the draft view
+
+To appreciate the significance of the draft view, it’s good to know what makes
+a FreeSewing pattern:
+
+<PatternDiagram />
+
+The diagram above helps us understand the Editor's priorities:
+
+- First it will prompt you for the design you want to use (using [the **designs** view](#designs))
+- Then it will ensure we have all required measurements (using [the **measurements** view](#measurements))
+- Finally it will ask you how _exactly_ you would like your pattern (using [the **draft** view](#draft))
+
+In other words, the goal of the draft view is to let your customize your pattern.
+To make that intuitive, it will show you a live preview of what your patterns looks like.
+
+#### Layout of the draft view
+
+<Tabs>
+  <TabItem value="desktop" label="On Desktop">
+    ![A screenshot of the FreeSewing Editor in draft view, on a desktop, with various areas
+    highlighted](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/29e8dd5d-101e-4123-cd39-991fd5c66400/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in draft view, on a desktop, with various areas
+      highlighted._
+    </div>
+  </TabItem>
+  <TabItem value="tablet" label="On Tablet">
+    ![A screenshot of the FreeSewing Editor in measurements view, on a tablet, with various areas
+    highlighted](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/2a95ff6c-2b7d-41b1-182f-bb544c359d00/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in measurements view, on a tablet, with various areas
+      highlighted._
+    </div>
+  </TabItem>
+  <TabItem value="mobile" label="On Mobile">
+    ![A screenshot of the FreeSewing Editor in measurements view on mobile, with various areas
+    highlighted](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/d72f7db8-0d9d-4ad5-0f71-79d1f4c49c00/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in measurements view, on mobile, with various areas
+      highlighted._
+    </div>
+  </TabItem>
+</Tabs>
+
+- The draft view has the [ribbon area](#areas) at the top where we will find:
+  - [The **view** menu](#view-menu) (not view-specific, it is the one with the **Draft pattern** label)
+  - The view-specific menus, including:
+    - [The **Design Options** menu](#options-menu) (highlighted in orange with the **Aaron Options** label, because our example uses the [Aaron design](/designs/aaron)
+    - [The **Core Settings** menu](#settings-menu) (highlighted in yellow)
+    - [The **UI Preferences** menu](#preferences-menu) (highlighted in green)
+    - [The **Flags** menu](#flags-menu)
+    - Icons to toggle certain [**Core Settings**](#settings-menu) (highlighted in the same yellow as the **Core Settings** menu
+    - Icons to toggle certain [**UI Preferences**](#preferences-menu) (highlighted in the same green as the **UI Preferences** menu
+    - The [**undo** icons](#undo-menu) as well as [the undo menu](#undo-menu) (highlighted in lavender)
+    - The [**restore** icons](#restore-menu) (highlighted in teal)
+    - The [**save**, **save as**, and **export** icons](#save-menu) (highlighted in gray)
+- In [the **main working area**](#areas), we have:
+  - [The pattern area](#areas) on the left (highlighted in red)
+    - The [**zoom** and **rotate** icons](#zoom-menu) inside [the pattern area](#areas), anchored at the top right (highlighted in mint)
+  - [The **aside** area](#areas) on the right, holding:
+    - The [Design Options menu](#options-menu) (highlighted in orange, same as in [the ribbon area](#areas))
+    - The [Core Settings menu](#settings-menu) (highlighted in yellow, same as in [the ribbon area](#areas))
+    - The [UI Preferences menu](#preferences-menu) (highlighted in green, same as in [the ribbon area](#areas))
+
+:::tip
+Refer to the documentation on the Editor areas and Editor menus to more in-depth info about each of these.
+:::
+
+:::note
+Not all menus are available on mobile, but all features are.
+:::
+
+#### Caveats of the draft view
+
+The [pattern area](#areas) implements its own pan, scroll, and zoom logic that
+allows you to scroll, pan, and zoom the SVG pattern.
+
+When this area takes up most of the screen, this can cause confusion when you
+try to scroll the page, but in reality you are scrolling the pattern.
+
+You can use the [**zoom** and **rotate** icons](#zoom-menu) anchored at the
+top-right to zoom if you find that work better for you.

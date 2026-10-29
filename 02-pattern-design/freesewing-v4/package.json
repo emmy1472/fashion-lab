@@ -1,0 +1,116 @@
+{
+  "name": "root",
+  "private": true,
+  "description": "FreeSewing is an open source platform for made-to-measure sewing patterns",
+  "keywords": [
+    "sewing",
+    "parametric design",
+    "made-to-measure"
+  ],
+  "author": "Joost De Cock <joost@decock.org> (https://github.com/joostdecock)",
+  "homepage": "https://freesewing.org/",
+  "license": "MIT",
+  "scripts": {
+    "add": "node --experimental-json-modules --no-warnings scripts/add-software.mjs",
+    "new": "node --experimental-json-modules --no-warnings scripts/add-software.mjs",
+    "build": "lerna run build",
+    "?": "node scripts/help.mjs",
+    "tips": "node scripts/help.mjs",
+    "org": "cd sites/org && npm run start",
+    "eu": "cd sites/org && npm run start",
+    "dev": "cd sites/dev && npm run start",
+    "studio": "cd sites/studio && npm run start",
+    "kickstart": "npm install && husky && npm run reconfigure && npm run tips",
+    "cleanall": "npx nx run-many --target=clean",
+    "test": "npx nx run-many --target=test",
+    "e2e": "npx nx run-many --target=e2e",
+    "prettier": "npx prettier --write 'config/*' 'config/**/*' 'packages/**/src/*.mjs' 'packages/i18n/src/locales/**/*.*' 'packages/**/tests/*.mjs' 'packages/react-components/src/**/*.mjs'",
+    "reconfigure": "all-contributors generate && node --experimental-json-modules --no-warnings scripts/reconfigure.mjs",
+    "sitebuildconfigure": "SITEBUILD=1 node --experimental-json-modules --no-warnings scripts/reconfigure.mjs",
+    "testall": "node scripts/testall.js",
+    "lint": "LINTER=1 nx run-many --target=lint -- ",
+    "qa": "npm run qa:prettier && npm run qa:lint",
+    "qa:prettier": "npx prettier",
+    "qa:lint": "npx eslint",
+    "release": "lerna exec --no-bail -- npm publish",
+    "postrelease": "git add . && git commit -m ':bookmark: v$npm_package_version' && git tag -a v$npm_package_version -m ':bookmark: FreeSewing v$npm_package_version'",
+    "ship": "lerna exec --no-bail -- npm publish",
+    "bump": "git add . && git commit -m 'chore: Reconfigure packages'",
+    "contributors:add": "all-contributors add",
+    "contributors:generate": "all-contributors generate",
+    "famadd": "all-contributors add",
+    "famgen": "all-contributors generate",
+    "checkdocs": "remark markdown --quiet --frail",
+    "strapi:translate": "node scripts/strapi-en-to-other.mjs",
+    "fixdocs": "remark markdown --quiet --frail --output",
+    "reversion": "node --no-warnings scripts/reversion.mjs && npm run reconfigure"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/freesewing/freesewing.git"
+  },
+  "bugs": {
+    "url": "https://github.com/freesewing/freesewing/issues"
+  },
+  "prettier": "@freesewing/prettier-config",
+  "lint-staged": {
+    "*": [
+      "npx prettier --write"
+    ]
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.0.3",
+    "@commitlint/config-conventional": "^19.0.3",
+    "@eslint/css": "^0.8.1",
+    "@eslint/js": "^9.27.0",
+    "@eslint/json": "^0.12.0",
+    "@eslint/markdown": "^6.4.0",
+    "@nx/eslint": "20.2.1",
+    "all-contributors-cli": "^6.26.1",
+    "axios": "^1.5.1",
+    "chalk": "^4.1.0",
+    "cross-env": "^7.0.2",
+    "eslint": "^9.27.0",
+    "eslint-plugin-jsonc": "^2.4.0",
+    "eslint-plugin-markdown": "^5.0.0",
+    "eslint-plugin-mongo": "^1.0.5",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-yaml": "^0.5.0",
+    "execa": "^9.3.1",
+    "globals": "^16.2.0",
+    "husky": "^9.0.10",
+    "js-yaml": "^4.0.0",
+    "lerna": "^8.0.0",
+    "lint-staged": "^15.0.1",
+    "mocha": "^10.0.0",
+    "mustache": "^4.0.1",
+    "nx": "20.2.1",
+    "nyc": "^15.1.0",
+    "prettier": "^3.0.0",
+    "pretty-quick": "^4.0.0",
+    "rimraf": "^5.0.0",
+    "standard": "^17.0.0"
+  },
+  "workspaces": [
+    "designs/*",
+    "packages/*",
+    "plugins/*",
+    "sites/*"
+  ],
+  "version": "0.0.0",
+  "dependencies": {
+    "@babel/eslint-parser": "^7.22.15",
+    "@babel/plugin-syntax-import-assertions": "^7.22.5",
+    "@babel/preset-react": "^7.22.15",
+    "c8": "^10.1.2",
+    "glob": "^11.0.1",
+    "global": "^4.4.0",
+    "kill-port": "^2.0.1",
+    "rehype-format": "^5.0.0",
+    "rehype-stringify": "^10.0.1",
+    "tlds": "^1.255.0"
+  },
+  "engines": {
+    "node": ">=20.0"
+  }
+}

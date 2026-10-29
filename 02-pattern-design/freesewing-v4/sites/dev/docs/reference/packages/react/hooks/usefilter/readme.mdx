@@ -1,0 +1,36 @@
+---
+title: useFilter
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { Popout } from '@freesewing/react/components/Popout'
+import { Tab, Tabs } from '@freesewing/react/components/Tab'
+
+<DocusaurusDoc>
+
+The **useFilter** hook uses [atomWithHash](https://jotai.org/docs/extensions/location#atomwithhash) under the hood.
+It allows one to keep state in the URL, using the hash value.
+
+It is named `useFilter` because it was initially created to filter FreeSewing
+designs on the design page. But you can keep any sort of state with it.
+
+## Example
+
+```js
+import { useFilter } from '@freesewing/react/hooks/useFilter'
+
+const MyComponent = ({ name = 'aaron' }) => {
+  const [filter, setFilter] = useFilter()
+
+  // ...
+}
+```
+
+## Return value
+
+This hook behaves just as the native `useState` hook, expect that it stores the state in the URL.
+
+</DocusaurusDoc>
+
+
+

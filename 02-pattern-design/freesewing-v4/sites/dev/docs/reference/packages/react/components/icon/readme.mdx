@@ -1,0 +1,981 @@
+---
+title: Icon
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.icon.mjs'
+import {
+  ApplyIcon,
+  AsideIcon,
+  BackIcon,
+  BeakerIcon,
+  BookmarkIcon,
+  BoolNoIcon,
+  BoolYesIcon,
+  BulletIcon,
+  ChatIcon,
+  CircleIcon,
+  CisFemaleIcon,
+  CisMaleIcon,
+  CloneIcon,
+  CloseIcon,
+  CodeIcon,
+  CompareIcon,
+  ControlIcon,
+  CopyIcon,
+  CoverPageIcon,
+  CuratedMeasurementsSetIcon,
+  DesignIcon,
+  DetailIcon,
+  DocsIcon,
+  DownIcon,
+  DownloadIcon,
+  EditIcon,
+  EmailIcon,
+  ErrorIcon,
+  ExpandIcon,
+  ExportIcon,
+  FailureIcon,
+  FilterIcon,
+  FingerprintIcon,
+  FixmeIcon,
+  FlagIcon,
+  FlipIcon,
+  FreeSewingIcon,
+  GaugeIcon,
+  GitHubIcon,
+  GoogleIcon,
+  GroupIcon,
+  HeartIcon,
+  HelpIcon,
+  IconWrapper,
+  IncludeIcon,
+  InstagramIcon,
+  KeyIcon,
+  KioskIcon,
+  LeftIcon,
+  LinkIcon,
+  ListIcon,
+  LockIcon,
+  MarginIcon,
+  MastodonIcon,
+  MeasurementsIcon,
+  MeasurementsSetIcon,
+  MenuIcon,
+  NewMeasurementsSetIcon,
+  NewPatternIcon,
+  NewsletterIcon,
+  NoIcon,
+  OkIcon,
+  OptionsIcon,
+  PageMarginIcon,
+  PageOrientationIcon,
+  PageSizeIcon,
+  PaperlessIcon,
+  PatternIcon,
+  PlusIcon,
+  PrintIcon,
+  PrivacyIcon,
+  RedditIcon,
+  ReloadIcon,
+  ResetAllIcon,
+  ResetIcon,
+  RightIcon,
+  RocketIcon,
+  RotateIcon,
+  RssIcon,
+  SaIcon,
+  SaveAsIcon,
+  SaveIcon,
+  ScaleIcon,
+  SearchIcon,
+  SettingsIcon,
+  ShieldIcon,
+  ShowcaseIcon,
+  SignoutIcon,
+  SpinnerIcon,
+  SuccessIcon,
+  TikTokIcon,
+  TipIcon,
+  TrashIcon,
+  TwitchIcon,
+  UiIcon,
+  UndoIcon,
+  UnitsIcon,
+  UpIcon,
+  UploadIcon,
+  UserIcon,
+  UxIcon,
+  WarningIcon,
+  WrenchIcon,
+  XrayIcon,
+  ZoomInIcon,
+  ZoomOutIcon,
+} from '@freesewing/react/components/Icon'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Icon** component family provides the following components:
+
+- [ApplyIcon](#applyicon)
+- [AsideIcon](#asideicon)
+- [BackIcon](#backicon)
+- [BeakerIcon](#beakericon)
+- [BookmarkIcon](#bookmarkicon)
+- [BoolNoIcon](#boolnoicon)
+- [BoolYesIcon](#boolyesicon)
+- [BulletIcon](#bulleticon)
+- [ChatIcon](#chaticon)
+- [CircleIcon](#circleicon)
+- [CisFemaleIcon](#cisfemaleicon)
+- [CisMaleIcon](#cismaleicon)
+- [CloneIcon](#cloneicon)
+- [CloseIcon](#closeicon)
+- [CodeIcon](#codeicon)
+- [CompareIcon](#compareicon)
+- [ControlIcon](#controlicon)
+- [CopyIcon](#copyicon)
+- [CoverPageIcon](#coverpageicon)
+- [CuratedMeasurementsSetIcon](#curatedmeasurementsseticon)
+- [DesignIcon](#designicon)
+- [DetailIcon](#detailicon)
+- [DocsIcon](#docsicon)
+- [DownIcon](#downicon)
+- [DownloadIcon](#downloadicon)
+- [EditIcon](#editicon)
+- [EmailIcon](#emailicon)
+- [ErrorIcon](#erroricon)
+- [ExpandIcon](#expandicon)
+- [ExportIcon](#exporticon)
+- [FailureIcon](#failureicon)
+- [FilterIcon](#filtericon)
+- [FingerprintIcon](#fingerprinticon)
+- [FixmeIcon](#fixmeicon)
+- [FlagIcon](#flagicon)
+- [FlipIcon](#flipicon)
+- [FreeSewingIcon](#freesewingicon)
+- [GaugeIcon](#gaugeicon)
+- [GitHubIcon](#githubicon)
+- [GoogleIcon](#googleicon)
+- [GroupIcon](#groupicon)
+- [HeartIcon](#hearticon)
+- [HelpIcon](#helpicon)
+- [IconWrapper](#iconwrapper)
+- [IncludeIcon](#includeicon)
+- [InstagramIcon](#instagramicon)
+- [KeyIcon](#keyicon)
+- [KioskIcon](#kioskicon)
+- [LeftIcon](#lefticon)
+- [LinkIcon](#linkicon)
+- [ListIcon](#listicon)
+- [LockIcon](#lockicon)
+- [MarginIcon](#marginicon)
+- [MastodonIcon](#mastodonicon)
+- [MeasurementsIcon](#measurementsicon)
+- [MeasurementsSetIcon](#measurementsseticon)
+- [MenuIcon](#menuicon)
+- [NewMeasurementsSetIcon](#newmeasurementsseticon)
+- [NewPatternIcon](#newpatternicon)
+- [NewsletterIcon](#newslettericon)
+- [NoIcon](#noicon)
+- [OkIcon](#okicon)
+- [OptionsIcon](#optionsicon)
+- [PageMarginIcon](#pagemarginicon)
+- [PageOrientationIcon](#pageorientationicon)
+- [PageSizeIcon](#pagesizeicon)
+- [PaperlessIcon](#paperlessicon)
+- [PatternIcon](#patternicon)
+- [PlusIcon](#plusicon)
+- [PrintIcon](#printicon)
+- [PrivacyIcon](#privacyicon)
+- [RedditIcon](#redditicon)
+- [ReloadIcon](#reloadicon)
+- [ResetAllIcon](#resetallicon)
+- [ResetIcon](#reseticon)
+- [RightIcon](#righticon)
+- [RocketIcon](#rocketicon)
+- [RotateIcon](#rotateicon)
+- [RssIcon](#rssicon)
+- [SaIcon](#saicon)
+- [SaveAsIcon](#saveasicon)
+- [SaveIcon](#saveicon)
+- [ScaleIcon](#scaleicon)
+- [SearchIcon](#searchicon)
+- [SettingsIcon](#settingsicon)
+- [ShieldIcon](#shieldicon)
+- [ShowcaseIcon](#showcaseicon)
+- [SignoutIcon](#signouticon)
+- [SpinnerIcon](#spinnericon)
+- [SuccessIcon](#successicon)
+- [TikTokIcon](#tiktokicon)
+- [TipIcon](#tipicon)
+- [TrashIcon](#trashicon)
+- [TwitchIcon](#twitchicon)
+- [UiIcon](#uiicon)
+- [UndoIcon](#undoicon)
+- [UnitsIcon](#unitsicon)
+- [UpIcon](#upicon)
+- [UploadIcon](#uploadicon)
+- [UserIcon](#usericon)
+- [UxIcon](#uxicon)
+- [WarningIcon](#warningicon)
+- [WrenchIcon](#wrenchicon)
+- [XrayIcon](#xrayicon)
+- [ZoomInIcon](#zoominicon)
+- [ZoomOutIcon](#zoomouticon)
+
+#### Visual Overview
+
+To make it easier to pick an Icon, here is a visual overview:
+
+<div className="tw:flex tw:flex-row tw:flex-wrap tw:items-center tw:gap-2 tw:my-2">
+  <a href="#applyicon">
+    <ApplyIcon />
+  </a>
+  <a href="#asideicon">
+    <AsideIcon />
+  </a>
+  <a href="#backicon">
+    <BackIcon />
+  </a>
+  <a href="#beakericon">
+    <BeakerIcon />
+  </a>
+  <a href="#bookmarkicon">
+    <BookmarkIcon />
+  </a>
+  <a href="#boolnoicon">
+    <BoolNoIcon />
+  </a>
+  <a href="#boolyesicon">
+    <BoolYesIcon />
+  </a>
+  <a href="#bulleticon">
+    <BulletIcon />
+  </a>
+  <a href="#chaticon">
+    <ChatIcon />
+  </a>
+  <a href="#circleicon">
+    <CircleIcon />
+  </a>
+  <a href="#cisfemaleicon">
+    <CisFemaleIcon />
+  </a>
+  <a href="#cismaleicon">
+    <CisMaleIcon />
+  </a>
+  <a href="#cloneicon">
+    <CloneIcon />
+  </a>
+  <a href="#closeicon">
+    <CloseIcon />
+  </a>
+  <a href="#codeicon">
+    <CodeIcon />
+  </a>
+  <a href="#compareicon">
+    <CompareIcon />
+  </a>
+  <a href="#controlicon">
+    <ControlIcon />
+  </a>
+  <a href="#copyicon">
+    <CopyIcon />
+  </a>
+  <a href="#coverpageicon">
+    <CoverPageIcon />
+  </a>
+  <a href="#curatedmeasurementsseticon">
+    <CuratedMeasurementsSetIcon />
+  </a>
+  <a href="#designicon">
+    <DesignIcon />
+  </a>
+  <a href="#detailicon">
+    <DetailIcon />
+  </a>
+  <a href="#docsicon">
+    <DocsIcon />
+  </a>
+  <a href="#downicon">
+    <DownIcon />
+  </a>
+  <a href="#downloadicon">
+    <DownloadIcon />
+  </a>
+  <a href="#editicon">
+    <EditIcon />
+  </a>
+  <a href="#emailicon">
+    <EmailIcon />
+  </a>
+  <a href="#erroricon">
+    <ErrorIcon />
+  </a>
+  <a href="#expandicon">
+    <ExpandIcon />
+  </a>
+  <a href="#exporticon">
+    <ExportIcon />
+  </a>
+  <a href="#failureicon">
+    <FailureIcon />
+  </a>
+  <a href="#filtericon">
+    <FilterIcon />
+  </a>
+  <a href="#fingerprinticon">
+    <FingerprintIcon />
+  </a>
+  <a href="#fixmeicon">
+    <FixmeIcon />
+  </a>
+  <a href="#flagicon">
+    <FlagIcon />
+  </a>
+  <a href="#flipicon">
+    <FlipIcon />
+  </a>
+  <a href="#freesewingicon">
+    <FreeSewingIcon />
+  </a>
+  <a href="#gaugeicon">
+    <GaugeIcon />
+  </a>
+  <a href="#githubicon">
+    <GitHubIcon />
+  </a>
+  <a href="#googleicon">
+    <GoogleIcon />
+  </a>
+  <a href="#groupicon">
+    <GroupIcon />
+  </a>
+  <a href="#hearticon">
+    <HeartIcon />
+  </a>
+  <a href="#helpicon">
+    <HelpIcon />
+  </a>
+  <a href="#iconwrapper">
+    <IconWrapper />
+  </a>
+  <a href="#includeicon">
+    <IncludeIcon />
+  </a>
+  <a href="#instagramicon">
+    <InstagramIcon />
+  </a>
+  <a href="#keyicon">
+    <KeyIcon />
+  </a>
+  <a href="#kioskicon">
+    <KioskIcon />
+  </a>
+  <a href="#lefticon">
+    <LeftIcon />
+  </a>
+  <a href="#linkicon">
+    <LinkIcon />
+  </a>
+  <a href="#listicon">
+    <ListIcon />
+  </a>
+  <a href="#lockicon">
+    <LockIcon />
+  </a>
+  <a href="#marginicon">
+    <MarginIcon />
+  </a>
+  <a href="#mastodonicon">
+    <MastodonIcon />
+  </a>
+  <a href="#measurementsicon">
+    <MeasurementsIcon />
+  </a>
+  <a href="#measurementsseticon">
+    <MeasurementsSetIcon />
+  </a>
+  <a href="#menuicon">
+    <MenuIcon />
+  </a>
+  <a href="#newmeasurementsseticon">
+    <NewMeasurementsSetIcon />
+  </a>
+  <a href="#newpatternicon">
+    <NewPatternIcon />
+  </a>
+  <a href="#newslettericon">
+    <NewsletterIcon />
+  </a>
+  <a href="#noicon">
+    <NoIcon />
+  </a>
+  <a href="#okicon">
+    <OkIcon />
+  </a>
+  <a href="#optionsicon">
+    <OptionsIcon />
+  </a>
+  <a href="#pagemarginicon">
+    <PageMarginIcon />
+  </a>
+  <a href="#pageorientationicon">
+    <PageOrientationIcon />
+  </a>
+  <a href="#pagesizeicon">
+    <PageSizeIcon />
+  </a>
+  <a href="#paperlessicon">
+    <PaperlessIcon />
+  </a>
+  <a href="#patternicon">
+    <PatternIcon />
+  </a>
+  <a href="#plusicon">
+    <PlusIcon />
+  </a>
+  <a href="#printicon">
+    <PrintIcon />
+  </a>
+  <a href="#privacyicon">
+    <PrivacyIcon />
+  </a>
+  <a href="#redditicon">
+    <RedditIcon />
+  </a>
+  <a href="#reloadicon">
+    <ReloadIcon />
+  </a>
+  <a href="#resetallicon">
+    <ResetAllIcon />
+  </a>
+  <a href="#reseticon">
+    <ResetIcon />
+  </a>
+  <a href="#righticon">
+    <RightIcon />
+  </a>
+  <a href="#rocketicon">
+    <RocketIcon />
+  </a>
+  <a href="#rotateicon">
+    <RotateIcon />
+  </a>
+  <a href="#rssicon">
+    <RssIcon />
+  </a>
+  <a href="#saicon">
+    <SaIcon />
+  </a>
+  <a href="#saveasicon">
+    <SaveAsIcon />
+  </a>
+  <a href="#saveicon">
+    <SaveIcon />
+  </a>
+  <a href="#scaleicon">
+    <ScaleIcon />
+  </a>
+  <a href="#searchicon">
+    <SearchIcon />
+  </a>
+  <a href="#settingsicon">
+    <SettingsIcon />
+  </a>
+  <a href="#shieldicon">
+    <ShieldIcon />
+  </a>
+  <a href="#showcaseicon">
+    <ShowcaseIcon />
+  </a>
+  <a href="#signouticon">
+    <SignoutIcon />
+  </a>
+  <a href="#spinnericon">
+    <SpinnerIcon />
+  </a>
+  <a href="#successicon">
+    <SuccessIcon />
+  </a>
+  <a href="#tiktokicon">
+    <TikTokIcon />
+  </a>
+  <a href="#tipicon">
+    <TipIcon />
+  </a>
+  <a href="#trashicon">
+    <TrashIcon />
+  </a>
+  <a href="#twitchicon">
+    <TwitchIcon />
+  </a>
+  <a href="#uiicon">
+    <UiIcon />
+  </a>
+  <a href="#undoicon">
+    <UndoIcon />
+  </a>
+  <a href="#unitsicon">
+    <UnitsIcon />
+  </a>
+  <a href="#upicon">
+    <UpIcon />
+  </a>
+  <a href="#uploadicon">
+    <UploadIcon />
+  </a>
+  <a href="#usericon">
+    <UserIcon />
+  </a>
+  <a href="#uxicon">
+    <UxIcon />
+  </a>
+  <a href="#warningicon">
+    <WarningIcon />
+  </a>
+  <a href="#wrenchicon">
+    <WrenchIcon />
+  </a>
+  <a href="#xrayicon">
+    <XrayIcon />
+  </a>
+  <a href="#zoominicon">
+    <ZoomInIcon />
+  </a>
+  <a href="#zoomouticon">
+    <ZoomOutIcon />
+  </a>
+</div>
+
+### ApplyIcon
+
+<ComponentDocs docs={jsdoc.jsdocApplyIcon} example={ApplyIcon} />
+
+### AsideIcon
+
+<ComponentDocs docs={jsdoc.jsdocAsideIcon} example={AsideIcon} />
+
+### BackIcon
+
+<ComponentDocs docs={jsdoc.jsdocBackIcon} example={BackIcon} />
+
+### BeakerIcon
+
+<ComponentDocs docs={jsdoc.jsdocBeakerIcon} example={BeakerIcon} />
+
+### BookmarkIcon
+
+<ComponentDocs docs={jsdoc.jsdocBookmarkIcon} example={BookmarkIcon} />
+
+### BoolNoIcon
+
+<ComponentDocs docs={jsdoc.jsdocBoolNoIcon} example={BoolNoIcon} />
+
+### BoolYesIcon
+
+<ComponentDocs docs={jsdoc.jsdocBoolYesIcon} example={BoolYesIcon} />
+
+### BulletIcon
+
+<ComponentDocs docs={jsdoc.jsdocBulletIcon} example={BulletIcon} />
+
+### ChatIcon
+
+<ComponentDocs docs={jsdoc.jsdocChatIcon} example={ChatIcon} />
+
+### CircleIcon
+
+<ComponentDocs docs={jsdoc.jsdocCircleIcon} example={CircleIcon} />
+
+### CisFemaleIcon
+
+<ComponentDocs docs={jsdoc.jsdocCisFemaleIcon} example={CisFemaleIcon} />
+
+### CisMaleIcon
+
+<ComponentDocs docs={jsdoc.jsdocCisMaleIcon} example={CisMaleIcon} />
+
+### CloneIcon
+
+<ComponentDocs docs={jsdoc.jsdocCloneIcon} example={CloneIcon} />
+
+### CloseIcon
+
+<ComponentDocs docs={jsdoc.jsdocCloseIcon} example={CloseIcon} />
+
+### CodeIcon
+
+<ComponentDocs docs={jsdoc.jsdocCodeIcon} example={CodeIcon} />
+
+### CompareIcon
+
+<ComponentDocs docs={jsdoc.jsdocCompareIcon} example={CompareIcon} />
+
+### ControlIcon
+
+<ComponentDocs docs={jsdoc.jsdocControlIcon} example={ControlIcon} />
+
+### CopyIcon
+
+<ComponentDocs docs={jsdoc.jsdocCopyIcon} example={CopyIcon} />
+
+### CoverPageIcon
+
+<ComponentDocs docs={jsdoc.jsdocCoverPageIcon} example={CoverPageIcon} />
+
+### CuratedMeasurementsSetIcon
+
+<ComponentDocs docs={jsdoc.jsdocCuratedMeasurementsSetIcon} example={CuratedMeasurementsSetIcon} />
+
+### DesignIcon
+
+<ComponentDocs docs={jsdoc.jsdocDesignIcon} example={DesignIcon} />
+
+### DetailIcon
+
+<ComponentDocs docs={jsdoc.jsdocDetailIcon} example={DetailIcon} />
+
+### DocsIcon
+
+<ComponentDocs docs={jsdoc.jsdocDocsIcon} example={DocsIcon} />
+
+### DownIcon
+
+<ComponentDocs docs={jsdoc.jsdocDownIcon} example={DownIcon} />
+
+### DownloadIcon
+
+<ComponentDocs docs={jsdoc.jsdocDownloadIcon} example={DownloadIcon} />
+
+### EditIcon
+
+<ComponentDocs docs={jsdoc.jsdocEditIcon} example={EditIcon} />
+
+### EmailIcon
+
+<ComponentDocs docs={jsdoc.jsdocEmailIcon} example={EmailIcon} />
+
+### ErrorIcon
+
+<ComponentDocs docs={jsdoc.jsdocErrorIcon} example={ErrorIcon} />
+
+### ExpandIcon
+
+<ComponentDocs docs={jsdoc.jsdocExpandIcon} example={ExpandIcon} />
+
+### ExportIcon
+
+<ComponentDocs docs={jsdoc.jsdocExportIcon} example={ExportIcon} />
+
+### FailureIcon
+
+<ComponentDocs docs={jsdoc.jsdocFailureIcon} example={FailureIcon} />
+
+### FilterIcon
+
+<ComponentDocs docs={jsdoc.jsdocFilterIcon} example={FilterIcon} />
+
+### FingerprintIcon
+
+<ComponentDocs docs={jsdoc.jsdocFingerprintIcon} example={FingerprintIcon} />
+
+### FixmeIcon
+
+<ComponentDocs docs={jsdoc.jsdocFixmeIcon} example={FixmeIcon} />
+
+### FlagIcon
+
+<ComponentDocs docs={jsdoc.jsdocFlagIcon} example={FlagIcon} />
+
+### FlipIcon
+
+<ComponentDocs docs={jsdoc.jsdocFlipIcon} example={FlipIcon} />
+
+### FreeSewingIcon
+
+<ComponentDocs docs={jsdoc.jsdocFreeSewingIcon} example={FreeSewingIcon} />
+
+### GaugeIcon
+
+<ComponentDocs docs={jsdoc.jsdocGaugeIcon} example={GaugeIcon} />
+
+### GitHubIcon
+
+<ComponentDocs docs={jsdoc.jsdocGitHubIcon} example={GitHubIcon} />
+
+### GoogleIcon
+
+<ComponentDocs docs={jsdoc.jsdocGoogleIcon} example={GoogleIcon} />
+
+### GroupIcon
+
+<ComponentDocs docs={jsdoc.jsdocGroupIcon} example={GroupIcon} />
+
+### HeartIcon
+
+<ComponentDocs docs={jsdoc.jsdocHeartIcon} example={HeartIcon} />
+
+### HelpIcon
+
+<ComponentDocs docs={jsdoc.jsdocHelpIcon} example={HelpIcon} />
+
+### IconWrapper
+
+<ComponentDocs docs={jsdoc.jsdocIconWrapper} example={IconWrapper} />
+
+### IncludeIcon
+
+<ComponentDocs docs={jsdoc.jsdocIncludeIcon} example={IncludeIcon} />
+
+### InstagramIcon
+
+<ComponentDocs docs={jsdoc.jsdocInstagramIcon} example={InstagramIcon} />
+
+### KeyIcon
+
+<ComponentDocs docs={jsdoc.jsdocKeyIcon} example={KeyIcon} />
+
+### KioskIcon
+
+<ComponentDocs docs={jsdoc.jsdocKioskIcon} example={KioskIcon} />
+
+### LeftIcon
+
+<ComponentDocs docs={jsdoc.jsdocLeftIcon} example={LeftIcon} />
+
+### LinkIcon
+
+<ComponentDocs docs={jsdoc.jsdocLinkIcon} example={LinkIcon} />
+
+### ListIcon
+
+<ComponentDocs docs={jsdoc.jsdocListIcon} example={ListIcon} />
+
+### LockIcon
+
+<ComponentDocs docs={jsdoc.jsdocLockIcon} example={LockIcon} />
+
+### MarginIcon
+
+<ComponentDocs docs={jsdoc.jsdocMarginIcon} example={MarginIcon} />
+
+### MastodonIcon
+
+<ComponentDocs docs={jsdoc.jsdocMastodonIcon} example={MastodonIcon} />
+
+### MeasurementsIcon
+
+<ComponentDocs docs={jsdoc.jsdocMeasurementsIcon} example={MeasurementsIcon} />
+
+### MeasurementsSetIcon
+
+<ComponentDocs docs={jsdoc.jsdocMeasurementsSetIcon} example={MeasurementsSetIcon} />
+
+### MenuIcon
+
+<ComponentDocs docs={jsdoc.jsdocMenuIcon} example={MenuIcon} />
+
+### NewMeasurementsSetIcon
+
+<ComponentDocs docs={jsdoc.jsdocNewMeasurementsSetIcon} example={NewMeasurementsSetIcon} />
+
+### NewPatternIcon
+
+<ComponentDocs docs={jsdoc.jsdocNewPatternIcon} example={NewPatternIcon} />
+
+### NewsletterIcon
+
+<ComponentDocs docs={jsdoc.jsdocNewsletterIcon} example={NewsletterIcon} />
+
+### NoIcon
+
+<ComponentDocs docs={jsdoc.jsdocNoIcon} example={NoIcon} />
+
+### OkIcon
+
+<ComponentDocs docs={jsdoc.jsdocOkIcon} example={OkIcon} />
+
+### OptionsIcon
+
+<ComponentDocs docs={jsdoc.jsdocOptionsIcon} example={OptionsIcon} />
+
+### PageMarginIcon
+
+<ComponentDocs docs={jsdoc.jsdocPageMarginIcon} example={PageMarginIcon} />
+
+### PageOrientationIcon
+
+<ComponentDocs docs={jsdoc.jsdocPageOrientationIcon} example={PageOrientationIcon} />
+
+### PageSizeIcon
+
+<ComponentDocs docs={jsdoc.jsdocPageSizeIcon} example={PageSizeIcon} />
+
+### PaperlessIcon
+
+<ComponentDocs docs={jsdoc.jsdocPaperlessIcon} example={PaperlessIcon} />
+
+### PatternIcon
+
+<ComponentDocs docs={jsdoc.jsdocPatternIcon} example={PatternIcon} />
+
+### PlusIcon
+
+<ComponentDocs docs={jsdoc.jsdocPlusIcon} example={PlusIcon} />
+
+### PrintIcon
+
+<ComponentDocs docs={jsdoc.jsdocPrintIcon} example={PrintIcon} />
+
+### PrivacyIcon
+
+<ComponentDocs docs={jsdoc.jsdocPrivacyIcon} example={PrivacyIcon} />
+
+### RedditIcon
+
+<ComponentDocs docs={jsdoc.jsdocRedditIcon} example={RedditIcon} />
+
+### ReloadIcon
+
+<ComponentDocs docs={jsdoc.jsdocReloadIcon} example={ReloadIcon} />
+
+### ResetAllIcon
+
+<ComponentDocs docs={jsdoc.jsdocResetAllIcon} example={ResetAllIcon} />
+
+### ResetIcon
+
+<ComponentDocs docs={jsdoc.jsdocResetIcon} example={ResetIcon} />
+
+### RightIcon
+
+<ComponentDocs docs={jsdoc.jsdocRightIcon} example={RightIcon} />
+
+### RocketIcon
+
+<ComponentDocs docs={jsdoc.jsdocRocketIcon} example={RocketIcon} />
+
+### RotateIcon
+
+<ComponentDocs docs={jsdoc.jsdocRotateIcon} example={RotateIcon} />
+
+### RssIcon
+
+<ComponentDocs docs={jsdoc.jsdocRssIcon} example={RssIcon} />
+
+### SaIcon
+
+<ComponentDocs docs={jsdoc.jsdocSaIcon} example={SaIcon} />
+
+### SaveAsIcon
+
+<ComponentDocs docs={jsdoc.jsdocSaveAsIcon} example={SaveAsIcon} />
+
+### SaveIcon
+
+<ComponentDocs docs={jsdoc.jsdocSaveIcon} example={SaveIcon} />
+
+### ScaleIcon
+
+<ComponentDocs docs={jsdoc.jsdocScaleIcon} example={ScaleIcon} />
+
+### SearchIcon
+
+<ComponentDocs docs={jsdoc.jsdocSearchIcon} example={SearchIcon} />
+
+### SettingsIcon
+
+<ComponentDocs docs={jsdoc.jsdocSettingsIcon} example={SettingsIcon} />
+
+### ShieldIcon
+
+<ComponentDocs docs={jsdoc.jsdocShieldIcon} example={ShieldIcon} />
+
+### ShowcaseIcon
+
+<ComponentDocs docs={jsdoc.jsdocShowcaseIcon} example={ShowcaseIcon} />
+
+### SignoutIcon
+
+<ComponentDocs docs={jsdoc.jsdocSignoutIcon} example={SignoutIcon} />
+
+### SpinnerIcon
+
+<ComponentDocs docs={jsdoc.jsdocSpinnerIcon} example={SpinnerIcon} />
+
+### SuccessIcon
+
+<ComponentDocs docs={jsdoc.jsdocSuccessIcon} example={SuccessIcon} />
+
+### TikTokIcon
+
+<ComponentDocs docs={jsdoc.jsdocTikTokIcon} example={TikTokIcon} />
+
+### TipIcon
+
+<ComponentDocs docs={jsdoc.jsdocTipIcon} example={TipIcon} />
+
+### TrashIcon
+
+<ComponentDocs docs={jsdoc.jsdocTrashIcon} example={TrashIcon} />
+
+### TwitchIcon
+
+<ComponentDocs docs={jsdoc.jsdocTwitchIcon} example={TwitchIcon} />
+
+### UiIcon
+
+<ComponentDocs docs={jsdoc.jsdocUiIcon} example={UiIcon} />
+
+### UndoIcon
+
+<ComponentDocs docs={jsdoc.jsdocUndoIcon} example={UndoIcon} />
+
+### UnitsIcon
+
+<ComponentDocs docs={jsdoc.jsdocUnitsIcon} example={UnitsIcon} />
+
+### UpIcon
+
+<ComponentDocs docs={jsdoc.jsdocUpIcon} example={UpIcon} />
+
+### UploadIcon
+
+<ComponentDocs docs={jsdoc.jsdocUploadIcon} example={UploadIcon} />
+
+### UserIcon
+
+<ComponentDocs docs={jsdoc.jsdocUserIcon} example={UserIcon} />
+
+### UxIcon
+
+<ComponentDocs docs={jsdoc.jsdocUxIcon} example={UxIcon} />
+
+### WarningIcon
+
+<ComponentDocs docs={jsdoc.jsdocWarningIcon} example={WarningIcon} />
+
+### WrenchIcon
+
+<ComponentDocs docs={jsdoc.jsdocWrenchIcon} example={WrenchIcon} />
+
+### XrayIcon
+
+<ComponentDocs docs={jsdoc.jsdocXrayIcon} example={XrayIcon} />
+
+### ZoomInIcon
+
+<ComponentDocs docs={jsdoc.jsdocZoomInIcon} example={ZoomInIcon} />
+
+### ZoomOutIcon
+
+<ComponentDocs docs={jsdoc.jsdocZoomOutIcon} example={ZoomOutIcon} />
+
+</DocusaurusDoc>

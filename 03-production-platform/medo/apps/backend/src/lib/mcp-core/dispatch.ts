@@ -1,0 +1,467 @@
+/**
+ * Shared MCP core — tool dispatcher.
+ *
+ * `dispatchMcpTool(ctx, tools, name, args)` runs one registry tool against its
+ * real route via the loopback proxy. It is the single execution path for BOTH
+ * consumers of every surface:
+ *   - the JSON-RPC MCP endpoint (POST /{surface}/mcp), and
+ *   - the in-app streaming assistant, whose AI-SDK tools' `execute` delegate
+ *     straight here.
+ *
+ * It enforces three safety rails declared in the registry:
+ *   - dry_run   → return the planned request (+ current object for writes with
+ *                 a previewPath) without executing.
+ *   - confirm   → sensitive/DELETE tools require `confirm: true`; otherwise a
+ *                 `requires_confirmation` plan is returned for UI approval.
+ *   - reason    → dangerous tools additionally refuse without a `reason` string
+ *                 (forwarded as x-mcp-reason and audited); also require confirm.
+ *
+ * Each call emits one observability event through `ctx.observe` (#844).
+ */
+import type {
+  McpContext,
+  McpToolDef,
+  McpToolEvent,
+  McpToolResult,
+} from "./types"
+import { isDangerous, isSensitive } from "./schema"
+import { mcpScopeAllows, mcpToolTier } from "./tiers"
+import { callMcpRoute, type McpProxyError } from "./proxy"
+
+const substitutePath = (
+  template: string,
+  params: string[],
+  args: Record<string, unknown>
+): { path?: string; missing?: string } => {
+  let path = template
+  for (const p of params) {
+    const value = args[p]
+    if (value === undefined || value === null || value === "") {
+      return { missing: p }
+    }
+    path = path.replace(`:${p}`, encodeURIComponent(String(value)))
+  }
+  return { path }
+}
+
+/**
+ * Names in `inputSchema.required` that carry no value in `args` (#1371).
+ *
+ * The schema's `required` array is the ONE place a tool declares what it must
+ * be called with, so it is what the dispatcher enforces — no second list to
+ * drift out of step with it. Empty strings count as missing (matching
+ * `substitutePath`); `false` and `0` do not.
+ */
+const missingRequired = (
+  def: McpToolDef,
+  args: Record<string, unknown>
+): string[] => {
+  const required = def.inputSchema?.required
+  if (!Array.isArray(required)) return []
+  return required.filter((key: unknown) => {
+    if (typeof key !== "string") return false
+    const value = args[key]
+    return (
+      value === undefined ||
+      value === null ||
+      (typeof value === "string" && value.trim() === "")
+    )
+  }) as string[]
+}
+
+const pick = (
+  keys: string[] | undefined,
+  args: Record<string, unknown>
+): Record<string, unknown> => {
+  const out: Record<string, unknown> = {}
+  for (const k of keys ?? []) {
+    if (args[k] !== undefined && args[k] !== null) {
+      out[k] = args[k]
+    }
+  }
+  return out
+}
+
+/**
+ * A scalar sent to a parameter the schema declares as an ARRAY becomes a
+ * one-element list.
+ *
+ * 🔴 Found on `list_products`: its `status` forwards to a Medusa route that
+ * requires an array, and every natural call — `status: "published"` — came back
+ * as `400 Expected type: 'array' for field 'status', got: 'published'`. The
+ * tool's own description told the model to pass exactly that. So a documented
+ * filter simply did not work, and the failure looked like the model's mistake
+ * rather than the tool's.
+ *
+ * Narrow on purpose: it fires ONLY where the tool's own input schema says the
+ * parameter is an array, so it can never reshape a value a route wanted scalar.
+ * `qs.stringify(..., { arrayFormat: "brackets" })` then emits `status[]=…`,
+ * which is what the route reads.
+ */
+const coerceDeclaredArrays = (
+  def: { inputSchema?: any },
+  values: Record<string, unknown>
+): Record<string, unknown> => {
+  const props = def.inputSchema?.properties
+  if (!props) return values
+
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(values)) {
+    out[k] =
+      props[k]?.type === "array" && v !== undefined && !Array.isArray(v)
+        ? [v]
+        : v
+  }
+  return out
+}
+
+/**
+ * Arguments the dispatcher itself consumes. They are never forwarded to a
+ * route, so their absence from `bodyParams` is correct, not a defect.
+ */
+const CONTROL_ARGS = new Set([
+  "dry_run",
+  "confirm",
+  "store",
+  "reason",
+  "context",
+])
+
+/**
+ * Argument names the caller sent that NO forwarding list claims.
+ *
+ * `pick()` is an allowlist walk, so an unlisted key is dropped completely
+ * silently — no error, no log, and (because the dry_run plan is built from the
+ * already-picked body) not visible in a rehearsal either. A registry row that
+ * forgot a field therefore looks *identical* to one that has it: the tool
+ * returns ok, the route 200s, and nothing is written.
+ *
+ * That is not hypothetical. `weight` was missing from every single-record
+ * product/variant tool while every route behind them accepted it; partners set
+ * weights through the assistant for days and nothing persisted.
+ *
+ * These are surfaced as warnings rather than rejected. Rejecting would turn
+ * every stale registry row into a hard failure for callers who are doing
+ * nothing wrong — but silence is what made the original bug survive, so the
+ * caller gets told.
+ */
+const droppedArgs = (
+  def: McpToolDef,
+  args: Record<string, unknown>
+): string[] => {
+  const claimed = new Set<string>([
+    ...(def.pathParams ?? []),
+    ...(def.queryParams ?? []),
+    ...(def.bodyParams ?? []),
+  ])
+  return Object.keys(args).filter(
+    (k) =>
+      !claimed.has(k) &&
+      !CONTROL_ARGS.has(k) &&
+      args[k] !== undefined &&
+      args[k] !== null
+  )
+}
+
+export async function dispatchMcpTool(
+  ctx: McpContext,
+  tools: McpToolDef[],
+  name: string,
+  rawArgs: Record<string, unknown> = {}
+): Promise<McpToolResult> {
+  const surface = ctx.surface ?? "mcp"
+  const emit = (evt: Omit<McpToolEvent, "surface" | "tool">) =>
+    ctx.observe?.({ surface, tool: name, ...evt })
+  const fail = (error: string, outcome = "refused"): McpToolResult => {
+    emit({ method: "", executed: false, ok: false, outcome, error })
+    return { ok: false, tool: name, error }
+  }
+
+  const def = tools.find((t) => t.name === name)
+  if (!def) {
+    return fail(`Unknown tool: ${name}`)
+  }
+
+  const args = rawArgs || {}
+
+  // --- Required arguments: refuse BEFORE any rail (#1371) ---------------------
+  // A call missing what the tool declares it needs cannot succeed at the route,
+  // so it must never reach the confirm gate: an argument-less `create_product`
+  // used to render an Approve card and only 400 *after* the partner pressed it.
+  // Returning it as a refusal instead hands the model an error it can retry —
+  // which it does — rather than asking a human to approve an impossible action.
+  const missing = missingRequired(def, args)
+  if (missing.length) {
+    return fail(
+      `Tool '${name}' was called without required argument(s): ${missing.join(
+        ", "
+      )}. Supply them and call it again.`
+    )
+  }
+
+  // --- Native tools: run in-process via the surface handler -------------------
+  // Store discovery / key resolution etc. — no route, no write/rail gating
+  // (natives are read-only). The surface owns execution and error shaping.
+  if (def.native) {
+    if (!ctx.runNative) {
+      return fail(`Native tool '${name}' is not supported on this surface.`)
+    }
+    try {
+      const result = await ctx.runNative(def.native, args)
+      emit({
+        method: "native",
+        executed: true,
+        ok: result.ok,
+        outcome: "run",
+        context: typeof args.context === "string" ? args.context : undefined,
+      })
+      return result
+    } catch (e) {
+      const error = `Error in native tool ${name}: ${(e as Error).message}`
+      emit({ method: "native", executed: true, ok: false, outcome: "run", error })
+      return { ok: false, tool: name, error }
+    }
+  }
+
+  const dryRun = args.dry_run === true
+  const confirmed = args.confirm === true
+  const context = typeof args.context === "string" ? args.context : undefined
+  const reason =
+    typeof args.reason === "string" && args.reason.trim()
+      ? args.reason.trim()
+      : undefined
+  const write = !!def.write
+  // The store surface opts out of the confirm/reason rails (its DELETE is a
+  // normal cart op). Partner/admin keep them.
+  const railsOn = !ctx.disableSensitiveRails
+  const sensitive = railsOn && isSensitive(def)
+  const dangerous = railsOn && isDangerous(def)
+
+  // ── Permission ──────────────────────────────────────────────────────────────
+  //
+  // Two mutually exclusive modes, and they MUST NOT both run. A `write`-scoped
+  // credential calling a write-tier tool that is also confirm-gated (every
+  // interesting one) would clear the tier check and then be refused by the
+  // `enableSensitive` check, which is precisely the conflation this replaces.
+  if (ctx.scopeLevel) {
+    // One tier comparison, expressive per tool rather than per class (#1306).
+    const required = mcpToolTier(def)
+    if (!mcpScopeAllows(ctx.scopeLevel, required)) {
+      return fail(
+        `Tool '${name}' requires the '${required}' scope and this credential is ` +
+          `scoped to '${ctx.scopeLevel}'. Scope is set per credential in ` +
+          `mcp_access_scope; widen it via POST /admin/mcp/scopes as an admin user.`
+      )
+    }
+  } else {
+    if (write && ctx.enableWrite === false) {
+      return fail(
+        ctx.writeDisabledMessage?.(name) ??
+          `Tool '${name}' is a write tool and writes are disabled on this server.`
+      )
+    }
+    // Dangerous tools are hidden + refused when the surface hasn't opted in.
+    if (dangerous && ctx.enableDangerous === false) {
+      return fail(
+        `Tool '${name}' is a platform-destructive action and dangerous tools are disabled on this server.`
+      )
+    }
+    // Sensitive tools refused when this credential's scope stops below them
+    // (#1306 Track C). Deliberately keyed off `isSensitive(def)` rather than the
+    // `sensitive` local: `disableSensitiveRails` turns off the confirm UX for the
+    // store surface, but it must never widen a permission.
+    if (isSensitive(def) && ctx.enableSensitive === false) {
+      return fail(
+        `Tool '${name}' is a sensitive action and this credential's scope does not include sensitive tools.`
+      )
+    }
+  }
+
+  // Resolve the tenant publishable key for multi-tenant (store) surfaces. A
+  // `store` argument (handle/domain) wins and is resolved per-call; otherwise
+  // the surface's default key applies. `store` is consumed here and never
+  // forwarded to the route (it isn't in any registry's queryParams either).
+  let publishableKey: string | undefined
+  if (ctx.tenant) {
+    publishableKey = ctx.tenant.defaultKey
+    const storeArg = typeof args.store === "string" ? args.store.trim() : ""
+    if (storeArg) {
+      const resolved = ctx.tenant.resolveKey
+        ? await ctx.tenant.resolveKey(storeArg)
+        : null
+      if (!resolved) {
+        return fail(
+          `No storefront / publishable key found for '${storeArg}'. Use list_stores to discover valid stores.`
+        )
+      }
+      publishableKey = resolved
+    }
+    if (!publishableKey) {
+      return fail(
+        ctx.tenant.missingKeyMessage ??
+          "No publishable key. Pass a `store` argument (see list_stores) or configure a default key on the server."
+      )
+    }
+  }
+
+  // Substitute path params for the target route.
+  const sub = substitutePath(def.path as string, def.pathParams ?? [], args)
+  if (sub.missing) {
+    return fail(`Missing required parameter: ${sub.missing}`)
+  }
+  const path = sub.path as string
+  // Caller-supplied values win, so `defaultQuery` only ever fills a gap (#2023).
+  const query = coerceDeclaredArrays(def, {
+    ...(def.defaultQuery ?? {}),
+    ...pick(def.queryParams, args),
+  })
+  const body = pick(def.bodyParams, args)
+  const method = def.method ?? "GET"
+
+  // Anything the caller sent that no forwarding list claims. Reported on the
+  // plan AND on the result, so a dry run can finally reveal a dropped field
+  // instead of rehearsing a write that silently loses it.
+  const dropped = droppedArgs(def, args)
+
+  const plan = {
+    method,
+    path,
+    ...(Object.keys(query).length ? { query } : {}),
+    ...(Object.keys(body).length ? { body } : {}),
+    ...(context ? { context } : {}),
+    ...(reason ? { reason } : {}),
+    ...(dropped.length
+      ? {
+          dropped_arguments: dropped,
+          dropped_arguments_note: `This tool does not forward: ${dropped.join(
+            ", "
+          )}. These values were NOT sent and will NOT be saved.`,
+        }
+      : {}),
+  }
+
+  // Fetch the current object for writes that declare a previewPath — so the
+  // model (or the confirmation card) can show what is about to change.
+  const fetchCurrent = async (): Promise<unknown> => {
+    if (!def.previewPath) return undefined
+    const psub = substitutePath(def.previewPath, def.pathParams ?? [], args)
+    if (psub.missing) return undefined
+    try {
+      return await callMcpRoute({
+        baseUrl: ctx.baseUrl,
+        method: "GET",
+        path: psub.path as string,
+        bearer: ctx.bearer,
+        cookie: ctx.cookie,
+        publishableKey,
+      })
+    } catch {
+      return undefined
+    }
+  }
+
+  // --- Dry run: never execute -------------------------------------------------
+  if (dryRun) {
+    const current = write ? await fetchCurrent() : undefined
+    emit({ method, path, executed: false, ok: true, outcome: "dry_run", context })
+    return {
+      ok: true,
+      tool: name,
+      dry_run: true,
+      plan,
+      ...(current !== undefined ? { current } : {}),
+      warning: dangerous
+        ? "This is a platform-destructive action; running it will require the user's confirmation AND a reason."
+        : sensitive
+        ? "This is a sensitive action; when you run it for real it will require the user's confirmation."
+        : undefined,
+    }
+  }
+
+  // --- Dangerous gate: require a human reason ---------------------------------
+  if (dangerous && !reason) {
+    const current = await fetchCurrent()
+    emit({ method, path, executed: false, ok: true, outcome: "reason", context })
+    return {
+      ok: true,
+      tool: name,
+      requires_reason: true,
+      requires_confirmation: true,
+      plan,
+      ...(current !== undefined ? { current } : {}),
+      warning: `'${name}' is a platform-destructive action. It needs an explicit reason (why this is being done) and the user's confirmation before it runs.`,
+    }
+  }
+
+  // --- Sensitive gate: require explicit confirm -------------------------------
+  if (sensitive && !confirmed) {
+    const current = await fetchCurrent()
+    emit({ method, path, executed: false, ok: true, outcome: "confirm", context })
+    return {
+      ok: true,
+      tool: name,
+      requires_confirmation: true,
+      plan,
+      ...(current !== undefined ? { current } : {}),
+      warning: `'${name}' is a sensitive action and needs explicit confirmation before it runs.`,
+    }
+  }
+
+  // --- Execute for real -------------------------------------------------------
+  const startedAt = Date.now()
+  try {
+    const data = await callMcpRoute({
+      baseUrl: ctx.baseUrl,
+      method,
+      path,
+      query,
+      body,
+      bearer: ctx.bearer,
+      cookie: ctx.cookie,
+      publishableKey,
+      context,
+      reason,
+    })
+    const out = def.transform ? def.transform(data, args) : data
+    emit({
+      method,
+      path,
+      executed: true,
+      ok: true,
+      outcome: "run",
+      ms: Date.now() - startedAt,
+      context,
+    })
+    return {
+      ok: true,
+      tool: name,
+      data: out,
+      // A 200 that quietly discarded half the caller's intent is the failure
+      // mode this whole change exists to end. Say so on the successful result,
+      // not only in the rehearsal.
+      ...(dropped.length
+        ? {
+            warnings: [
+              `Ignored ${dropped.length} argument(s) this tool does not accept: ${dropped.join(
+                ", "
+              )}. Those values were NOT saved.`,
+            ],
+          }
+        : {}),
+    }
+  } catch (e) {
+    const err = e as McpProxyError
+    const error = `Error calling ${name} (${path}): ${err.message}`
+    emit({
+      method,
+      path,
+      executed: true,
+      ok: false,
+      outcome: "run",
+      ms: Date.now() - startedAt,
+      error: err.message,
+      context,
+    })
+    return { ok: false, tool: name, error }
+  }
+}

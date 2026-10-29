@@ -1,0 +1,866 @@
+import {
+  createStep,
+  createWorkflow,
+  StepResponse,
+  WorkflowResponse,
+  transform,
+  when,
+} from "@medusajs/framework/workflows-sdk";
+import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils";
+import type { Link } from "@medusajs/modules-sdk";
+import type { IEventBusModuleService, RemoteQueryFunction, UpdateInventoryLevelInput } from "@medusajs/types";
+import { createInventoryLevelsWorkflow, updateInventoryLevelsWorkflow } from "@medusajs/medusa/core-flows";
+import { createMaterialsForLines } from "./lib/create-sample-material-lines"
+import { ORDER_INVENTORY_MODULE } from "../../modules/inventory_orders";
+import InventoryOrderService from "../../modules/inventory_orders/service";
+import { FULLFILLED_ORDERS_MODULE } from "../../modules/fullfilled_orders";
+import type Fullfilled_ordersService from "../../modules/fullfilled_orders/service";
+import { mirrorUnifiedOrderStatusStep } from "./dual-write-unified-order";
+// #771 — reuse the singular file's pure event builder rather than restating the
+// delta rule; two copies of "did the status change" is how they drift apart.
+import { buildStatusChangedEvent } from "./update-inventory-order";
+import { reprojectInventoryMirrorItemsStep } from "./reproject-inventory-mirror-items";
+import { resolveExistingLevelsStep } from "./partner-complete-inventory-order";
+import inventoryOrdersStockLocations from "../../links/inventory-orders-stock-locations";
+import {
+  evaluateAdminStatusTransition,
+  computeAdminDeliveryPosting,
+  requireDeliveryCounts,
+} from "./lib/deliver-helpers";
+import type { DeliveredLine } from "./lib/cancel-helpers";
+import {
+  buildMaterialLookupByInventoryId,
+  type MaterialInfo,
+} from "../../modules/inventory_orders/lib/create-helpers";
+import { ensureLineInventoryItems } from "./lib/ensure-line-inventory-items";
+import {
+  repointInventoryOrderFromLink,
+  restoreInventoryOrderFromLink,
+} from "./lib/repoint-from-location";
+
+
+// Types
+export type UpdateInventoryOrderLineInput = {
+  id?: string; // If present, update; if not, create
+  // Optional at the type level so a removal marker ({ id, remove: true }) is
+  // valid. For create/update lines the route validator (updateOrderLineSchema)
+  // enforces these are present, so the create/update branches below can rely on
+  // them at runtime.
+  inventory_item_id?: string;
+  /**
+   * #1662 — a NEW line may instead name a partner variant that has no
+   * inventory item yet. Resolved to a real `inventory_item_id` at the top of
+   * the line step, before anything is written.
+   */
+  variant_id?: string;
+  quantity?: number;
+  price?: number;
+  // Per-unit extra charge on top of `price` (colour/dye job, finishing, …).
+  extra_cost?: number;
+  batch_number?: number | null; // Batch tag for separate-batch quick-add lines
+  remove?: boolean; // If true, remove this orderline
+};
+
+export type UpdateInventoryOrderInput = {
+  id: string;
+  data: Partial<{
+    status: string;
+    expected_delivery_date: Date;
+    order_date: Date;
+    total_price: number;
+    quantity: number;
+    shipping_address: any;
+    /** Repoints the order↔stock-location from-link (ship-from), not a column. */
+    from_stock_location_id: string;
+    // ...other updatable fields
+  }>;
+  order_lines: UpdateInventoryOrderLineInput[];
+};
+
+/**
+ * Link-only aliases accepted by the route validator that must never reach
+ * `updateInventoryOrders` as columns — the from/to locations live on the
+ * inventory-orders↔stock-locations LINK (extraColumns from_location /
+ * to_location), not on the inventory_orders table.
+ */
+const LINK_ONLY_UPDATE_FIELDS = [
+  "from_stock_location_id",
+  "to_stock_location_id",
+  "stock_location_id",
+  // #2289 S2 — the admin's counts for a Delivered transition. Not a column.
+  "received_lines",
+] as const;
+
+export function stripLinkOnlyUpdateFields(
+  data: Record<string, any> | undefined | null
+): Record<string, any> {
+  const rest = { ...(data || {}) };
+  for (const k of LINK_ONLY_UPDATE_FIELDS) delete rest[k];
+  return rest;
+}
+
+// Step 1: Fetch original order, enforce the status transition, and decide whether
+// this update must post stock (#778 M1/C2 — admin marking Delivered).
+export const fetchOriginalOrderStep = createStep(
+  "fetch-original-inventory-order-step",
+  async (
+    input: { id: string; data?: { status?: string; received_lines?: Array<{ order_line_id: string; quantity: number }> } },
+    { container }
+  ) => {
+    const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE);
+    const originalOrder = await inventoryOrderService.retrieveInventoryOrder(input.id, { relations: ["orderlines"] });
+    // #778 — validate the requested transition (throws INVALID_DATA on an illegal
+    // jump, e.g. Processing→Delivered used to silently bypass stock) and learn
+    // whether stock must be posted.
+    const { postStock } = evaluateAdminStatusTransition(
+      (originalOrder as any).status,
+      input.data?.status,
+      // A samples/swatch order is created empty and filled in after the box
+      // arrives, so it stays editable past Processing (and never posts stock).
+      { isSample: !!(originalOrder as any).is_sample }
+    );
+    // #2289 S2 — Delivered posts only what was counted; no counts, no update.
+    const counted = requireDeliveryCounts(postStock, input.data?.received_lines);
+    return new StepResponse({ originalOrder, postStock, counted }, originalOrder); // Save original for compensation
+  },
+  // Compensation: no-op (fetch only)
+  async () => {}
+);
+
+// Step 2: Update inventory order fields
+/**
+ * ⚠️ This is NOT the same step as `updateInventoryOrderStep` in the sibling file
+ * `update-inventory-order.ts` (singular). Both files export a step AND a
+ * workflow under identical names — importing from the wrong one silently gets
+ * you different behaviour. The admin PUT `/admin/inventory-orders/:id` resolves
+ * to THIS file.
+ *
+ * #771 — that duplication is how the generic admin edit came to skip the partner
+ * notification flow entirely: the singular file carried a comment claiming
+ * "every status transition routes through updateInventoryOrderStep, so this is
+ * the single choke point", which was false for this path. This step emitted
+ * nothing at all, so an admin moving an order to Shipped or Delivered notified
+ * nobody, with no event and no error to notice.
+ */
+/**
+ * The step body, exported so the WIRING is testable and not just the pure event
+ * builder beside it. #771's gap survived precisely because
+ * `buildStatusChangedEvent` had unit tests while nothing asserted that this path
+ * ever called it.
+ */
+export const applyInventoryOrderFieldUpdate = async (
+  input: { id: string; data: any },
+  container: any
+) => {
+  const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE);
+
+  // Capture the prior status only when a status change is intended, so a
+  // metadata-only edit costs no extra read. Mirrors the singular step. #771
+  let previousStatus: string | undefined;
+  if (input.data?.status !== undefined) {
+    try {
+      const existing = await inventoryOrderService.retrieveInventoryOrder(input.id, {
+        select: ["id", "status"],
+      });
+      previousStatus = (existing as any)?.status;
+    } catch {
+      /* best-effort — fall back to emitting without a previous_status */
+    }
+  }
+
+  const updatedOrder = await inventoryOrderService.updateInventoryOrders({
+    selector: { id: input.id },
+    data: { ...input.data },
+  });
+
+  // #771 — the status-changed event the partner notification flow triggers on.
+  // Guarded on an actual delta by `buildStatusChangedEvent`, so a metadata-only
+  // write stays silent. Best-effort: an event-bus failure must never fail an
+  // admin edit.
+  const rows = Array.isArray(updatedOrder) ? updatedOrder : updatedOrder ? [updatedOrder] : [];
+  const event = buildStatusChangedEvent(
+    input.id,
+    previousStatus,
+    (rows[0] as any)?.status,
+    input.data?.status !== undefined
+  );
+  if (event) {
+    try {
+      const eventBus = container.resolve(Modules.EVENT_BUS) as IEventBusModuleService;
+      await eventBus.emit(event);
+    } catch {
+      /* best-effort — never block the update if event emit fails */
+    }
+  }
+
+  return updatedOrder;
+};
+
+export const updateInventoryOrderStep = createStep(
+  "update-inventory-order-fields-step",
+  async (input: { id: string; data: any }, { container }) => {
+    const updatedOrder = await applyInventoryOrderFieldUpdate(input, container);
+    return new StepResponse(updatedOrder, null);
+  },
+  // Compensation: restore original order fields
+  async (originalOrder: any, { container }) => {
+    const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE);
+    await inventoryOrderService.updateInventoryOrders({
+      selector: {
+        id: originalOrder.id
+      },
+      data: originalOrder
+    });
+  }
+);
+
+// Step 3: Update orderlines (add, update, remove, relink)
+export const updateOrderLinesStep = createStep(
+  "update-inventory-orderlines-step",
+  async (input: { order_id: string; order_lines: UpdateInventoryOrderLineInput[] }, { container }) => {
+    const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE);
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link;
+    // Fetch current orderlines so we can capture the exact prior state of every
+    // line we touch — the compensation inverts each operation precisely instead
+    // of nuking + recreating all lines (#778 M — the old compensation soft-deleted
+    // every line and recreated them with NEW ids, breaking external references).
+    const currentOrder = await inventoryOrderService.retrieveInventoryOrder(input.order_id, { relations: ["orderlines"] });
+    const currentOrderlines = currentOrder.orderlines || [];
+    const byId = new Map<string, any>(currentOrderlines.map((l: any) => [l.id, l]));
+
+    // A samples/swatch line may name a material we have never stocked, with no
+    // item and no variant to point at. Create it first, so every branch below
+    // sees a line of one shape. Done before the variant resolution because a
+    // line carries one form or the other, never both.
+    const materialsCreated = await createMaterialsForLines(
+      container,
+      input.order_lines as any
+    );
+    if (materialsCreated.size) {
+      materialsCreated.forEach((itemId, index) => {
+        const line = input.order_lines[index] as any;
+        if (line) {
+          line.inventory_item_id = itemId;
+          delete line.new_material;
+        }
+      });
+    }
+
+    // #1662 — a new line may name an untracked partner variant instead of an
+    // item. Establish the inventory item BEFORE anything below reads
+    // `inventory_item_id`, so every later branch sees a line of one shape.
+    // No level is seeded here: the completion receipt creates the level if it
+    // is missing, and this path does not carry the order's destination.
+    const newLines = input.order_lines.filter((l) => !l.remove && !l.id);
+    if (newLines.some((l) => !l.inventory_item_id && l.variant_id)) {
+      const { lines: resolvedNew } = await ensureLineInventoryItems(
+        container,
+        newLines
+      );
+      const resolvedByVariant = new Map<string, string>();
+      resolvedNew.forEach((l, i) => {
+        const variantId = newLines[i]?.variant_id;
+        if (variantId) {
+          resolvedByVariant.set(String(variantId), l.inventory_item_id);
+        }
+      });
+      for (const line of input.order_lines) {
+        if (!line.inventory_item_id && line.variant_id) {
+          line.inventory_item_id = resolvedByVariant.get(String(line.variant_id));
+        }
+      }
+    }
+
+    // #817 S2 — resolve color identity for newly-added lines so they're
+    // self-describing just like create-path lines. Existing lines keep their
+    // item (no relink here), so only new lines need enrichment. Best-effort:
+    // a lookup failure leaves the fields null rather than failing the update.
+    let materialLookup: Record<string, MaterialInfo> = {};
+    try {
+      const newItemIds = Array.from(new Set(
+        input.order_lines
+          .filter((l) => !l.remove && !l.id && l.inventory_item_id)
+          .map((l) => l.inventory_item_id as string)
+      ));
+      if (newItemIds.length) {
+        const query: any = container.resolve(ContainerRegistrationKeys.QUERY);
+        const { data: inventoryItems } = await query.graph({
+          entity: "inventory_item",
+          fields: ["id", "raw_materials.id", "raw_materials.color", "raw_materials.name"],
+          filters: { id: newItemIds },
+        });
+        materialLookup = buildMaterialLookupByInventoryId(inventoryItems as any);
+      }
+    } catch (err) {
+      console.warn(
+        `[update-inventory-order] color-identity denormalization skipped: ${(err as any)?.message || err}`
+      );
+    }
+
+    const created: Array<{ id: string; inventory_item_id?: string; variant_id?: string | null }> = [];
+    const updated: Array<{ id: string; prevQuantity: number; prevPrice: any; prevExtraCost: any }> = [];
+    const removed: Array<{ id: string; inventory_item_id?: string; variant_id?: string; quantity: number; price: any }> = [];
+
+    /**
+     * 🔴 #2157 — resolve the removed line's inventory item from the LINK, not
+     * from the payload.
+     *
+     * This loop used to dismiss the link only `if (line.inventory_item_id)`,
+     * i.e. only when the CALLER happened to send it. The partner proposal path
+     * maps exactly `{ id, quantity, price, extra_cost, remove }` and the line
+     * schema strips anything else, so a partner-originated removal never
+     * carries one — the field was absent on 100% of them, not some. The line
+     * was soft-deleted and its link row stayed live, pointing at a row that no
+     * longer exists.
+     *
+     * `byId` cannot answer this: it comes from a module-service relation, and
+     * the item lives across the module link. So this is a `query.graph` read,
+     * and it happens BEFORE the soft-delete below while the lines are still
+     * visible to it.
+     *
+     * The payload still wins when it supplies one — the admin path does, and
+     * an explicit item id is a caller saying which link it means.
+     */
+    const removalLineIds = input.order_lines
+      .filter((l) => l.remove && l.id)
+      .map((l) => l.id!);
+    const linkedItemByLineId = new Map<string, string>();
+    /**
+     * 🔴 #2159 — the VARIANT link too.
+     *
+     * A line may be placed by naming a partner's product variant rather than
+     * an inventory item (#1873), and `create-inventory-orders.ts` writes that
+     * link. This loop never dismissed it — not on the wrong condition, as with
+     * the item link: it had no branch for it at all. The only place it was ever
+     * dismissed is the compensation for lines this step CREATED, so a removed
+     * line left its variant link live, pointing at a soft-deleted row.
+     *
+     * That link is what lets an order say which product a line was for, which
+     * is the whole reason #1873 exists.
+     */
+    const linkedVariantByLineId = new Map<string, string>();
+    if (removalLineIds.length) {
+      try {
+        const query: any = container.resolve(ContainerRegistrationKeys.QUERY);
+        const { data: rows } = await query.graph({
+          entity: "inventory_orders",
+          fields: [
+            "id",
+            "orderlines.id",
+            "orderlines.inventory_items.id",
+            "orderlines.product_variant.id",
+          ],
+          filters: { id: input.order_id },
+        });
+        for (const ol of (rows?.[0]?.orderlines ?? []) as any[]) {
+          const itemId = (ol?.inventory_items ?? [])[0]?.id;
+          if (ol?.id && itemId) {
+            linkedItemByLineId.set(String(ol.id), String(itemId));
+          }
+          // `isList: false` on the product side, so this is one object, not an
+          // array. A line has at most one variant.
+          const variantId = ol?.product_variant?.id;
+          if (ol?.id && variantId) {
+            linkedVariantByLineId.set(String(ol.id), String(variantId));
+          }
+        }
+      } catch (err) {
+        // Best-effort: a failed read must not block the removal itself. It
+        // leaves the link behind, which is the pre-#2157 behaviour, and says
+        // so rather than failing silently.
+        console.warn(
+          `[update-inventory-order] could not resolve inventory links for removed lines on ${input.order_id}; their links may be left behind: ${(err as any)?.message || err}`
+        );
+      }
+    }
+
+    // Remove orderlines marked for removal
+    for (const line of input.order_lines.filter(l => l.remove && l.id)) {
+      const prev = byId.get(line.id!);
+      const linkedItemId =
+        line.inventory_item_id ?? linkedItemByLineId.get(String(line.id));
+      const linkedVariantId =
+        line.variant_id ?? linkedVariantByLineId.get(String(line.id));
+      // Soft delete orderline
+      await inventoryOrderService.softDeleteOrderLines(line.id!);
+      // Dismiss link between orderline and inventory_item
+      if (linkedItemId) {
+        await remoteLink.dismiss({
+          [ORDER_INVENTORY_MODULE]: {
+            inventory_order_line_id: line.id!
+          },
+          [Modules.INVENTORY]: {
+            inventory_item_id: linkedItemId
+          }
+        });
+      }
+      // …and between orderline and product_variant (#1873, #2159).
+      if (linkedVariantId) {
+        await remoteLink.dismiss({
+          [ORDER_INVENTORY_MODULE]: {
+            inventory_order_line_id: line.id!
+          },
+          [Modules.PRODUCT]: {
+            product_variant_id: linkedVariantId
+          }
+        });
+      }
+      removed.push({
+        // Carries the RESOLVED id, so the compensation's relink
+        // (`if (r.inventory_item_id)`) can restore what this step dismissed.
+        // It was reading the same absent payload field and restoring nothing.
+        id: line.id!,
+        inventory_item_id: linkedItemId,
+        variant_id: linkedVariantId,
+        quantity: prev?.quantity,
+        price: prev?.price,
+      });
+    }
+    // Update or create orderlines and manage links
+    for (const line of input.order_lines.filter(l => !l.remove)) {
+      if (line.id) {
+        const prev = byId.get(line.id);
+        // Capture prior values before overwriting so compensation restores them in place.
+        updated.push({ id: line.id, prevQuantity: prev?.quantity, prevPrice: prev?.price, prevExtraCost: prev?.extra_cost });
+        // Update orderline fields
+        await inventoryOrderService.updateOrderLines({
+          selector: { id: line.id },
+          data: {
+            quantity: line.quantity,
+            price: line.price,
+            ...(line.extra_cost !== undefined ? { extra_cost: line.extra_cost } : {}),
+            ...(line.batch_number !== undefined ? { batch_number: line.batch_number } : {}),
+          }
+        });
+        // If inventory_item_id changed, handle link update (not implemented here, but can be compared with currentOrderlines)
+      } else {
+        // Create orderline (with denormalized color identity when resolvable).
+        const info = line.inventory_item_id ? materialLookup[line.inventory_item_id] : undefined;
+        const created_line = await inventoryOrderService.createOrderLines({
+          inventory_orders_id: input.order_id,
+          quantity: line.quantity,
+          price: line.price,
+          extra_cost: line.extra_cost ?? null,
+          batch_number: line.batch_number ?? null,
+          color: info?.color ?? null,
+          material_name: info?.material_name ?? null,
+          raw_material_id: info?.raw_material_id ?? null,
+        });
+        // Create link to inventory item
+        if (line.inventory_item_id) {
+          await remoteLink.create({
+            [ORDER_INVENTORY_MODULE]: {
+              inventory_order_line_id: created_line.id
+            },
+            [Modules.INVENTORY]: {
+              inventory_item_id: line.inventory_item_id
+            },
+            data: {
+              order_line_id: created_line.id,
+              inventory_item_id: line.inventory_item_id
+            }
+          });
+        }
+        // #1873 — a line added through UPDATE resolves a variant the same way
+        // create does (above, via ensureLineInventoryItems), so it must record
+        // the variant the same way too. Without this the association survives
+        // one door and dies at the other.
+        if (line.variant_id) {
+          await remoteLink.create({
+            [ORDER_INVENTORY_MODULE]: {
+              inventory_order_line_id: created_line.id
+            },
+            [Modules.PRODUCT]: {
+              product_variant_id: line.variant_id
+            },
+            data: {
+              order_line_id: created_line.id,
+              variant_id: line.variant_id
+            }
+          });
+        }
+        created.push({
+          id: created_line.id,
+          inventory_item_id: line.inventory_item_id,
+          variant_id: line.variant_id,
+        });
+      }
+    }
+    // Return new state and save the precise per-line ops for compensation
+    const updatedOrder = await inventoryOrderService.retrieveInventoryOrder(input.order_id, { relations: ["orderlines"] });
+    return new StepResponse(updatedOrder, { created, updated, removed, order_id: input.order_id });
+  },
+  // Compensation: invert each forward operation precisely (#778 M).
+  //   - lines we CREATED → soft-delete them + dismiss their links (only the new ids)
+  //   - lines we UPDATED → restore prior quantity/price IN PLACE (stable ids)
+  //   - lines we REMOVED → restore them by id + recreate their links (stable ids)
+  async (
+    compensationData: {
+      created: Array<{ id: string; inventory_item_id?: string; variant_id?: string | null }>;
+      updated: Array<{ id: string; prevQuantity: number; prevPrice: any; prevExtraCost: any }>;
+      removed: Array<{ id: string; inventory_item_id?: string; variant_id?: string; quantity: number; price: any }>;
+      order_id: string;
+    },
+    { container }
+  ) => {
+    const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE);
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link;
+
+    // Undo created lines
+    for (const c of compensationData.created || []) {
+      await inventoryOrderService.softDeleteOrderLines(c.id);
+      if (c.inventory_item_id) {
+        await remoteLink.dismiss({
+          [ORDER_INVENTORY_MODULE]: { inventory_order_line_id: c.id },
+          [Modules.INVENTORY]: { inventory_item_id: c.inventory_item_id },
+        });
+      }
+      // #1873 — a link this step created must be dismissed by this step's
+      // compensation, or a rolled-back update leaves a variant link pointing at
+      // a soft-deleted line.
+      if (c.variant_id) {
+        await remoteLink.dismiss({
+          [ORDER_INVENTORY_MODULE]: { inventory_order_line_id: c.id },
+          [Modules.PRODUCT]: { product_variant_id: c.variant_id },
+        });
+      }
+    }
+    // Restore updated lines to their prior values (same ids)
+    for (const u of compensationData.updated || []) {
+      await inventoryOrderService.updateOrderLines({
+        selector: { id: u.id },
+        data: { quantity: u.prevQuantity, price: u.prevPrice, extra_cost: u.prevExtraCost },
+      });
+    }
+    // Restore removed lines (same ids) + recreate their links
+    for (const r of compensationData.removed || []) {
+      await inventoryOrderService.restoreOrderLines(r.id);
+      if (r.inventory_item_id) {
+        await remoteLink.create({
+          [ORDER_INVENTORY_MODULE]: { inventory_order_line_id: r.id },
+          [Modules.INVENTORY]: { inventory_item_id: r.inventory_item_id },
+          data: { order_line_id: r.id, inventory_item_id: r.inventory_item_id },
+        });
+      }
+      // A restored line gets its variant back too, or the rollback is partial:
+      // the line returns and the order can no longer say what product it is
+      // for (#2159).
+      if (r.variant_id) {
+        await remoteLink.create({
+          [ORDER_INVENTORY_MODULE]: { inventory_order_line_id: r.id },
+          [Modules.PRODUCT]: { product_variant_id: r.variant_id },
+        });
+      }
+    }
+  }
+);
+
+// Step 3b: Repoint the order's FROM-location link (#772 follow-up — an order
+// created against the wrong/deleted source location could not be corrected:
+// the shipment + rates flows refuse to guess an origin, so a mispicked
+// from_location stranded the order). Dismisses the existing from-link (if any)
+// and creates one pointing at the requested location. No-op when the link
+// already points there.
+export const repointInventoryOrderFromLocationStep = createStep(
+  "repoint-inventory-order-from-location-step",
+  async (
+    input: { order_id: string; from_stock_location_id: string },
+    { container }
+  ) => {
+    const { repointed, prevId } = await repointInventoryOrderFromLink(
+      container,
+      input.order_id,
+      input.from_stock_location_id
+    );
+    if (!repointed) {
+      return new StepResponse({ repointed: false }, null);
+    }
+    return new StepResponse(
+      { repointed: true, prevId },
+      { order_id: input.order_id, newId: input.from_stock_location_id, prevId }
+    );
+  },
+  // Compensation: remove the new from-link and restore the previous one.
+  async (
+    comp: { order_id: string; newId: string; prevId?: string | null } | null,
+    { container }
+  ) => {
+    if (!comp) return;
+    await restoreInventoryOrderFromLink(
+      container,
+      comp.order_id,
+      comp.newId,
+      comp.prevId
+    );
+  }
+);
+
+// Step 4: Load the delivery context (orderlines + their inventory items/locations +
+// the order's destination + prior deliveries) needed to post stock when an admin
+// marks an order Delivered (#778 C2 admin-half). Reused on every update; the
+// computed levels are empty for non-delivery edits so nothing is posted.
+export const loadDeliveryContextStep = createStep(
+  "load-inventory-order-delivery-context-step",
+  async (input: { id: string }, { container }) => {
+    const query: any = container.resolve(ContainerRegistrationKeys.QUERY) as Omit<RemoteQueryFunction, symbol>;
+    const { data } = await query.graph({
+      entity: "inventory_orders",
+      filters: { id: input.id },
+      fields: [
+        "id",
+        "status",
+        "metadata",
+        "orderlines.id",
+        "orderlines.quantity",
+        // #1613 — the TYPED receipt record. Without it the posting helper sees
+        // only `metadata.partner_delivered_lines`, which holds the latest
+        // partner submission and nothing before it.
+        "orderlines.line_fulfillments.quantity_delta",
+        "orderlines.inventory_items.id",
+        "orderlines.inventory_items.stock_locations.id",
+      ],
+    });
+    const order = (data?.[0] as any) || {};
+
+    // Resolve the DESTINATION (to_location) explicitly via the order↔stock-location
+    // link's `to_location` flag — the order links BOTH a from- and a to-location to
+    // the same relation, so a positional `[0]` could resolve to the wrong warehouse.
+    let destLocationId: string | null = null;
+    try {
+      const { data: locLinks } = await query.graph({
+        entity: inventoryOrdersStockLocations.entryPoint,
+        filters: { inventory_orders_id: input.id },
+        fields: ["stock_location_id", "to_location", "from_location"],
+      });
+      const links = (locLinks || []) as any[];
+      const toLink = links.find((l) => l?.to_location);
+      destLocationId =
+        toLink?.stock_location_id ||
+        links.find((l) => !l?.from_location)?.stock_location_id ||
+        null;
+    } catch {
+      /* fall back to the item's own linked location in the helper */
+    }
+    const alreadyDelivered = (order.metadata?.partner_delivered_lines || []) as DeliveredLine[];
+    return new StepResponse({
+      orderlines: order.orderlines || [],
+      alreadyDelivered,
+      destLocationId,
+    });
+  }
+);
+
+// Step 5: Append the admin-delivered line records to metadata.partner_delivered_lines
+// so a later cancel reverses the full posted stock (#778 C2/C4). Reads-then-merges
+// to avoid clobbering the rest of the metadata blob.
+export const appendDeliveredLinesStep = createStep(
+  "append-admin-delivered-lines-step",
+  async (input: { id: string; records: DeliveredLine[] }, { container }) => {
+    const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE);
+    const order = await inventoryOrderService.retrieveInventoryOrder(input.id, { select: ["id", "metadata"] });
+    const meta = ((order as any)?.metadata || {}) as Record<string, any>;
+    const prev = Array.isArray(meta.partner_delivered_lines) ? meta.partner_delivered_lines : [];
+    await inventoryOrderService.updateInventoryOrders({
+      id: input.id,
+      metadata: { ...meta, partner_delivered_lines: [...prev, ...input.records] },
+    });
+    return new StepResponse({ appended: input.records.length }, { id: input.id, metadata: meta });
+  },
+  // Compensation: restore the prior metadata blob.
+  async (comp: { id: string; metadata: Record<string, any> } | undefined, { container }) => {
+    if (!comp) return;
+    const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE);
+    await inventoryOrderService.updateInventoryOrders({ id: comp.id, metadata: comp.metadata });
+  }
+);
+
+/**
+ * Step 5b (#1613): record the admin-delivered quantities as TYPED receipts.
+ *
+ * The admin deliver path used to write its quantities to
+ * `metadata.partner_delivered_lines` and nowhere else, while the partner path
+ * wrote typed `line_fulfillments` rows AND overwrote that same key. So the two
+ * writers each held half the truth and neither held all of it — the whole of
+ * #1613.
+ *
+ * Writing a typed row here makes the typed record the complete one going
+ * forward: every subsequent reader (`resolveDeliveredByLine`, the partner
+ * path's own over-delivery guard, and any payout that asks what was received)
+ * sees the admin delivery too, instead of a gap the blob happens to cover until
+ * the next partner submission overwrites it.
+ *
+ * `event_type: "received"` matches the partner path. Best-effort is NOT
+ * acceptable here — a receipt that silently fails to record is the bug being
+ * fixed — so a failure rolls the step back and the compensation deletes any row
+ * already written.
+ */
+export const recordAdminReceiptsStep = createStep(
+  "record-admin-delivery-receipts-step",
+  async (
+    input: { id: string; records: DeliveredLine[] },
+    { container, context }
+  ) => {
+    const service = container.resolve(FULLFILLED_ORDERS_MODULE) as Fullfilled_ordersService;
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link;
+
+    const createdIds: string[] = [];
+    for (const record of input.records || []) {
+      if (!record?.order_line_id || !(Number(record.quantity) > 0)) continue;
+      const entry = await (service as any).createLine_fulfillments({
+        quantity_delta: Number(record.quantity),
+        event_type: "received",
+        transaction_id: context.transactionId,
+        notes: "Recorded by admin delivery",
+        metadata: { source: "admin_delivery", inventory_order_id: input.id },
+      });
+      createdIds.push(entry.id);
+      await remoteLink.create([
+        {
+          [ORDER_INVENTORY_MODULE]: { inventory_order_line_id: record.order_line_id },
+          [FULLFILLED_ORDERS_MODULE]: { line_fulfillment_id: entry.id },
+        },
+        {
+          [ORDER_INVENTORY_MODULE]: { inventory_orders_id: input.id },
+          [FULLFILLED_ORDERS_MODULE]: { line_fulfillment_id: entry.id },
+        },
+      ]);
+    }
+
+    return new StepResponse({ created: createdIds.length }, { ids: createdIds });
+  },
+  async (comp: { ids: string[] } | undefined, { container }) => {
+    if (!comp?.ids?.length) return;
+    const service = container.resolve(FULLFILLED_ORDERS_MODULE) as Fullfilled_ordersService;
+    for (const id of comp.ids) {
+      try {
+        await (service as any).deleteLine_fulfillments(id);
+      } catch {
+        /* the row may already be gone; the rest still need deleting */
+      }
+    }
+  }
+);
+
+export const updateInventoryOrderWorkflow = createWorkflow(
+  {
+    name: "update-inventory-order-workflow",
+    store: true
+  },
+  (input: UpdateInventoryOrderInput) => {
+    const original = fetchOriginalOrderStep({ id: input.id, data: input.data });
+    // Link-only aliases (from/to location) are handled by the repoint step —
+    // they are NOT columns and must not reach the field update.
+    const columnData = transform({ input }, ({ input }) =>
+      stripLinkOnlyUpdateFields(input.data as any)
+    );
+    const updatedOrder = updateInventoryOrderStep({ id: input.id, data: columnData });
+    const updatedOrderlines = updateOrderLinesStep({ order_id: input.id, order_lines: input.order_lines });
+
+    // Repoint the ship-from link when the update carries one (mispicked or
+    // deleted source location — #772 follow-up).
+    when(input, (i) => Boolean((i.data as any)?.from_stock_location_id)).then(() => {
+      repointInventoryOrderFromLocationStep({
+        order_id: input.id,
+        from_stock_location_id: transform(
+          { input },
+          ({ input }) => (input.data as any).from_stock_location_id as string
+        ) as unknown as string,
+      });
+    });
+
+    // #778 C2 admin-half — when this update delivers the order, post the remaining
+    // stock per line (ordered − already delivered) to the destination location,
+    // mirroring the partner-complete posting. Sequenced after the field/line
+    // updates so the metadata merge sees the latest order state.
+    const postStock = transform({ original }, ({ original }) => Boolean((original as any)?.postStock));
+    // Depend on both prior updates so the delivery context + metadata merge see the
+    // latest order state (and never clobber a metadata write from the field update).
+    const readyId = transform({ updatedOrder, updatedOrderlines, input }, ({ input }) => input.id);
+    const deliveryCtx = loadDeliveryContextStep({ id: readyId as unknown as string });
+
+    const computed = transform(
+      { deliveryCtx, postStock, original },
+      ({ deliveryCtx, postStock, original }) =>
+        postStock
+          ? computeAdminDeliveryPosting(
+              (deliveryCtx as any).orderlines,
+              (deliveryCtx as any).alreadyDelivered,
+              (deliveryCtx as any).destLocationId,
+              (original as any).counted
+            )
+          : { levels: [], deliveredRecords: [] }
+    );
+    const levels = transform({ computed }, ({ computed }) => (computed as any).levels);
+    const deliveredRecords = transform({ computed }, ({ computed }) => (computed as any).deliveredRecords);
+
+    const resolved = resolveExistingLevelsStep({ levels: levels as any }) as any;
+    const existing = transform({ resolved }, ({ resolved }) => (resolved?.existing || []));
+
+    // (item, location) pairs with no existing level need creating first.
+    const missing = transform<{ existing: any[]; levels: any[] }, any[]>(
+      { existing, levels },
+      ({ existing, levels }) => {
+        const exArr = (existing as any[]) || [];
+        const lvlArr = (levels as any[]) || [];
+        return lvlArr.filter((l: any) =>
+          !exArr.some((ex: any) => ex.inventory_item_id === l.inventory_item_id && ex.location_id === l.location_id)
+        );
+      }
+    );
+    const createInputs = transform({ missing }, ({ missing }) =>
+      ((missing as any[]) || []).map((m: any) => ({
+        inventory_item_id: String(m.inventory_item_id),
+        location_id: String(m.location_id),
+        stocked_quantity: Number(m.stocked_quantity || 0),
+        incoming_quantity: 0,
+      }))
+    );
+    const hasCreates = transform({ createInputs }, ({ createInputs }) => Array.isArray(createInputs) && (createInputs as any[]).length > 0);
+    when(hasCreates, (b) => Boolean(b)).then(() => {
+      createInventoryLevelsWorkflow.runAsStep({
+        input: { inventory_levels: createInputs as unknown as any[] },
+      });
+    });
+
+    const updates = transform<{ existing: any[]; levels: any[] }, UpdateInventoryLevelInput[]>(
+      { existing, levels },
+      ({ existing, levels }) => {
+        const lvlArr = (levels as any[]) || [];
+        const exArr = (existing as any[]) || [];
+        return exArr.map((ex: any) => {
+          const found = lvlArr.find(
+            (l: any) => l.inventory_item_id === ex.inventory_item_id && l.location_id === ex.location_id
+          );
+          const add = Number(found?.stocked_quantity || 0);
+          return {
+            id: String(ex.id),
+            inventory_item_id: String(ex.inventory_item_id),
+            location_id: String(ex.location_id),
+            stocked_quantity: Number(ex.stocked_quantity || 0) + add,
+          };
+        });
+      }
+    );
+    const hasUpdates = transform({ updates }, ({ updates }) => Array.isArray(updates) && (updates as any[]).length > 0);
+    when(hasUpdates, (b) => Boolean(b)).then(() => {
+      updateInventoryLevelsWorkflow.runAsStep({ input: { updates: updates as unknown as UpdateInventoryLevelInput[] } });
+    });
+
+    const shouldRecord = transform({ deliveredRecords }, ({ deliveredRecords }) => Array.isArray(deliveredRecords) && (deliveredRecords as any[]).length > 0);
+    when(shouldRecord, (b) => Boolean(b)).then(() => {
+      appendDeliveredLinesStep({ id: input.id, records: deliveredRecords as unknown as DeliveredLine[] });
+      // #1613 — the same fact into the TYPED record, so the admin delivery is
+      // not invisible to every reader of `line_fulfillments`.
+      recordAdminReceiptsStep({ id: input.id, records: deliveredRecords as unknown as DeliveredLine[] });
+    });
+
+    // #342 — best-effort §5 status mirror onto the unified core order
+    mirrorUnifiedOrderStatusStep({ inventoryOrderId: input.id });
+    // Keep the core mirror's items in sync with the (just-updated) lines so the
+    // unified order never drifts from the inventory order again. Best-effort.
+    reprojectInventoryMirrorItemsStep({ inventoryOrderId: input.id });
+    return new WorkflowResponse({ order: updatedOrder, orderlines: updatedOrderlines });
+  },
+);
+
+export default updateInventoryOrderWorkflow;

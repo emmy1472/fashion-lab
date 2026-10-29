@@ -1,0 +1,546 @@
+import React from "react"
+import { Badge, Container, Heading, Text } from "@medusajs/ui"
+import { useMemo } from "react"
+import { useTranslation } from "react-i18next"
+import { useParams } from "react-router-dom"
+
+import { SectionRow } from "../../../components/common/section"
+import { TwoColumnPageSkeleton } from "../../../components/common/skeleton"
+import { SingleColumnPage, TwoColumnPage } from "../../../components/layout/pages"
+import { getStatusBadgeColor } from "../../../lib/status-badge"
+import { useDate } from "../../../hooks/use-date"
+import {
+  designStatusLabel,
+  designTypeLabel,
+  priorityLabel,
+  workStatusLabel,
+} from "../../../lib/design-labels"
+import {
+  usePartnerDesign,
+} from "../../../hooks/api/partner-designs"
+import { DesignMediaStrip } from "./components/design-media-strip"
+import { DesignMoodboardSection } from "./components/design-moodboard-section"
+import { DesignSpecificationsSection } from "./components/design-specifications-section"
+import { DesignConsumptionLogsSection } from "./components/design-consumption-logs-section"
+import { DesignProductionSection } from "./components/design-production-section"
+import { DesignOwnerActionsSection } from "./components/design-owner-actions-section"
+import { DesignInventoryBomSection } from "./components/design-inventory-bom-section"
+import { DesignCostSection } from "./components/design-cost-section"
+
+type MarkLinkAttrs = { href?: string; target?: string }
+type Mark = {
+  type: "bold" | "italic" | "underline" | "strike" | "code" | "link"
+  attrs?: MarkLinkAttrs
+}
+
+type TextNode = { type: "text"; text: string; marks?: Mark[] }
+type HardBreakNode = { type: "hardBreak" }
+type ParagraphNode = { type: "paragraph"; content?: InlineNode[] }
+type HeadingNode = { type: "heading"; attrs?: { level?: number }; content?: InlineNode[] }
+type ListItemNode = { type: "listItem"; content?: BlockNode[] }
+type BulletListNode = { type: "bulletList"; content?: ListItemNode[] }
+type OrderedListNode = { type: "orderedList"; content?: ListItemNode[] }
+type BlockquoteNode = { type: "blockquote"; content?: BlockNode[] }
+type HorizontalRuleNode = { type: "horizontalRule" }
+
+type InlineNode = TextNode | HardBreakNode
+
+type BlockNode =
+  | ParagraphNode
+  | HeadingNode
+  | BulletListNode
+  | OrderedListNode
+  | BlockquoteNode
+  | HorizontalRuleNode
+  | { type: string; [k: string]: unknown }
+
+type TipTapDoc = { type: "doc"; content?: BlockNode[] }
+
+function renderTextNode(node: TextNode, key: React.Key) {
+  let content: React.ReactNode = node.text || ""
+  const marks = node.marks || []
+  for (const mark of marks) {
+    switch (mark.type) {
+      case "bold":
+        content = <strong key={`${key}-b`}>{content}</strong>
+        break
+      case "italic":
+        content = <em key={`${key}-i`}>{content}</em>
+        break
+      case "underline":
+        content = <u key={`${key}-u`}>{content}</u>
+        break
+      case "strike":
+        content = <s key={`${key}-s`}>{content}</s>
+        break
+      case "code":
+        content = (
+          <code
+            key={`${key}-c`}
+            className="px-1 py-0.5 bg-ui-bg-subtle rounded border text-xs"
+          >
+            {content}
+          </code>
+        )
+        break
+      case "link": {
+        const href = (mark.attrs as MarkLinkAttrs | undefined)?.href || "#"
+        const target = (mark.attrs as MarkLinkAttrs | undefined)?.target || "_blank"
+        content = (
+          <a
+            key={`${key}-a`}
+            href={href}
+            target={target}
+            className="text-ui-fg-interactive hover:underline"
+          >
+            {content}
+          </a>
+        )
+        break
+      }
+      default:
+        break
+    }
+  }
+  return <React.Fragment key={key}>{content}</React.Fragment>
+}
+
+function renderInline(nodes: InlineNode[] = []) {
+  return nodes.map((n, i) => {
+    if (n.type === "text") return renderTextNode(n as TextNode, i)
+    if (n.type === "hardBreak") return <br key={`br-${i}`} />
+    return null
+  })
+}
+
+function renderBlock(node: BlockNode, idx: number): React.ReactNode {
+  switch (node.type) {
+    case "paragraph": {
+      const n = node as ParagraphNode
+      return (
+        <p key={idx} className="mb-2">
+          {renderInline(n.content)}
+        </p>
+      )
+    }
+    case "heading": {
+      const n = node as HeadingNode
+      const level = Math.min(Math.max(n.attrs?.level ?? 2, 1), 6)
+      const Tag = `h${level}` as keyof React.JSX.IntrinsicElements
+      return (
+        <Tag key={idx} className="font-semibold mt-3 mb-2">
+          {renderInline(n.content)}
+        </Tag>
+      )
+    }
+    case "bulletList": {
+      const n = node as BulletListNode
+      return (
+        <ul key={idx} className="list-disc pl-6 mb-2">
+          {(n.content || []).map((li, i) => (
+            <li key={i}>
+              {(li.content || []).map((c, j) => renderBlock(c, j))}
+            </li>
+          ))}
+        </ul>
+      )
+    }
+    case "orderedList": {
+      const n = node as OrderedListNode
+      return (
+        <ol key={idx} className="list-decimal pl-6 mb-2">
+          {(n.content || []).map((li, i) => (
+            <li key={i}>
+              {(li.content || []).map((c, j) => renderBlock(c, j))}
+            </li>
+          ))}
+        </ol>
+      )
+    }
+    case "blockquote": {
+      const n = node as BlockquoteNode
+      return (
+        <blockquote key={idx} className="border-l-2 pl-3 text-ui-fg-subtle italic mb-2">
+          {(n.content || []).map((c, j) => renderBlock(c, j))}
+        </blockquote>
+      )
+    }
+    case "horizontalRule":
+      return <hr key={idx} className="my-3" />
+    default:
+      return (
+        <pre
+          key={idx}
+          className="text-xs bg-ui-bg-subtle p-2 rounded border overflow-auto"
+        >
+          {JSON.stringify(node, null, 2)}
+        </pre>
+      )
+  }
+}
+
+function getTipTapBlocks(input: unknown): BlockNode[] {
+  let doc: TipTapDoc | null = null
+
+  if (typeof input === "string") {
+    const trimmed = input.trim()
+
+    if (!trimmed) {
+      return []
+    }
+
+    try {
+      doc = JSON.parse(trimmed) as TipTapDoc
+    } catch {
+      doc = {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: input }],
+          },
+        ],
+      }
+    }
+  } else if (input && typeof input === "object") {
+    doc = input as TipTapDoc
+  }
+
+  if (!doc || doc.type !== "doc") {
+    return []
+  }
+
+  return Array.isArray(doc.content) ? (doc.content as BlockNode[]) : []
+}
+
+/**
+ * The full design manager. Standalone it reads the design id from the route
+ * param (`/designs/:id`). Nested under an order (`/orders/:id/design-details`)
+ * the resolver passes the design id explicitly, so the SAME manager renders
+ * inside the order instead of jumping the partner to a new top-level route.
+ * Returning to the order is the breadcrumb's job either way — there is no
+ * separate back-link affordance.
+ */
+export type DesignDetailProps = {
+  /** Explicit design id (nested/in-order use). Falls back to the route param. */
+  designId?: string
+}
+
+export const DesignDetail = ({ designId }: DesignDetailProps = {}) => {
+  const { t } = useTranslation()
+  const { getFullDate } = useDate()
+  const { id: idParam } = useParams()
+  const id = designId ?? idParam
+
+  if (!id) {
+    return (
+      <SingleColumnPage widgets={{ before: [], after: [] }} hasOutlet={false}>
+        <Container className="p-6">
+          <Heading>{t("partner.designs.design")}</Heading>
+          <Text size="small" className="text-ui-fg-subtle">
+            {t("partner.designs.missingId")}
+          </Text>
+        </Container>
+      </SingleColumnPage>
+    )
+  }
+
+  const { design, isPending, isError, error } = usePartnerDesign(id)
+
+  const inventoryItems = (design?.inventory_items || []) as Array<Record<string, any>>
+
+  const inventoryItemRows = useMemo(() => {
+    return inventoryItems.map((it) => {
+      const label = it?.title || it?.name || it?.sku || it?.id
+      return {
+        id: String(it.id),
+        label: String(label),
+      }
+    })
+  }, [inventoryItems])
+
+  const metadata = (design as any)?.metadata as Record<string, any> | undefined
+
+  // Designer notes — stored as `designer_notes` column (TipTap JSON or plain text)
+  const notesValue = (design as any)?.designer_notes || metadata?.notes
+  // Specs — can be in metadata.specs or as a top-level field
+  const specsValue = metadata?.specs
+  // Sizes — prefer the normalized `size_sets` relation
+  // ({ size_label, measurements }); fall back to the legacy `custom_sizes` map
+  // ({ "S": { chest, length }, ... }). The design that comes with an order carries
+  // its sizes on `size_sets`, so this is what the partner needs to see.
+  // Sizes, tags and the colour palette now live in DesignSpecificationsSection.
+  // Description
+  const description = (design as any)?.description
+
+  const notesBlocks = useMemo(() => getTipTapBlocks(notesValue), [notesValue])
+  const hasNotesContent = notesBlocks.length > 0
+
+  if (isPending) {
+    return (
+      <TwoColumnPageSkeleton
+        mainSections={5}
+        sidebarSections={3}
+        showJSON={false}
+        showMetadata={false}
+      />
+    )
+  }
+
+  if (isError) {
+    throw error
+  }
+
+  if (!design) {
+    return (
+      <SingleColumnPage widgets={{ before: [], after: [] }} hasOutlet={false}>
+        <Container className="p-6">
+          <Heading>{t("partner.designs.design")}</Heading>
+          <Text size="small" className="text-ui-fg-subtle">
+            {t("partner.designs.notFound")}
+          </Text>
+        </Container>
+      </SingleColumnPage>
+    )
+  }
+
+  return (
+    <TwoColumnPage widgets={{ before: [], after: [], sideBefore: [], sideAfter: [] }} hasOutlet>
+      <TwoColumnPage.Main>
+        {design && <DesignOwnerActionsSection design={design} />}
+        {/* The media strip rides inside the owner header card. A design this
+            partner was merely ASSIGNED has no header card at all
+            (DesignOwnerActionsSection renders null for a non-owner), so the
+            strip stands on its own there rather than the assigned designer
+            losing the reference images the sidebar card used to show them. */}
+        {design && !design.is_owner && (
+          <Container className="px-6 py-3">
+            <DesignMediaStrip design={design} />
+          </Container>
+        )}
+        <Container className="divide-y p-0">
+          <div className="px-6 py-4">
+            <Heading level="h2">{t("partner.designs.detail.general")}</Heading>
+          </div>
+          <SectionRow title={t("fields.name")} value={design?.name || "-"} />
+          {/* Garment type (#938) — what the thing IS. Distinct from "Type"
+              below, which says how original the work is. An inferred value is
+              badged as provisional: a model's guess and a designer's decision
+              must not look alike, because the guess is the one a human
+              correction overwrites. */}
+          <SectionRow
+            title={t("partner.designs.detail.garmentType")}
+            value={
+              (design as any)?.product_type ? (
+                <div className="flex items-center gap-x-2">
+                  <Badge size="2xsmall" color="grey">
+                    {String((design as any).product_type)}
+                  </Badge>
+                  {(design as any).product_type_source === "inferred" ? (
+                    <Badge size="2xsmall" color="orange">
+                      {t("partner.designs.detail.inferred")}
+                    </Badge>
+                  ) : null}
+                </div>
+              ) : (
+                "-"
+              )
+            }
+          />
+          <SectionRow
+            title={t("fields.type")}
+            value={
+              (design as any)?.design_type ? (
+                <Badge size="2xsmall" color="blue">
+                  {designTypeLabel(t, String((design as any).design_type))}
+                </Badge>
+              ) : "-"
+            }
+          />
+          <SectionRow
+            title={t("fields.status")}
+            value={
+              design?.status ? (
+                <Badge size="2xsmall" color={getStatusBadgeColor(design.status)}>
+                  {designStatusLabel(t, String(design.status))}
+                </Badge>
+              ) : "-"
+            }
+          />
+          <SectionRow
+            title={t("partner.designs.detail.partnerStatus")}
+            value={
+              design?.partner_info?.partner_status ? (
+                <Badge
+                  size="2xsmall"
+                  color={getStatusBadgeColor(design.partner_info.partner_status)}
+                >
+                  {workStatusLabel(t, String(design.partner_info.partner_status))}
+                  {design.partner_info.partner_phase ? ` (${design.partner_info.partner_phase})` : ""}
+                </Badge>
+              ) : "-"
+            }
+          />
+          <SectionRow
+            title={t("partner.designs.detail.priority")}
+            value={
+              (design as any)?.priority ? (
+                <Badge
+                  size="2xsmall"
+                  color={
+                    (design as any).priority === "urgent" ? "red" :
+                    (design as any).priority === "high" ? "orange" :
+                    (design as any).priority === "medium" ? "blue" : "grey"
+                  }
+                >
+                  {priorityLabel(t, String((design as any).priority))}
+                </Badge>
+              ) : "-"
+            }
+          />
+          {(design as any)?.target_completion_date && (
+            <SectionRow
+              title={t("partner.designs.detail.targetDate")}
+              value={getFullDate({ date: (design as any).target_completion_date })}
+            />
+          )}
+          {/*
+            `!= null`, not truthiness: an estimated cost of 0 is a real value,
+            and `{0 && …}` renders the literal 0 into the page — the stray
+            zero under the design's meta rows.
+          */}
+          {(design as any)?.estimated_cost != null && (
+            <SectionRow
+              title={t("partner.designs.detail.estimatedCost")}
+              value={
+                <Text size="small" weight="plus">
+                  {(design as any).cost_currency
+                    ? `${(design as any).cost_currency.toUpperCase()} ${(design as any).estimated_cost}`
+                    : String((design as any).estimated_cost)
+                  }
+                </Text>
+              }
+            />
+          )}
+        </Container>
+
+        {/* Description */}
+        {description && (
+          <Container className="divide-y p-0">
+            <div className="px-6 py-4">
+              <Heading level="h2">{t("partner.designs.detail.description")}</Heading>
+            </div>
+            <div className="px-6 py-4">
+              <Text size="small" className="text-ui-fg-subtle whitespace-pre-line">
+                {String(description)}
+              </Text>
+            </div>
+          </Container>
+        )}
+
+        {design && <DesignSpecificationsSection design={design} />}
+
+        {/* Production & Material Usage — highest priority for partners */}
+        {design && <DesignInventoryBomSection design={design} />}
+
+        {/* Cost estimate (incl. the JYT platform fee) is owner-only — hidden
+            for partners merely assigned to the design, whose cost fetch would
+            403 anyway (#920). */}
+        {design && design.is_owner && <DesignCostSection design={design} />}
+
+        {/* Start production now lives in the owner command header above
+            (DesignOwnerActionsSection); the run list follows. */}
+        {design && <DesignProductionSection design={design} />}
+
+        {design && <DesignConsumptionLogsSection design={design} />}
+
+        {/* Inventory Items */}
+        <Container className="divide-y p-0">
+          <div className="px-6 py-4">
+            <Heading level="h2">{t("partner.designs.detail.inventoryItems")}</Heading>
+          </div>
+
+          {inventoryItemRows.length === 0 ? (
+            <div className="px-6 py-4">
+              <Text size="small" className="text-ui-fg-subtle">
+                {t("partner.designs.detail.noInventoryItems")}
+              </Text>
+            </div>
+          ) : (
+            <div className="txt-small flex flex-col gap-2 px-2 pt-2 pb-2">
+              {inventoryItemRows.map((row) => (
+                <div
+                  key={row.id}
+                  className="shadow-elevation-card-rest bg-ui-bg-component rounded-md px-4 py-2"
+                >
+                  <div className="flex flex-1 flex-col overflow-hidden">
+                    <span className="text-ui-fg-base font-medium truncate">
+                      {row.label}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Container>
+
+        <Container className="divide-y p-0">
+          <div className="px-6 py-4">
+            <Heading level="h2">{t("partner.designs.detail.designerNotes")}</Heading>
+          </div>
+          <div className="px-6 py-4">
+            {!hasNotesContent ? (
+              <Text size="small" className="text-ui-fg-subtle">
+                {t("partner.designs.detail.noNotes")}
+              </Text>
+            ) : (
+              <div className="space-y-2">
+                <div className="text-sm leading-6 resize-y overflow-auto min-h-[120px] max-h-[60vh] rounded-md border bg-ui-bg-base p-3">
+                  {notesBlocks.map((n, i) => renderBlock(n, i))}
+                </div>
+                <Text size="xsmall" className="text-ui-fg-muted">
+                  {t("partner.designs.detail.resizeHint")}
+                </Text>
+              </div>
+            )}
+          </div>
+        </Container>
+
+        {specsValue && (
+          <Container className="divide-y p-0">
+            <div className="px-6 py-4">
+              <Heading level="h2">{t("partner.designs.detail.specs")}</Heading>
+            </div>
+            {typeof specsValue === "object" && !Array.isArray(specsValue) ? (
+              Object.entries(specsValue as Record<string, any>).map(([key, value]) => (
+                <SectionRow
+                  key={key}
+                  title={String(key)}
+                  value={
+                    typeof value === "string" || typeof value === "number"
+                      ? String(value)
+                      : value
+                      ? JSON.stringify(value)
+                      : "-"
+                  }
+                />
+              ))
+            ) : (
+              <div className="px-6 py-4">
+                <Text size="small" className="text-ui-fg-subtle whitespace-pre-line">
+                  {typeof specsValue === "string"
+                    ? specsValue
+                    : JSON.stringify(specsValue, null, 2)}
+                </Text>
+              </div>
+            )}
+          </Container>
+        )}
+      </TwoColumnPage.Main>
+
+      <TwoColumnPage.Sidebar>
+        {design && <DesignMoodboardSection design={design} />}
+      </TwoColumnPage.Sidebar>
+    </TwoColumnPage>
+  )
+}

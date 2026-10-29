@@ -1,0 +1,83 @@
+---
+title: useDesign
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { Popout } from '@freesewing/react/components/Popout'
+import { Tab, Tabs } from '@freesewing/react/components/Tab'
+
+<DocusaurusDoc>
+
+The **useDesign** hook provides access to the entire FreeSewing collection of designs.
+
+<Popout type="tip" title="Beware of bundle size">
+Use this hook to load a design when you plan to use the entire collection. If
+you only plan to use one or a few designs, you may want to load them differently as
+including this hook will include all FreeSewing designs in your code bundle.
+</Popout>
+
+## Example
+
+<Tabs tabs="hook, named export, direct import">
+<Tab>
+Using the hook makes it easy to load a design if you want to be able to
+dynamically load a different design, or do not know in advance what designs
+should be made available.
+
+```js
+import { useDesign } from '@freesewing/react/hooks/useDesign'
+
+const MyComponent = ({ name = 'aaron' }) => {
+  const Aaron = useDesign(name)
+
+  // ...
+}
+```
+</Tab>
+<Tab>
+This hook has a `designs` named export that holds the entire FreeSewing collection.
+
+```js
+import { designs } from '@freesewing/react/hooks/useDesign'
+
+const MyComponent = () => {
+  const Aaron = designs.aaron
+
+  // ...
+}
+```
+</Tab>
+<Tab>
+If you know in advance what design you want, importing it directly is more efficient.
+```js
+import { Aaron } from '@freesewing/aaron'
+
+const MyComponent = () => {
+
+  // ...
+}
+```
+</Tab>
+</Tabs>
+
+## Return value
+
+Calling the hook returns a design constructor, assuming the design name you pass it is in the FreeSewing collection.
+
+## Named exports
+
+You can also load the `collection` and `designs` named exports from the same import:
+
+```js
+import {
+  collection, // Object.keys(designs)
+  designs, // An object where the key is the (lowercase) design name, and the value the design constructor
+  useDesign, // The hook
+} from '@freesewing/react/hooks/useDesign'
+```
+
+- `collection` is an array of lowercase design names.
+- `designs` is an object where the key is the (lowercase) design name, and the value the design constructor.
+
+</DocusaurusDoc>
+

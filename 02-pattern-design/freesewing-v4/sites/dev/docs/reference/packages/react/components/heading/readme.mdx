@@ -1,0 +1,56 @@
+---
+title: Heading
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import {
+  jsdocH1,
+  jsdocH2,
+  jsdocH3,
+  jsdocH4,
+  jsdocH5,
+  jsdocH6,
+} from '@site/prebuild/jsdoc/components.heading.mjs'
+import { H1Example, H2Example, H3Example, H4Example, H5Example, H6Example } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Button** component family provides the following components:
+
+- [H1](#h1)
+- [H2](#h2)
+- [H3](#h3)
+- [H4](#h4)
+- [H5](#h5)
+- [H6](#h6)
+
+### H1
+
+<ComponentDocs docs={jsdocH1} example={H1Example} />
+
+### H2
+
+<ComponentDocs docs={jsdocH2} example={H2Example} />
+
+### H3
+
+<ComponentDocs docs={jsdocH3} example={H3Example} />
+
+### H4
+
+<ComponentDocs docs={jsdocH4} example={H4Example} />
+
+### H5
+
+<ComponentDocs docs={jsdocH5} example={H5Example} />
+
+### H6
+
+<ComponentDocs docs={jsdocH6} example={H6Example} />
+
+</DocusaurusDoc>

@@ -1,0 +1,308 @@
+import { MedusaContainer } from "@medusajs/framework/types"
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { VISUAL_FLOWS_MODULE } from "../modules/visual_flows"
+import VisualFlowService from "../modules/visual_flows/service"
+import { executeVisualFlowWorkflow } from "../workflows/visual-flows"
+
+/**
+ * TTL (seconds) on a scanner's per-flow+minute claim.
+ *
+ * A crash-safety net, not a hold time: the claim is released in a `finally`
+ * as soon as the enqueue marker is written. It only has to outlast the three DB
+ * round-trips inside the claim under prod load — comfortably, since a claim
+ * that expires early lets a second scanner in and re-opens the race the claim
+ * exists to close.
+ */
+const SCHEDULE_LOCK_TTL_SECONDS = 120
+
+function parseCronParts(cron: string): string[] | null {
+  const parts = cron.trim().split(/\s+/)
+  if (parts.length !== 5) {
+    return null
+  }
+  return parts
+}
+
+function cronFieldMatches(field: string, value: number, min: number, max: number): boolean {
+  const f = field.trim()
+
+  if (f === "*") {
+    return true
+  }
+
+  const listParts = f.split(",").map((p) => p.trim()).filter(Boolean)
+  for (const part of listParts) {
+    if (part.includes("/")) {
+      const [rangePart, stepPart] = part.split("/")
+      const step = Number(stepPart)
+      if (!Number.isFinite(step) || step <= 0) {
+        continue
+      }
+
+      let start = min
+      let end = max
+
+      if (rangePart && rangePart !== "*") {
+        if (rangePart.includes("-")) {
+          const [s, e] = rangePart.split("-")
+          start = Number(s)
+          end = Number(e)
+        } else {
+          start = Number(rangePart)
+          end = max
+        }
+      }
+
+      if (!Number.isFinite(start) || !Number.isFinite(end)) {
+        continue
+      }
+
+      if (value < start || value > end) {
+        continue
+      }
+
+      if ((value - start) % step === 0) {
+        return true
+      }
+
+      continue
+    }
+
+    if (part.includes("-")) {
+      const [s, e] = part.split("-")
+      const start = Number(s)
+      const end = Number(e)
+      if (!Number.isFinite(start) || !Number.isFinite(end)) {
+        continue
+      }
+      if (value >= start && value <= end) {
+        return true
+      }
+      continue
+    }
+
+    const n = Number(part)
+    if (Number.isFinite(n) && n === value) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function cronMatchesNow(cron: string, date: Date): boolean {
+  const parts = parseCronParts(cron)
+  if (!parts) {
+    return false
+  }
+
+  const [minField, hourField, domField, monthField, dowField] = parts
+
+  const minute = date.getMinutes()
+  const hour = date.getHours()
+  const dayOfMonth = date.getDate()
+  const month = date.getMonth() + 1
+  const dayOfWeek = date.getDay()
+
+  return (
+    cronFieldMatches(minField, minute, 0, 59) &&
+    cronFieldMatches(hourField, hour, 0, 23) &&
+    cronFieldMatches(domField, dayOfMonth, 1, 31) &&
+    cronFieldMatches(monthField, month, 1, 12) &&
+    cronFieldMatches(dowField, dayOfWeek, 0, 6)
+  )
+}
+
+function minuteKey(date: Date): string {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, "0")
+  const d = String(date.getDate()).padStart(2, "0")
+  const hh = String(date.getHours()).padStart(2, "0")
+  const mm = String(date.getMinutes()).padStart(2, "0")
+  return `${y}-${m}-${d}T${hh}:${mm}`
+}
+
+/**
+ * Merge a patch into `metadata.schedule` without clobbering the rest of the
+ * flow's metadata. Re-reads the flow fresh on every write because Medusa
+ * replaces the whole `metadata` blob on update — spreading a stale snapshot
+ * (captured at scan time, minutes/days before a long-running flow finishes)
+ * would drop concurrent writes. We only ever touch the `schedule` sub-object.
+ */
+async function patchScheduleMeta(
+  service: VisualFlowService,
+  flowId: string,
+  patch: Record<string, any>
+): Promise<void> {
+  const current: any = await service.retrieveVisualFlow(flowId)
+  const metadata = (current?.metadata || {}) as any
+  await service.updateVisualFlows({
+    id: flowId,
+    metadata: {
+      ...metadata,
+      schedule: {
+        ...(metadata.schedule || {}),
+        ...patch,
+      },
+    },
+  } as any)
+}
+
+export default async function runScheduledVisualFlows(container: MedusaContainer) {
+  const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
+  const service: VisualFlowService = container.resolve(VISUAL_FLOWS_MODULE)
+  const locking = container.resolve(Modules.LOCKING) as any
+
+  const now = new Date()
+  const nowKey = minuteKey(now)
+
+  const flows = await service.listVisualFlows({
+    trigger_type: "schedule",
+    status: "active",
+  } as any)
+
+  for (const flow of flows as any[]) {
+    const cron = flow?.trigger_config?.cron
+    if (!cron || typeof cron !== "string") {
+      continue
+    }
+
+    if (!cronMatchesNow(cron, now)) {
+      continue
+    }
+
+    // Cheap pre-filter: skip if the minute marker is already set. This avoids
+    // a lock acquire for flows that were claimed by a prior tick or a faster
+    // scanner. The authoritative guard is the lock below.
+    const lastRunKey = flow?.metadata?.schedule?.last_run_minute_key
+    if (lastRunKey === nowKey) {
+      continue
+    }
+
+    // ── Distributed lock per flow + minute (#1334) ──────────────────────────
+    //
+    // Two worker tasks briefly coexist during a rolling ECS deploy or a
+    // Fargate Spot replacement. The check-then-set on `last_run_minute_key`
+    // is a TOCTOU race — both scanners read a stale key before either writes,
+    // and both fire the workflow. The lock serializes the claim: only one
+    // scanner holds `scheduled-flow:{flowId}:{minuteKey}` at a time.
+    //
+    // `acquire` is NON-BLOCKING: if another scanner already holds the key it
+    // throws at once and this scanner moves on, rather than blocking the
+    // every-minute tick. Inside the claim we re-check the minute key
+    // (double-check pattern) because the flow list was read at the top of the
+    // tick and the marker may have been written by the time we enter.
+    //
+    // Deliberately NOT `locking.execute(..., { timeout: 1 })`, which reads like
+    // "give up after a second" and is neither: the Redis provider maps
+    // `timeout` to the key's TTL (`expire: args?.timeout ? timeoutSeconds : 60`)
+    // and passes `awaitQueue: true`. That set a ONE-SECOND expiry over a body
+    // doing three DB round-trips — so under load the key expired while the
+    // first scanner was still inside it — and made the second scanner retry for
+    // that whole second rather than skip. Both scanners could then fire.
+    const lockKey = `scheduled-flow:${flow.id}:${nowKey}`
+
+    try {
+      // TTL is a crash-safety net only: the claim is released in `finally`
+      // below. It has to comfortably exceed the enclosed DB writes, not the
+      // fire-and-forget workflow, which is deliberately not awaited.
+      await locking.acquire(lockKey, { expire: SCHEDULE_LOCK_TTL_SECONDS })
+    } catch (e: any) {
+      // Another scanner holds this flow+minute. The next tick retries.
+      logger.warn(
+        `[run-scheduled-visual-flows] flow=${flow.id} skipped (claim held: ${e?.message})`
+      )
+      continue
+    }
+
+    try {
+      await (async () => {
+          // Re-check inside the lock — another scanner may have claimed this
+          // minute while we were acquiring.
+          const fresh = await service.retrieveVisualFlow(flow.id)
+          if ((fresh as any)?.metadata?.schedule?.last_run_minute_key === nowKey) {
+            return
+          }
+
+          // Enqueue marker — written BEFORE the flow is fired so the every-minute
+          // scanner never double-enqueues a flow, even when the run is long-lived
+          // (durable waits) or a slow tick overlaps the next one. Dedup is keyed on
+          // this `last_run_minute_key`, so it must land synchronously.
+          try {
+            await patchScheduleMeta(service, flow.id, {
+              last_run_minute_key: nowKey,
+              last_run_at: now.toISOString(),
+              last_enqueued_at: now.toISOString(),
+              last_status: "enqueued",
+              last_error: null,
+            })
+          } catch (e: any) {
+            logger.error(
+              `[run-scheduled-visual-flows] flow=${flow.id} failed to mark enqueue: ${e?.message}`
+            )
+            return
+          }
+
+          // Fire-and-forget: the durable workflow runs in the worker. We deliberately
+          // do NOT await it — one slow or long-running flow must not block the
+          // scanner or the other due flows in this tick (mirrors the webhook async
+          // path). Final status is recorded from the resolved/rejected callbacks.
+          void executeVisualFlowWorkflow(container)
+            .run({
+              input: {
+                flowId: flow.id,
+                triggerData: {
+                  schedule: {
+                    cron,
+                    run_at: now.toISOString(),
+                    minute_key: nowKey,
+                  },
+                },
+                triggeredBy: "schedule",
+                metadata: {
+                  schedule: {
+                    cron,
+                    run_at: now.toISOString(),
+                    minute_key: nowKey,
+                  },
+                },
+              },
+            })
+            .then(({ result, errors }) => {
+              if (errors?.length) {
+                return patchScheduleMeta(service, flow.id, {
+                  last_status: "failed",
+                  last_error: "Workflow execution returned errors",
+                })
+              }
+              return patchScheduleMeta(service, flow.id, {
+                last_execution_id: result?.executionId,
+                last_status: "completed",
+              })
+            })
+            .catch((e: any) => {
+              logger.error(`[run-scheduled-visual-flows] flow=${flow.id} error=${e?.message}`)
+              return patchScheduleMeta(service, flow.id, {
+                last_status: "failed",
+                last_error: e?.message,
+              }).catch(() => {
+                /* best-effort status write */
+              })
+            })
+      })()
+    } catch (e: any) {
+      logger.error(
+        `[run-scheduled-visual-flows] flow=${flow.id} failed inside claim: ${e?.message}`
+      )
+    } finally {
+      await locking.release(lockKey).catch(() => {
+        // Best-effort — the TTL clears it if this fails.
+      })
+    }
+  }
+}
+
+export const config = {
+  name: "run-scheduled-visual-flows",
+  schedule: "* * * * *",
+}

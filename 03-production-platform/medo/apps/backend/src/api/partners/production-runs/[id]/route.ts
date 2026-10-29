@@ -1,0 +1,214 @@
+/**
+ * @file Partner API route for retrieving a specific production run
+ * @description Provides an endpoint for partners to retrieve detailed information about a specific production run including its associated tasks
+ * @module API/Partners/ProductionRuns
+ */
+
+/**
+ * @typedef {Object} ProductionRunTask
+ * @property {string} id - The unique identifier for the task
+ * @property {string} name - The name of the task
+ * @property {string} status - The current status of the task (e.g., "pending", "in_progress", "completed")
+ * @property {Date} created_at - When the task was created
+ * @property {Date} updated_at - When the task was last updated
+ * @property {string} production_run_id - The ID of the associated production run
+ */
+
+/**
+ * @typedef {Object} ProductionRunResponse
+ * @property {string} id - The unique identifier for the production run
+ * @property {string} name - The name of the production run
+ * @property {string} status - The current status of the production run
+ * @property {string} partner_id - The ID of the partner who owns this production run
+ * @property {Date} created_at - When the production run was created
+ * @property {Date} updated_at - When the production run was last updated
+ * @property {Date} scheduled_at - When the production run is scheduled to occur
+ * @property {Date} completed_at - When the production run was completed (null if not completed)
+ * @property {string} notes - Additional notes about the production run
+ * @property {ProductionRunTask[]} tasks - Array of tasks associated with this production run
+ */
+
+/**
+ * Retrieve a specific production run by ID
+ * @route GET /partners/production-runs/{id}
+ * @group ProductionRun - Operations related to production runs
+ * @param {string} id.path.required - The ID of the production run to retrieve
+ * @returns {Object} 200 - The production run object with associated tasks
+ * @throws {MedusaError} 401 - Partner authentication required - no actor ID
+ * @throws {MedusaError} 404 - ProductionRun not found for this partner
+ *
+ * @example request
+ * GET /partners/production-runs/prun_123456789
+ *
+ * @example response 200
+ * {
+ *   "production_run": {
+ *     "id": "prun_123456789",
+ *     "name": "Summer Collection 2023",
+ *     "status": "in_progress",
+ *     "partner_id": "partner_987654321",
+ *     "created_at": "2023-05-01T08:00:00Z",
+ *     "updated_at": "2023-05-15T10:30:00Z",
+ *     "scheduled_at": "2023-06-01T00:00:00Z",
+ *     "completed_at": null,
+ *     "notes": "Initial production run for summer collection",
+ *     "tasks": [
+ *       {
+ *         "id": "task_111111111",
+ *         "name": "Fabric Cutting",
+ *         "status": "completed",
+ *         "created_at": "2023-05-02T09:00:00Z",
+ *         "updated_at": "2023-05-05T17:00:00Z",
+ *         "production_run_id": "prun_123456789"
+ *       },
+ *       {
+ *         "id": "task_222222222",
+ *         "name": "Sewing",
+ *         "status": "in_progress",
+ *         "created_at": "2023-05-06T08:00:00Z",
+ *         "updated_at": "2023-05-15T10:30:00Z",
+ *         "production_run_id": "prun_123456789"
+ *       }
+ *     ]
+ *   },
+ *   "tasks": [
+ *     {
+ *       "id": "task_111111111",
+ *       "name": "Fabric Cutting",
+ *       "status": "completed",
+ *       "created_at": "2023-05-02T09:00:00Z",
+ *       "updated_at": "2023-05-05T17:00:00Z",
+ *       "production_run_id": "prun_123456789"
+ *     },
+ *     {
+ *       "id": "task_222222222",
+ *       "name": "Sewing",
+ *       "status": "in_progress",
+ *       "created_at": "2023-05-06T08:00:00Z",
+ *       "updated_at": "2023-05-15T10:30:00Z",
+ *       "production_run_id": "prun_123456789"
+ *     }
+ *   ]
+ * }
+ *
+ * @example response 401
+ * {
+ *   "error": "Partner authentication required - no actor ID"
+ * }
+ *
+ * @example response 404
+ * {
+ *   "error": "ProductionRun prun_123456789 not found for this partner partner_987654321"
+ * }
+ */
+import { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
+
+import { PRODUCTION_RUNS_MODULE } from "../../../../modules/production_runs"
+import type ProductionRunService from "../../../../modules/production_runs/service"
+import { readRunAllocation } from "../../../../lib/production-run-allocation"
+import { workOrderIdForRun, workOrderReadsEnabled } from "../../../../lib/work-orders/read-work-orders"
+
+export async function GET(
+  req: AuthenticatedMedusaRequest & { params: { id: string } },
+  res: MedusaResponse
+) {
+  const partnerId = req.auth_context?.actor_id
+  if (!partnerId) {
+    return res
+      .status(401)
+      .json({ error: "Partner authentication required - no actor ID" })
+  }
+
+  const id = req.params.id
+  const productionRunService: ProductionRunService = req.scope.resolve(
+    PRODUCTION_RUNS_MODULE
+  )
+
+  let run: any
+  try {
+    run = await productionRunService.retrieveProductionRun(id)
+  } catch {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      `ProductionRun ${id} not found for this partner ${partnerId}`
+    )
+  }
+
+  // #2028 item 5 — scope is the originator (`partner_id`) OR the outsourced
+  // executor (`sub_partner_id`). This route used to admit the originator only,
+  // so a sub-partner 404'd on the run they were actually executing while
+  // `cost-summary` and `transfers` — same resource, same actor — let them
+  // straight in. Founder's call (2026-09-13): the executor may see their run.
+  const persistedPartnerId = run?.partner_id ?? run?.partnerId ?? null
+  const persistedSubPartnerId = run?.sub_partner_id ?? run?.subPartnerId ?? null
+  const isOriginator = !!persistedPartnerId && persistedPartnerId === partnerId
+  const isExecutor = !!persistedSubPartnerId && persistedSubPartnerId === partnerId
+  if (!isOriginator && !isExecutor) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      `ProductionRun ${id} not found for this partner ${partnerId}`
+    )
+  }
+
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+
+  // NOTE: In some cases, filtering by `id` alone via query.graph can behave unexpectedly
+  // (even though the run is present in the partner list query). We therefore use the
+  // same query shape as the list endpoint (filter by partner_id) and select the run
+  // in application code.
+  //
+  // #2028 item 5 — that shape is kept, but keyed on whichever field admitted
+  // this actor. A sub-partner filtered on `partner_id` matches NOTHING: `node`
+  // then falls back to the bare `retrieveProductionRun` result, which carries
+  // no `tasks` and no `order.id`, so the executor gets a run detail quietly
+  // missing the parts they came for. An empty graph result reads as a thinner
+  // page, never an error, so the scoping key has to follow the guard.
+  const { data } = await query.graph({
+    entity: "production_runs",
+    // `order.id` resolves the order↔production_run link forward (#342 D5) so the
+    // partner-ui can redirect the retired `/production-runs/:id` to the unified
+    // order detail. Managed link → bidirectional; forward `.order` works here.
+    fields: ["*", "tasks.*", "order.id"],
+    filters: isOriginator
+      ? { id, partner_id: partnerId }
+      : { id, sub_partner_id: partnerId },
+    pagination: { skip: 0, take: 1 },
+  })
+
+  const node = (data || [])[0] || run
+
+  const mirrorOrderId = Array.isArray((node as any)?.order)
+    ? (node as any).order[0]?.id
+    : (node as any)?.order?.id
+  // #2264 S2c — from work_order's own run link when reads are flipped; the
+  // mirror's answer stays as the fallback.
+  const unifiedOrderId = workOrderReadsEnabled()
+    ? (await workOrderIdForRun(req.scope, id)) ?? mirrorOrderId
+    : mirrorOrderId
+
+  // The materials THIS run was assigned. Empty means no selection was ever
+  // made, which is not the same as "no materials" — the UI falls back to the
+  // design's full bill of materials in that case, as it always did. Sent as an
+  // explicit `materials_constrained` flag so the client does not have to infer
+  // that distinction from an empty array and get it wrong.
+  const allocation = await readRunAllocation(req.scope, id)
+
+  // Also hung on the run itself: every consumer that has the run object (the
+  // card is rendered from three places) then has the allocation with it,
+  // instead of some of them silently falling back to the design's full BOM and
+  // offering the partner materials the consumption gate will refuse.
+  const runWithMaterials = {
+    ...(node as any),
+    materials: allocation,
+    materials_constrained: allocation.length > 0,
+  }
+
+  return res.status(200).json({
+    production_run: runWithMaterials,
+    tasks: node?.tasks || [],
+    unified_order_id: unifiedOrderId,
+    materials: allocation,
+    materials_constrained: allocation.length > 0,
+  })
+}

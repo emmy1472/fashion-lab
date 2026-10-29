@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en" class="bg-slate-100">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="media-api-base" content="https://v3.jaalyantra.com">
+    <title>Media Gallery</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      // Optional: host can set window.MEDIA_API_BASE_URL or <meta name="media-api-base" content="https://api.example.com">
+      window.MEDIA_API_BASE_URL = window.MEDIA_API_BASE_URL || undefined
+    </script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              display: ["Space Grotesk", "Inter", "ui-sans-serif", "system-ui"],
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+  <body class="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-100 text-slate-900">
+    <main class="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-12 lg:px-6">
+      <header class="rounded-3xl bg-white/80 p-6 shadow-xl ring-1 ring-slate-200 backdrop-blur">
+        <p class="text-sm uppercase tracking-[0.25em] text-slate-400">JYT & Cici Label Media</p>
+        <h1 id="folder-name" class="font-display text-4xl font-semibold text-slate-900">Media Gallery</h1>
+        <p id="status" class="mt-2 text-base text-slate-500">
+          Provide a folder ID and token in the URL query (?folder=FOLDER_ID&token=SHARE_TOKEN).
+        </p>
+      </header>
+
+      <section class="rounded-3xl bg-white/90 p-5 shadow-lg ring-1 ring-slate-200 backdrop-blur">
+        <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div class="flex flex-1 flex-col">
+            <label class="text-sm font-semibold text-slate-600">Shareable URL</label>
+            <input
+              id="share-url"
+              readonly
+              class="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm text-slate-600 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+            />
+          </div>
+          <div class="flex flex-col gap-2 sm:flex-row">
+            <button
+              id="copy-btn"
+              class="rounded-2xl bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-900/25 transition hover:-translate-y-0.5 hover:bg-slate-800"
+            >
+              Copy Link
+            </button>
+            <button
+              id="download-all-btn"
+              class="rounded-2xl border border-slate-200 px-6 py-3 text-sm font-semibold text-slate-700 shadow hover:-translate-y-0.5 hover:bg-slate-50"
+            >
+              Download All
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="gallery"
+        class="grid gap-6 rounded-3xl bg-white/80 p-6 shadow-xl ring-1 ring-slate-200 backdrop-blur sm:grid-cols-2 lg:grid-cols-3"
+      ></section>
+      <div
+        id="empty"
+        class="rounded-3xl border border-dashed border-slate-200 bg-white/70 p-12 text-center text-slate-400 shadow-lg backdrop-blur"
+        hidden
+      >
+        No media files were found for this folder.
+      </div>
+
+      <footer class="pb-8 text-center text-sm text-slate-400">
+        Public gallery powered by the Jaal Yantra Textiles, Kind Health Tech and Cici Label media service.
+      </footer>
+    </main>
+
+    <script>
+      const params = new URLSearchParams(window.location.search)
+      const folderId = params.get('folder')
+      const token = params.get('token')
+      const baseUrl = window.location.origin
+      const shareUrlInput = document.getElementById('share-url')
+      const copyBtn = document.getElementById('copy-btn')
+      const statusEl = document.getElementById('status')
+      const galleryEl = document.getElementById('gallery')
+      const emptyEl = document.getElementById('empty')
+      const folderNameEl = document.getElementById('folder-name')
+      const downloadAllBtn = document.getElementById('download-all-btn')
+      let currentFiles = []
+
+      const fullShareUrl = `${window.location.origin}${window.location.pathname}?folder=${folderId || ''}&token=${token || ''}`
+      shareUrlInput.value = fullShareUrl
+
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(shareUrlInput.value)
+          copyBtn.textContent = 'Copied!'
+          setTimeout(() => (copyBtn.textContent = 'Copy Link'), 1800)
+        } catch (err) {
+          console.error('Failed to copy link', err)
+          copyBtn.textContent = 'Copy failed'
+          setTimeout(() => (copyBtn.textContent = 'Copy Link'), 1800)
+        }
+      })
+
+      function resolveApiBaseUrl() {
+        const globalValue =
+          window.GALLERY_API_BASE_URL ||
+          window.MEDIA_API_BASE_URL ||
+          (window.__ENV && window.__ENV.MEDIA_API_BASE_URL)
+        if (globalValue) {
+          return globalValue
+        }
+
+        const meta = document.querySelector('meta[name="media-api-base"]')
+        if (meta?.content) {
+          return meta.content
+        }
+
+        const htmlData = document.documentElement?.dataset?.mediaApiBase
+        if (htmlData) {
+          return htmlData
+        }
+
+        return window.location.origin
+      }
+
+      const apiBaseUrl = resolveApiBaseUrl().replace(/\/$/, '')
+
+      function isVideoFile(file) {
+        const mime = (file?.mime_type || file?.file_type || '').toLowerCase()
+        if (mime.includes('video')) {
+          return true
+        }
+        const name = (file?.file_name || file?.original_name || '').toLowerCase()
+        return name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.m4v') || name.endsWith('.webm')
+      }
+
+      function buildCloudflareThumb(url, width = 480, height = 320) {
+        if (!url) return ''
+        try {
+          const parsed = new URL(url)
+          const supportsCf =
+            parsed.hostname.includes('cloudflare') ||
+            parsed.hostname.includes('r2.dev') ||
+            parsed.hostname.includes('jaalyantra.com') ||
+            parsed.pathname.includes('/cdn-cgi/imagedelivery/')
+
+          if (!supportsCf) {
+            return url
+          }
+
+          if (parsed.pathname.includes('/cdn-cgi/image/')) {
+            return url
+          }
+
+          const transformPath = `/cdn-cgi/image/width=${width},height=${height},fit=cover,quality=70,format=auto`
+          parsed.pathname = `${transformPath}${parsed.pathname}`
+          return parsed.toString()
+        } catch {
+          return url
+        }
+      }
+
+      async function triggerDownload(file) {
+        const url = file?.file_path
+        const filename = file?.original_name || file?.file_name || 'media'
+        if (!url) {
+          return
+        }
+
+        try {
+          const response = await fetch(url, { mode: 'cors' })
+          if (!response.ok) {
+            throw new Error('Failed to fetch file')
+          }
+          const blob = await response.blob()
+          const blobUrl = URL.createObjectURL(blob)
+          const anchor = document.createElement('a')
+          anchor.href = blobUrl
+          anchor.download = filename
+          document.body.appendChild(anchor)
+          anchor.click()
+          anchor.remove()
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+        } catch (err) {
+          console.error('Blob download failed, falling back to direct download', err)
+          const fallback = document.createElement('a')
+          fallback.href = url
+          fallback.download = filename
+          document.body.appendChild(fallback)
+          fallback.click()
+          fallback.remove()
+        }
+      }
+
+      downloadAllBtn.addEventListener('click', async () => {
+        if (!currentFiles.length) {
+          downloadAllBtn.textContent = 'No files'
+          setTimeout(() => (downloadAllBtn.textContent = 'Download All'), 1500)
+          return
+        }
+
+        downloadAllBtn.textContent = 'Downloading…'
+        for (const file of currentFiles) {
+          await triggerDownload(file)
+          await new Promise((resolve) => setTimeout(resolve, 200))
+        }
+        downloadAllBtn.textContent = 'Done!'
+        setTimeout(() => (downloadAllBtn.textContent = 'Download All'), 1500)
+      })
+
+      async function fetchFolder() {
+        if (!folderId || !token) {
+          statusEl.textContent = 'Add ?folder=FOLDER_ID&token=SHARE_TOKEN to the URL to view media.'
+          emptyEl.hidden = false
+          return
+        }
+
+        statusEl.textContent = 'Loading gallery…'
+        try {
+          const response = await fetch(`${apiBaseUrl}/web/media/folder/${folderId}?token=${token}`)
+          if (!response.ok) {
+            throw new Error('Request failed with status ' + response.status)
+          }
+          const data = await response.json()
+          currentFiles = data.media_files || []
+          folderNameEl.textContent = data.folder?.name || 'Media Gallery'
+          statusEl.textContent = data.folder?.description || 'Public media folder'
+
+          if (!data.media_files?.length) {
+            emptyEl.hidden = false
+            galleryEl.innerHTML = ''
+            return
+          }
+
+          emptyEl.hidden = true
+          galleryEl.innerHTML = ''
+
+          data.media_files.forEach((file) => {
+            const isVideo = isVideoFile(file)
+            const card = document.createElement('article')
+            card.className =
+              'group flex flex-col gap-3 rounded-2xl border border-slate-100 bg-white/90 p-4 shadow-lg shadow-slate-200/80 transition hover:-translate-y-1 hover:shadow-2xl'
+
+            const imgWrap = document.createElement('div')
+            imgWrap.className = 'relative overflow-hidden rounded-2xl'
+
+            if (isVideo) {
+              const video = document.createElement('video')
+              video.src = file.file_path
+              video.controls = true
+              video.muted = true
+              video.playsInline = true
+              video.preload = 'metadata'
+              video.poster = buildCloudflareThumb(file.preview_image_url || file.file_path, 512, 360)
+              video.className = 'h-56 w-full rounded-2xl object-cover'
+              imgWrap.appendChild(video)
+            } else {
+              const img = document.createElement('img')
+              img.src = buildCloudflareThumb(file.file_path, 512, 360)
+              img.loading = 'lazy'
+              img.alt = file.alt_text || file.original_name || 'Media image'
+              img.className = 'h-56 w-full object-cover transition duration-300 group-hover:scale-105'
+              imgWrap.appendChild(img)
+            }
+
+            const chip = document.createElement('span')
+            chip.className =
+              'absolute left-3 top-3 rounded-full bg-white/80 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600 shadow'
+            chip.textContent = isVideo ? 'video' : file.file_type || 'image'
+            imgWrap.appendChild(chip)
+
+            const title = document.createElement('h3')
+            title.className = 'font-semibold text-slate-900'
+            title.textContent = file.original_name || file.file_name
+
+            const meta = document.createElement('p')
+            meta.className = 'text-sm text-slate-500'
+            meta.textContent = file.caption || file.mime_type || 'Image'
+
+            const actions = document.createElement('div')
+            actions.className = 'flex flex-wrap gap-2 pt-2 text-sm'
+
+            const viewLink = document.createElement('a')
+            viewLink.href = file.file_path
+            viewLink.target = '_blank'
+            viewLink.rel = 'noreferrer noopener'
+            viewLink.className = 'rounded-xl border border-slate-200 px-3 py-1 font-medium text-slate-600 transition hover:bg-slate-50'
+            viewLink.textContent = 'View'
+
+            const downloadLink = document.createElement('button')
+            downloadLink.className = 'rounded-xl bg-slate-900 px-3 py-1 font-medium text-white transition hover:bg-slate-800'
+            downloadLink.textContent = 'Download'
+            downloadLink.addEventListener('click', () => triggerDownload(file))
+
+            actions.appendChild(viewLink)
+            actions.appendChild(downloadLink)
+
+            card.appendChild(imgWrap)
+            card.appendChild(title)
+            card.appendChild(meta)
+            card.appendChild(actions)
+            galleryEl.appendChild(card)
+          })
+        } catch (error) {
+          console.error('Failed to load folder', error)
+          statusEl.textContent = error.message || 'Failed to load gallery'
+          emptyEl.hidden = false
+          galleryEl.innerHTML = ''
+        }
+      }
+
+      fetchFolder()
+    </script>
+  </body>
+</html>

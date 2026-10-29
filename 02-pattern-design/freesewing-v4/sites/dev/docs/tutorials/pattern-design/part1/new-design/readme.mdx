@@ -1,0 +1,98 @@
+---
+title: Setting up the FreeSewing development environment
+sidebar_position: 20
+---
+
+FreeSewing provides the studio, a development environment that visualizes your design for
+you. This tutorial is for the stand-alone studio, not the
+repository studio (which you may have set up if you followed a
+getting started tutorial).
+
+To set it up, I will open a terminal and enter the following command:
+
+```sh
+npx @freesewing/studio
+```
+
+After you enter the folder name to create, it will take a while to set
+everything up. When it's done, you will have a new folder with the development
+environment inside.
+
+:::note
+
+This will take a few minutes because the development environment has a number
+of dependencies that need to be downloaded.
+
+:::
+
+You will have a new folder that contains the stand-alone studio development environment.
+(Within this new folder, the `design` subfolder holds your design's configuration files and source code.
+You can ignore all other subfolders and files; they are part of the development environment.)
+
+### Creating a new design
+
+If you would like to create a new design, enter the folder that was just
+created and run the following command:
+
+```bash
+npm run add
+```
+
+After you've answered [some questions](#questions), it create a new
+sub-folder for your design in the `designs` folder.
+
+:::note
+
+### Questions
+
+#### What design name to use
+
+Please stick to a single word name using \[a-z] to avoid problems.
+
+#### What template to use
+
+Use `From scratch` unless you want to start from our of our blocks:
+
+- Use `Extend Brian` to start from [Brian](https://freesewing.eu/designs/brian)
+- Use `Extend Bent` to start from [Bent](https://freesewing.eu/designs/bent)
+- Use `Extend Bella` to start from [Bella](https://freesewing.eu/designs/bella)
+- Use `Extend Breanna` to start from [Breanna](https://freesewing.eu/designs/breanna)
+- Use `Extend Titan` to start from [Titan](https://freesewing.eu/designs/titan)
+
+:::
+
+### Starting the development environment
+
+To start the development environment, enter the folder containing the
+stand-alone studio and run `npm run start`.
+
+```bash
+npm run start
+```
+
+Then open your browser and go to http://localhost:3000
+
+:::tip
+The development environment will watch for any changes you make to
+the pattern's source code or configuration.
+When you do, the pattern will update automatically in your browser.
+:::
+
+This pattern design tutorial contains only an abbreviated overview
+of the setup process.
+For more detailed instructions, please refer to one of our setup tutorials:
+
+- [Getting started on Linux](/tutorials/getting-started-linux)
+- [Getting started on Mac](/tutorials/getting-started-mac)
+- [Getting started on Windows](/tutorials/getting-started-windows)
+
+:::
+
+:::tip
+
+##### Need help?
+
+If you run into any issues, head over to [FreeSewing.eu/support](https://freesewing.eu/support)
+which lists the various ways in which you can get help.
+
+:::

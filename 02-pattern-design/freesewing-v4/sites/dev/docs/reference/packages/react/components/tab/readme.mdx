@@ -1,0 +1,29 @@
+---
+title: Tab
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.tab.mjs'
+import { TabExample, TabsExample } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Tab** component family provides the following components:
+
+- [Tab](#tab)
+- [Tabs](#tabs)
+
+### Tab
+
+<ComponentDocs docs={jsdoc.jsdocTab} example={TabExample} />
+
+### Tabs
+
+<ComponentDocs docs={jsdoc.jsdocTabs} example={TabsExample} />
+
+</DocusaurusDoc>

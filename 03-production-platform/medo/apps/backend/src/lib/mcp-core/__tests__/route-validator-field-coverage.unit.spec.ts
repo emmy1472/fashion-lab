@@ -1,0 +1,751 @@
+/**
+ * Every MCP write tool is checked against the ACTUAL zod validator its route
+ * registers — resolved from `src/api/middlewares.ts`, not transcribed here.
+ *
+ * ## Why this file exists, on top of the two tests either side of it
+ *
+ * - `required-args.unit.spec.ts` asserts `bodyParams ⊆ inputSchema` (#1348).
+ * - `product-tool-field-coverage.unit.spec.ts` asserts the reverse direction —
+ *   route-accepts ⊆ tool-advertises — for four hand-bound product/variant tools
+ *   (#1393, the `weight` silent-strip).
+ *
+ * Both are per-tool. Neither could answer the question #1394 item 3 actually
+ * asked: *which of the 141 write tools advertise fewer fields than their route
+ * accepts?* Answering it by hand does not scale and rots on the next registry
+ * row. So this test resolves the binding mechanically:
+ *
+ *   `defineMiddlewares` is imported for real, with `validateAndTransformBody`
+ *   mocked to tag each middleware with the schema it closed over. Matching a
+ *   tool's `path` + `method` against `matcher` + `methods` yields the route's
+ *   own contract, whatever it is today.
+ *
+ * ## The three failures it catches, in descending severity
+ *
+ * 1. **Stray** — a `bodyParams` entry the validator does not accept. Medusa's
+ *    `zodValidator` forces `.strict()`, so this is a 400 on every call.
+ * 2. **Unadvertised required field** — the validator requires it, the tool
+ *    never offers it. Also a guaranteed 400, and invisible to the #1371
+ *    required-args gate, because that gate reads the tool's OWN `required`
+ *    list — which is precisely the thing that is wrong.
+ * 3. **Unadvertised optional field** — the `weight` class. `pick()` is an
+ *    allowlist walk, so the field is dropped in silence; the dry-run plan is
+ *    built from the already-picked body, so a rehearsal renders identically
+ *    whether or not it was sent. `ok: true`, nothing written.
+ *
+ * ## The two opt-out lists are the point
+ *
+ * `DELIBERATELY_OMITTED` and `NO_ROUTE_VALIDATOR` are not silencers. They are
+ * the mechanism that turns "nobody ever looked" into "someone looked and wrote
+ * down why". Adding a row should feel like a small commitment, because it is.
+ */
+
+jest.mock("@medusajs/framework/http", () => {
+  const actual = jest.requireActual("@medusajs/framework/http")
+  return {
+    ...actual,
+    // Tag rather than validate: the test needs the schema each route closed
+    // over, and running real validation here would need a real request.
+    validateAndTransformBody: (schema: any) => {
+      const fn: any = (_req: any, _res: any, next: any) => next()
+      fn.__schema = schema
+      return fn
+    },
+  }
+})
+
+import { PARTNER_MCP_TOOLS } from "../../../api/partners/mcp/lib/registry"
+import { ADMIN_MCP_TOOLS } from "../../../api/admin/mcp/lib/registry"
+import type { McpToolDef } from "../types"
+import { buildToolInputSchema } from "../schema"
+
+/**
+ * Tools whose route registers no body validator in `middlewares.ts`, with the
+ * reason. Most validate inside the handler, or wrap a core route whose
+ * validator core registers itself — for those, the contract check belongs in
+ * `product-tool-field-coverage.unit.spec.ts`, which binds core's validator
+ * directly.
+ *
+ * A tool landing here is NOT proven safe. It is proven unchecked-by-this-file.
+ */
+const NO_ROUTE_VALIDATOR = new Set<string>([
+  /**
+   * `inventory-orders/[id]/shipment/route.ts` parses its body with an inline
+   * zod `bodySchema` (carrier, preferred_courier_id, weight_grams,
+   * dimensions_cm{length,breadth,height}, pickup_date YYYY-MM-DD,
+   * pickup_stock_location_id). `inventory-order-shipment-tools.unit.spec.ts`
+   * pins the tool's forward list to those names.
+   */
+  "admin:create_inventory_order_shipment",
+  /**
+   * The inventory-shipment cancel validates in the handler with its own zod
+   * (`reason`, `force`), like the booking route above it. No matcher binds it.
+   */
+  "admin:cancel_inventory_order_shipment",
+  /**
+   * #2425 — `inventory-orders/[id]/external-awb/route.ts` parses an inline zod
+   * `bodySchema` in the handler (awb, carrier, tracking_url, label_url,
+   * weight_grams, dimensions_cm, pickup_stock_location_id, notes), like the
+   * booking route above. No matcher binds it.
+   */
+  "admin:attach_inventory_order_awb",
+  /**
+   * The balance route reads `confirm` straight off the body and refuses
+   * without it; the sample-approval route validates its own zod in the
+   * handler (production_run_id, decision, notes, confirm). Neither binds a
+   * matcher.
+   */
+  "admin:request_order_balance",
+  "admin:approve_order_sample",
+  /**
+   * #1970 PR10 — the three design-order mutations validate INSIDE the handler,
+   * so `middlewares.ts` binds nothing for this file to match against. Read, not
+   * inferred:
+   *
+   *  · `orders/[lineItemId]/customer/route.ts` rejects a `customer_id` that is
+   *    neither a string nor an explicit null with a 400, so a forgotten field
+   *    and a deliberate detach cannot look the same.
+   *  · `orders/[lineItemId]/reprice/route.ts` refuses any `unit_price` that is
+   *    not `> 0`, because `Number(null)` and `Number("")` are both 0 and a
+   *    missing field must not arrive looking like a deliberate zero.
+   *  · `orders/[lineItemId]/convert/route.ts` parses its body with an inline
+   *    zod schema (`ConvertDesignOrderBody`), so `payment_mode` is constrained
+   *    to "prepaid" | "cod" at the door.
+   *
+   * `create_design_order` is deliberately NOT here — `/admin/designs/draft-order`
+   * does register a validator, and this file checks it.
+   */
+  "admin:attach_design_order_customer",
+  "admin:reprice_design_order",
+  "admin:convert_design_order",
+  /**
+   * Both wrap CORE shipping-option routes, whose validators core registers in
+   * its own middleware config — so nothing in this repo's `middlewares.ts`
+   * binds them and there is nothing here to match against. Not unchecked: the
+   * contract check for these two lives in
+   * `product-tool-field-coverage.unit.spec.ts`, which imports
+   * `AdminCreateShippingOption` / `AdminUpdateShippingOption` directly and
+   * asserts field coverage in both directions.
+   */
+  "admin:create_shipping_option",
+  "admin:update_shipping_option",
+  /**
+   * Wraps the CORE route `POST /admin/stock-locations/:id`, whose validator
+   * core registers in its own middleware config — nothing in this repo's
+   * `middlewares.ts` binds it, so there is nothing here to match against.
+   *
+   * Not unchecked, READ from the installed package
+   * (`@medusajs/medusa/dist/api/admin/stock-locations/validators.js`):
+   * `AdminUpdateStockLocation` accepts `name`, `address`, `address_id` and
+   * `metadata`, and the tool advertises a subset of exactly those three. It
+   * deliberately does NOT advertise `address_id` — repointing a location at
+   * some other location's address row is not a rename, and offering it beside
+   * `name` invites exactly that mistake.
+   *
+   * ⚠️ `name` goes through `z.preprocess((val) => val.trim(), ...)`, which
+   * throws on a non-string rather than rejecting it, so the tool's schema types
+   * it as a plain string with no null.
+   */
+  "admin:update_stock_location",
+  /**
+   * #2315 — `POST /admin/partners/:id/warehouses` registers no matcher and
+   * parses in the handler with `CreatePartnerWarehouseReq.parse(req.body)`
+   * (name, address, metadata, currency_code) — exactly what the tool forwards.
+   */
+  "admin:create_partner_warehouse",
+  /**
+   * `cancel-shipment` registers no matcher in `middlewares.ts` and validates in
+   * the handler: it reads `(req.validatedBody || req.body || {})` for `reason`,
+   * `force` and `notify_customer`, and `cancelShipmentForFulfillment` enforces
+   * the rules that matter — it REFUSES an already-shipped fulfillment unless
+   * `force` is set, and cancels at the carrier BEFORE clearing any refs, so a
+   * carrier refusal throws and leaves the fulfillment exactly as it was.
+   *
+   * Verified by reading the handler and the workflow, not inferred from the
+   * absence of a matcher.
+   *
+   * ⚠️ This entry exists because the tool was merged without waiting for this
+   * suite, and it went red on `main` rather than on its own PR. The guard did
+   * its job; the merge did not wait for it.
+   */
+  "admin:cancel_order_shipment",
+  /**
+   * The pickup route registers no matcher and validates in the handler: it
+   * reads `req.body` for `pickup_date`, `pickup_time` and
+   * `expected_package_count`, and REFUSES with a 400 unless the date and time
+   * are both present — deliberately, because a pickup slot is a promise to a
+   * driver for a particular date and warehouse, so there is no default to fall
+   * back on.
+   *
+   * Verified by reading the handler, not inferred from the absence of a matcher.
+   */
+  "admin:schedule_order_pickup",
+  /**
+   * The revoke route takes NO body — it works entirely off the `:id` in the
+   * path. Nothing to bind, and nothing advertised: the tool declares no
+   * `bodyParams`, because a field the route never reads would be accepted,
+   * reported `ok: true` and dropped (#1348). Verified by reading the handler,
+   * not inferred from the absence of a matcher.
+   */
+  /**
+   * Wraps the CORE link route, whose body validator is core's generic
+   * `createLinkBody()` ({ add?, remove? }) registered in core's own
+   * middlewares — nothing in this repo binds it. The contract is asserted
+   * directly in `product-tool-field-coverage.unit.spec.ts` (#2023).
+   */
+  "admin:set_location_fulfillment_providers",
+  "admin:revoke_quote",
+  /**
+   * The partner twin (#1517), for the same reason and verified the same way:
+   * the handler reads `req.params.id` and nothing else. Its ownership check is
+   * on the auth context rather than the body, so there is no body contract to
+   * bind here — `partner-mcp-quotes.spec.ts` proves the tool reaches the route,
+   * and `partner-quote-revoke.spec.ts` proves another partner's id 404s.
+   */
+  "partner:revoke_quote",
+  // Core routes: core registers its own validator, so it never appears in this
+  // repo's middlewares config. The product/variant/option ones are contract-
+  // checked against core's imported validators in the sibling spec
+  // (product-tool-field-coverage); the inventory four in
+  // inventory-tool-field-coverage, its inventory sibling.
+  "admin:create_product",
+  "admin:update_product",
+  /**
+   * Variant and option writes, on core's own routes — same reason as the
+   * product rows above. `create_product_variant` posts to core's
+   * `/admin/products/:id/variants`; `update_product_option` posts to the
+   * batch route, the ONLY one core exposes for editing an option's values
+   * (#1907). Both are bound against core's imported validators in the
+   * sibling spec, so landing here is "not checked by THIS file" rather than
+   * "not checked".
+   */
+  "admin:create_product_variant",
+  "admin:update_product_option",
+  /**
+   * The inventory lifecycle (#1905), all four on core routes: core registers
+   * AdminCreateInventoryItem, the location-level validators and
+   * AdminCreateReservation in its own middleware config. Same deal as the
+   * rows above — the contract check lives in the inventory sibling spec.
+   */
+  "admin:create_inventory_item",
+  "admin:set_inventory_level",
+  "admin:update_inventory_level",
+  "admin:create_reservation",
+  /**
+   * Category and collection tools wrap core's own `/admin/product-categories`
+   * and `/admin/collections` routes, so core registers the validators and they
+   * never appear in this repo's middlewares config — the same reason as the
+   * product rows above.
+   *
+   * ⚠️ These six were failing this test on `main` before #1439's quote rows
+   * were added: they were registered without being declared here, which is
+   * exactly the "small commitment" this list exists to force. Declared rather
+   * than deleted, because the tools work — what was missing was the note
+   * saying nobody had bound them.
+   */
+  /**
+   * ⚠️ AGAIN. `create_region` / `update_region` arrived with #1994 and
+   * `rename_product_option` before them, registered without being declared
+   * here — the same omission the note above predicted, one release later.
+   * They wrap CORE Medusa routes (there is no `src/api/admin/regions/route.ts`
+   * or `product-options/[id]/route.ts` in this repo), so core registers their
+   * validators and this file has no repo-side contract to check against.
+   * Declared rather than deleted: the tools work, what was missing was the
+   * note saying nobody had bound them.
+   *
+   * This stayed invisible on main because the PR runner only runs specs for
+   * CHANGED files, and nothing touched this one until now.
+   */
+  "admin:create_region",
+  "admin:update_region",
+  "admin:rename_product_option",
+  "admin:create_product_category",
+  "admin:update_product_category",
+  "admin:set_category_products",
+  "admin:create_product_collection",
+  "admin:update_product_collection",
+  "admin:set_collection_products",
+  "admin:set_sales_channel_products",
+  "admin:set_stock_location_sales_channels",
+  "admin:update_product_variant",
+  "admin:create_product_for_partner",
+  "admin:update_customer",
+  "admin:update_order",
+  "admin:create_order_fulfillment",
+  "admin:create_order_shipment",
+  "admin:mark_order_fulfillment_delivered",
+  "admin:cancel_order_fulfillment",
+  "admin:create_order_edit",
+  "admin:add_order_edit_items",
+  "admin:update_order_edit_item",
+  "partner:create_order_fulfillment",
+  "partner:create_fulfillment_shipment",
+  "partner:transfer_order",
+  "partner:capture_payment",
+  "partner:refund_payment",
+  "partner:request_order_edit",
+  "partner:create_return",
+  "partner:set_inventory_level",
+  "partner:set_inventory_levels_batch",
+  "partner:create_customer",
+  "partner:update_customer",
+  "partner:add_customer_address",
+  "partner:create_customer_group",
+  "partner:update_customer_group",
+  "partner:add_customers_to_group",
+  "partner:create_product_category",
+  "partner:update_product_category",
+  "partner:set_category_products",
+  "partner:create_product_collection",
+  "partner:update_product_collection",
+  "partner:set_collection_products",
+  "partner:create_product_tag",
+  "partner:create_product_type",
+  "partner:update_product_type",
+  "partner:create_price_preference",
+  "partner:update_price_preference",
+  "partner:create_inventory_item",
+  "partner:update_inventory_item",
+  "partner:create_reservation",
+  "partner:update_reservation",
+  "partner:add_store_product",
+  "partner:update_store_product",
+  "partner:add_product_option",
+  "partner:add_product_variant",
+  "partner:update_product_variant",
+  "partner:add_store_location",
+
+  // This repo's routes that validate inside the handler rather than through
+  // `validateAndTransformBody`. Each is a candidate for a real validator; none
+  // has one today, so there is no contract for this file to check against.
+  "admin:resolve_admin_query",
+  "admin:link_partner_people",
+  "admin:unlink_partner_people",
+  "admin:create_partner_subscription",
+  /**
+   * ⚠️ `update_partner` is NOT like its neighbours here, and saying so matters.
+   *
+   * The others validate inside their handler. `PUT /admin/partners/:id`
+   * registers `middlewares: []` and, until #2120, validated NOTHING — it
+   * spread its body straight into `updatePartners`. It sat in this list under
+   * a comment that described a check it did not perform.
+   *
+   * It now guards ONE thing, in the handler: `tax_id` / `tax_id_type`, via
+   * `validateTaxIdentity`, because that value lands on carrier manifests and
+   * invoices. Every other field is still unvalidated. A real body validator is
+   * the actual fix and is not done here — this route accepts a wide,
+   * undocumented set of fields (storefront/vercel/hosting columns among them)
+   * and a strict schema would reject callers nobody has enumerated yet.
+   */
+  "admin:update_partner",
+  "admin:set_partner_person_types",
+  "admin:add_partner_admin",
+  "admin:update_partner_admin",
+  "admin:connect_partner_whatsapp",
+  "admin:reject_partner_product",
+  "admin:produce_order_designs",
+  "admin:create_order_shipping_label",
+  "admin:attach_order_awb",
+  // The run-activity note validates inside the handler with NoteBodySchema
+  // (safeParse in the route), so it carries no middleware binding for this file
+  // to check against — same reason as resolve_admin_query and the other
+  // handler-validated routes above.
+  "admin:add_production_run_activity_note",
+  "admin:update_production_run",
+  "admin:update_production_run_task",
+  "admin:unlink_design_partner",
+  "admin:produce_designs",
+  "admin:add_design_construction_detail",
+  "partner:add_design_media",
+  "partner:describe_image",
+  "partner:update_storefront_website",
+  "partner:update_storefront_analytics",
+  "partner:create_storefront_page",
+  "partner:update_storefront_domain",
+  "partner:start_inventory_order",
+  "partner:submit_inventory_order_payment",
+  "partner:ready_inventory_order_for_delivery",
+  "partner:create_inventory_order_shipment",
+  "partner:complete_inventory_order",
+  // Stats routes validate inside the handler (createDashboardSchema.parse /
+  // createPanelSchema.parse) rather than through validateAndTransformBody, so
+  // they carry no middleware binding for this file to check against.
+  "admin:create_stats_dashboard",
+  "admin:create_stats_panel",
+])
+
+/**
+ * Accepted-but-not-advertised fields, keyed `<surface>:<tool>`, with the reason.
+ *
+ * Two kinds of entry live here and they are labelled differently on purpose:
+ *   - a real product decision ("images go through the media tools")
+ *   - a known gap someone has not closed yet ("GAP (#1394):" …) — a promise to
+ *     come back, not a claim that the omission is correct.
+ */
+const DELIBERATELY_OMITTED: Record<string, Record<string, string>> = {
+  "admin:set_inventory_order_ship_from": {
+    order_lines: "a NARROW tool on the broad order edit (#2315): it sets one thing, and offering the whole edit invites a status or line change riding along",
+    quantity: "as order_lines",
+    total_price: "as order_lines",
+    tax_amount: "as order_lines",
+    currency_code: "as order_lines",
+    status: "as order_lines",
+    expected_delivery_date: "as order_lines",
+    order_date: "as order_lines",
+    metadata: "as order_lines",
+    shipping_address: "as order_lines",
+    stock_location_id: "as order_lines",
+    to_stock_location_id: "as order_lines",
+    is_sample: "as order_lines",
+    payment_terms: "as order_lines",
+    advance_percent: "as order_lines",
+    received_lines: "as order_lines; counts belong to Delivered (#2289 S2) — use receive_inventory_order",
+  },
+  "admin:set_inventory_order_payment_terms": {
+    order_lines: "a NARROW tool on the broad order edit (#2315): it sets one thing, and offering the whole edit invites a status or line change riding along",
+    quantity: "as order_lines",
+    total_price: "as order_lines",
+    tax_amount: "as order_lines",
+    currency_code: "as order_lines",
+    status: "as order_lines",
+    expected_delivery_date: "as order_lines",
+    order_date: "as order_lines",
+    metadata: "as order_lines",
+    shipping_address: "as order_lines",
+    stock_location_id: "as order_lines",
+    to_stock_location_id: "as order_lines",
+    is_sample: "as order_lines",
+    from_stock_location_id: "as order_lines",
+    received_lines: "as order_lines; counts belong to Delivered (#2289 S2) — use receive_inventory_order",
+  },
+  "admin:create_social_post": {
+    post_url: "set by the publisher callback, not by the author",
+    posted_at: "as post_url",
+    insights: "written by the analytics sync only",
+    media_attachments: "media goes through the media tools",
+    notes: "GAP (#1394): plausible assistant field, nobody has asked for it",
+    error_message: "written by the publisher on failure",
+    related_item_type: "GAP (#1394): linking is done by a separate tool",
+    related_item_id: "GAP (#1394): as related_item_type",
+  },
+  "admin:create_email_template": {
+    // The create route validates with the BASE EmailTemplateSchema, which
+    // leaves `id` optional-but-accepted. A create must let the module assign
+    // the id — an assistant-supplied one would either collide or, worse,
+    // shadow an existing row's identity — so it is not advertised.
+    id: "assigned by the module on create, never assistant-supplied",
+  },
+  "admin:update_email_template": {
+    // The update route builds its workflow input as
+    // `{ id: req.params.id, ...req.validatedBody }` — a body `id` would
+    // OVERWRITE the path param in that spread. The tool takes the id as a
+    // path param only, so the schema never offers a body id to clobber it.
+    id: "the :id path param is the only id; a body id would overwrite it in the route's spread",
+  },
+  /**
+   * The dispatcher owns `dry_run` as a FRAMEWORK flag: it intercepts the arg
+   * and returns the planned request WITHOUT ever calling the route. Both
+   * routes accept `dry_run` for their HTTP callers, and BOTH offer `preview`
+   * as the passthrough twin for exactly this reason — see the note on
+   * `preview` in AdminRunApprovalsReq and OpsMaintenanceRunSchema. The tools
+   * advertise `preview`; advertising `dry_run` too would be a lie, since the
+   * dispatcher would eat it before the route ever saw it.
+   */
+  "admin:review_production_run_output": {
+    dry_run:
+      "the MCP dispatcher intercepts dry_run and never calls the route; the route's `preview` is the passthrough twin the tool advertises",
+  },
+  "admin:run_maintenance_job": {
+    dry_run:
+      "as review_production_run_output — the dispatcher's own flag never arrives; `preview` survives it and is what the tool advertises",
+  },
+  "admin:create_partner_task": {
+    template_names: "see dispatch_template_names — approval INTENT, not a task field",
+    eventable: "notification plumbing, not an assistant concern",
+    notifiable: "as eventable",
+    message: "as eventable",
+    child_tasks: "nested creation is a second, untested write path",
+    dependency_type: "GAP (#1394): only meaningful alongside child_tasks",
+  },
+  "admin:update_partner_task": {
+    eventable: "notification plumbing, not an assistant concern",
+    notifiable: "as eventable",
+    message: "as eventable",
+  },
+  "admin:update_design_task": {
+    eventable: "notification plumbing, not an assistant concern",
+    notifiable: "as eventable",
+  },
+  "admin:create_partner": {
+    auth_identity_id: "auth wiring, never assistant-written",
+  },
+  "admin:create_design": {
+    design_files: "files go through the media tools",
+    media_files: "as design_files",
+    moodboard: "as design_files",
+    custom_sizes: "GAP (#1394): structured size payload, no schema written yet",
+    color_palette: "GAP (#1394): as custom_sizes",
+    feedback_history: "append-only log written by the review flow",
+    origin_source: "provenance stamped by the creating surface",
+    customer_id_for_link: "linking is a separate tool",
+  },
+  "admin:update_design": {
+    design_files: "files go through the media tools",
+    media_files: "as design_files",
+    moodboard: "as design_files",
+    custom_sizes: "GAP (#1394): structured size payload, no schema written yet",
+    color_palette: "GAP (#1394): as custom_sizes",
+    feedback_history: "append-only log written by the review flow",
+    origin_source: "provenance stamped by the creating surface",
+    customer_id_for_link: "linking is a separate tool",
+    material_cost:
+      "computed by the recalculate-cost workflow (estimateDesignCostWorkflow) — not assistant-authored",
+    production_cost:
+      "as material_cost — the production half of the cost breakdown, recomputed from the BOM/order history",
+  },
+  "admin:create_design_production_run": {
+    template_ids: "GAP (#1394): template selection by id, name-based is advertised",
+    template_names: "see dispatch_template_names — approval INTENT",
+  },
+  "admin:extract_inventory_from_image": {
+    threadId: "mastra conversation plumbing, injected by the surface",
+    resourceId: "as threadId",
+  },
+  "admin:create_raw_material_group": {
+    media: "media goes through the media tools",
+  },
+  "admin:create_crm_contact": {
+    next_follow_up_at: "GAP (#1394): nothing acts on crm.* follow-ups yet",
+  },
+  "partner:update_partner_profile": {
+    logo: "media goes through the media tools",
+    status: "platform-controlled; a partner cannot verify itself",
+    is_verified: "as status",
+    auto_accept_production_runs:
+      "GAP (#1394): real capability gap — the policy gate exists (#1353) but no tool sets it",
+  },
+  "partner:create_store": {
+    partner_id: "derived from the authenticated partner, never supplied",
+  },
+  "partner:log_design_consumption": {
+    quantityBasis: "GAP (#1394): camelCase outlier in a snake_case body; fix the route, not the tool",
+  },
+  "partner:log_production_run_consumption": {
+    quantityBasis: "GAP (#1394): as log_design_consumption",
+  },
+  "partner:update_storefront_page": {
+    published_at: "publishing is its own action, not a field write",
+    genMetaDataLLM: "server-side generation flag, not an assistant argument",
+    public_metadata: "GAP (#1394): open blob, no shape to advertise",
+  },
+  "partner:update_store": {
+    default_region_id: "GAP (#1394): real capability gap — regions have their own tools but the default is unsettable",
+    default_location_id: "GAP (#1394): as default_region_id, and it gates fulfilment",
+  },
+  "partner:add_store_region": {
+    automatic_taxes: "GAP (#1394): tax behaviour, deliberately not assistant-set for now",
+    is_tax_inclusive: "GAP (#1394): as automatic_taxes",
+  },
+  "partner:update_store_region": {
+    automatic_taxes: "GAP (#1394): tax behaviour, deliberately not assistant-set for now",
+    is_tax_inclusive: "GAP (#1394): as automatic_taxes",
+  },
+  "partner:add_store_sales_channel": {
+    is_disabled: "a channel is created enabled; disabling is its own action",
+  },
+  "partner:add_store_tax_region": {
+    parent_id: "province-level regions are created from the parent's tool context",
+    metadata: "partner tools do not expose raw metadata writes",
+  },
+  "partner:add_store_shipping_option": {
+    type: "GAP (#1394): structured label/code object, no schema written yet",
+    type_id: "GAP (#1394): alternative to `type`, same gap",
+    rules: "GAP (#1394): rule arrays need their own schema",
+    data: "provider-specific blob, never assistant-written",
+    shipping_profile_id:
+      "#1983: accepted for old clients and IGNORED — the server always puts a partner's option on the partner shipping profile",
+  },
+  "partner:update_design": {
+    design_files: "files go through the media tools",
+    media_files: "as design_files",
+    moodboard: "as design_files",
+    thumbnail_url: "as design_files",
+    custom_sizes: "GAP (#1394): structured size payload, no schema written yet",
+    color_palette: "GAP (#1394): as custom_sizes",
+    colors: "GAP (#1394): as custom_sizes",
+    size_sets: "GAP (#1394): as custom_sizes",
+    metadata: "partner tools do not expose raw metadata writes",
+    estimated_cost: "costing is an admin concern",
+    inspiration_sources: "GAP (#1394): free-form array, no schema written yet",
+  },
+}
+
+/** Keys a zod object validator accepts, unwrapping effects/pipes. */
+const unwrap = (s: any): any => {
+  let cur = s
+  for (let i = 0; i < 10 && cur; i++) {
+    if (cur.shape || cur?._def?.shape) return cur
+    cur = cur._def?.schema ?? cur._def?.innerType ?? cur._def?.in ?? null
+  }
+  return s
+}
+
+const acceptedKeys = (schema: any): string[] => {
+  const s = unwrap(schema)
+  const shape = s?.shape ?? s?._def?.shape?.() ?? {}
+  return Object.keys(shape)
+}
+
+const requiredKeys = (schema: any): string[] => {
+  const s = unwrap(schema)
+  const shape = s?.shape ?? s?._def?.shape?.() ?? {}
+  return Object.keys(shape).filter((k) => {
+    try {
+      return shape[k]?.isOptional?.() === false
+    } catch {
+      return false
+    }
+  })
+}
+
+type Bound = {
+  key: string
+  tool: McpToolDef
+  accepted: string[]
+  required: string[]
+}
+
+const normalizePath = (p: string) => p.replace(/:[A-Za-z0-9_]+/g, ":P")
+
+const writeTools: Array<{ key: string; tool: McpToolDef }> = [
+  ...ADMIN_MCP_TOOLS.filter((t) => t.bodyParams?.length).map((t) => ({
+    key: `admin:${t.name}`,
+    tool: t,
+  })),
+  ...PARTNER_MCP_TOOLS.filter((t) => t.bodyParams?.length).map((t) => ({
+    key: `partner:${t.name}`,
+    tool: t,
+  })),
+]
+
+// Required at module scope, after the mock above is installed.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const middlewareConfig = require("../../../api/middlewares").default
+const routeTable: Array<{ matcher: string; methods: string[]; schema: any }> = (
+  middlewareConfig?.routes ?? []
+)
+  .map((r: any) => ({
+    matcher: normalizePath(String(r.matcher)),
+    methods: r.methods ?? [],
+    schema: (r.middlewares ?? []).find((m: any) => m?.__schema)?.__schema,
+  }))
+  .filter((r: any) => r.schema)
+
+const bound: Bound[] = []
+const unbound: string[] = []
+
+for (const { key, tool } of writeTools) {
+  const hit = routeTable.find(
+    (r) =>
+      r.matcher === normalizePath(String(tool.path)) &&
+      r.methods.includes(tool.method ?? "GET")
+  )
+  const accepted = hit ? acceptedKeys(hit.schema) : []
+  if (!hit || accepted.length === 0) {
+    unbound.push(key)
+    continue
+  }
+  bound.push({ key, tool, accepted, required: requiredKeys(hit.schema) })
+}
+
+describe("MCP write tools match the validators their routes actually register", () => {
+  it("resolved a meaningful share of the registry — the harness itself works", () => {
+    // Without this, a broken mock or a renamed `routes` key would empty the
+    // table and every assertion below would pass over nothing.
+    expect(routeTable.length).toBeGreaterThan(150)
+    expect(bound.length).toBeGreaterThan(50)
+  })
+
+  it("every write tool is either bound to a validator or written down as unbound", () => {
+    const undeclared = unbound.filter((k) => !NO_ROUTE_VALIDATOR.has(k))
+    expect(undeclared).toEqual([])
+  })
+
+  it("has no stale entries in the unbound list", () => {
+    // An entry for a tool that now HAS a validator is a note about a world that
+    // stopped existing — and it would hide that tool from every check below.
+    const boundKeys = new Set(bound.map((b) => b.key))
+    const stale = [...NO_ROUTE_VALIDATOR].filter((k) => boundKeys.has(k))
+    expect(stale).toEqual([])
+  })
+
+  it("advertises no body param its route would reject (a stray is a 400)", () => {
+    const strays = bound
+      .map(({ key, tool, accepted }) => ({
+        key,
+        strays: (tool.bodyParams ?? []).filter((f) => !accepted.includes(f)),
+      }))
+      .filter((r) => r.strays.length)
+
+    expect(strays).toEqual([])
+  })
+
+  it("advertises every field its route REQUIRES (an unadvertised required field is a 400)", () => {
+    const missing = bound
+      .map(({ key, tool, required }) => ({
+        key,
+        missing: required.filter((f) => !(tool.bodyParams ?? []).includes(f)),
+      }))
+      .filter((r) => r.missing.length)
+
+    expect(missing).toEqual([])
+  })
+
+  it("advertises every accepted field, or names it as a deliberate omission", () => {
+    const unaccounted = bound
+      .map(({ key, tool, accepted }) => {
+        const advertised = new Set(tool.bodyParams ?? [])
+        const omitted = DELIBERATELY_OMITTED[key] ?? {}
+        return {
+          key,
+          unaccounted: accepted.filter(
+            (f) => !advertised.has(f) && !(f in omitted)
+          ),
+        }
+      })
+      .filter((r) => r.unaccounted.length)
+
+    expect(unaccounted).toEqual([])
+  })
+
+  it("has no stale entries in the deliberate-omission lists", () => {
+    const stale = Object.entries(DELIBERATELY_OMITTED)
+      .map(([key, omitted]) => {
+        const b = bound.find((x) => x.key === key)
+        // A key for a tool that is no longer bound cannot be checked; the
+        // unbound-list assertions cover that case.
+        if (!b) return { key, stale: [] as string[] }
+        return { key, stale: Object.keys(omitted).filter((f) => !b.accepted.includes(f)) }
+      })
+      .filter((r) => r.stale.length)
+
+    expect(stale).toEqual([])
+  })
+
+  it("declares every advertised body param in the schema the model actually sees", () => {
+    // The EFFECTIVE schema, not the raw registry row: `buildToolInputSchema`
+    // injects the framework args, and a guarded tool's `reason` doubles as a
+    // real body param (cancel_production_run persists it as the cancellation
+    // reason). Reading the raw row here would report that as undeclared.
+    const undeclared = bound
+      .map(({ key, tool }) => {
+        const props = Object.keys(buildToolInputSchema(tool)?.properties ?? {})
+        return {
+          key,
+          undeclared: (tool.bodyParams ?? []).filter((f) => !props.includes(f)),
+        }
+      })
+      .filter((r) => r.undeclared.length)
+
+    expect(undeclared).toEqual([])
+  })
+})

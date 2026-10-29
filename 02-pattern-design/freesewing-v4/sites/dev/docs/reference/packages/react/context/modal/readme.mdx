@@ -1,0 +1,85 @@
+---
+title: Modal
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { Popout } from '@freesewing/react/components/Popout'
+import { MiniTip } from '@freesewing/react/components/Mini'
+import { Tab, Tabs } from '@freesewing/react/components/Tab'
+import { ModalExamples } from './_examples.js'
+
+<DocusaurusDoc>
+
+The **Modal** context is used to set modal content across the FreeSewing web UI.
+
+<Popout type="tip">
+As with all React context, the provider should wrap the content in which you
+want to use the context.
+
+When using one of the high-level wrappers like
+[DocusaurusDoc](/reference/packages/react/components/docusaurus/#docusaurusdoc)
+or
+[DocusaurusPage](/reference/packages/react/components/docusaurus/#docusauruspage)
+the context provider is already loaded.
+</Popout>
+
+## Examples
+
+<ModalExamples />
+
+<br />
+<MiniTip>The [ModalWrapper ](/reference/packages/react/components/modal/#modalwrapper) documentation has more examples.</MiniTip>
+
+## Components
+
+The **Modal** context provides the following components:
+
+- [ModalContext](#modalcontext)
+- [ModalContextProvider](#modalcontextprovider)
+
+### ModalContext
+
+This is the context itself to be passed to `React.useContext()`.
+
+```js
+import { ModalContext } from '@freesewing/react/context/Modal'
+
+const MyComponent = () => {
+  const {
+    clearModal,
+    modalContent,
+    setModal,
+  } = useContext(ModalContext)
+
+  // ...
+}
+```
+
+The returned object holds the following:
+
+### context.clearModal
+
+Call this method to clear the modal content.
+
+### context.modalContent
+
+This holds the current modal content.
+
+<Popout type="tip">
+When using one of the high-level wrappers like
+[DocusaurusDoc](/reference/packages/react/components/docusaurus/#docusaurusdoc)
+or
+[DocusaurusPage](/reference/packages/react/components/docusaurus/#docusauruspage)
+the modal content will automatically be displayed. If not, you need to render it yourself
+using this value.
+</Popout>
+
+### context.setModal
+
+Call this method to set the modal content. The only parameter is the content to set.
+
+### ModalContextProvider
+
+This is the context provider, it does not take any props apart from `props.children`.
+
+</DocusaurusDoc>

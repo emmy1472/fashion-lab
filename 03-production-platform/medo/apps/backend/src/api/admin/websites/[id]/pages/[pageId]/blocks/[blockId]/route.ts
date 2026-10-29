@@ -1,0 +1,82 @@
+/**
+ * @file Admin API route for managing website page blocks
+ * @description Handles CRUD operations for blocks within a website page
+ * @module admin/websites/[id]/pages/[pageId]/blocks/[blockId]
+ *
+ * @example
+ * // Update a block
+ * PUT /admin/websites/{websiteId}/pages/{pageId}/blocks/{blockId}
+ * {
+ *   "title": "Updated Block Title",
+ *   "content": "Updated block content",
+ *   "type": "text"
+ * }
+ *
+ * @example
+ * // Get a single block
+ * GET /admin/websites/{websiteId}/pages/{pageId}/blocks/{blockId}
+ *
+ * @example
+ * // Delete a block
+ * DELETE /admin/websites/{websiteId}/pages/{pageId}/blocks/{blockId}
+ */
+import { MedusaRequest, MedusaResponse } from "@medusajs/framework";
+import {  UpdateBlockSchema } from "../validators";
+import { updateBlockWorkflow } from "../../../../../../../../workflows/website/page-blocks/update-block";
+import { refetchBlock } from "../helpers";
+import { deleteBlockWorkflow } from "../../../../../../../../workflows/website/page-blocks/delete-block";
+import { listSingleBlockWorkflow } from "../../../../../../../../workflows/website/page-blocks/list-single-block";
+
+export const PUT = async (
+    req: MedusaRequest<UpdateBlockSchema>,
+    res: MedusaResponse,
+  ) => {
+    const blockId = req.params.blockId;
+    await updateBlockWorkflow(req.scope).run({
+      input: {
+        block_id: blockId,
+        ...req.validatedBody
+      },
+    });
+
+    // Refetch by URL-derived blockId, not workflow result — defensive
+    // against the workflow returning an array or otherwise lacking an
+    // .id (same family of bug as the page PUT fixed in #285).
+    const block = await refetchBlock(blockId, req.params.pageId, req.scope);
+    res.json(block);
+  };
+
+  export const GET = async (
+    req: MedusaRequest,
+    res: MedusaResponse,
+  ) => {
+    const blockId = req.params.blockId;
+    const { result } = await listSingleBlockWorkflow(req.scope).run({
+      input: {
+        block_id: blockId,
+      },
+    });
+
+    res.json({
+      block: result
+    });
+  };
+
+export const DELETE = async (
+    req: MedusaRequest,
+    res: MedusaResponse,
+  ) => {
+    
+    const blockId = req.params.blockId;
+    const { result } = await deleteBlockWorkflow(req.scope).run({
+      input: {
+        block_id: blockId,
+      },
+    });
+  
+    res.json({
+      id: blockId,
+      object: "block",
+      deleted: true,
+    });
+};

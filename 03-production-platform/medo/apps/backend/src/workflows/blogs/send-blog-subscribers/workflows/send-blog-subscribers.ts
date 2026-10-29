@@ -1,0 +1,194 @@
+import {
+  WorkflowData,
+  WorkflowResponse,
+  createWorkflow,
+  transform,
+} from "@medusajs/framework/workflows-sdk"
+import {
+  fetchBlogDataStep,
+  getSubscribersStep,
+  prepareSubscriberBatchesStep,
+  processAllBatchesStep,
+  updatePageWithResultsStep,
+  waitConfirmationBlogSendStep,
+  syncSubscribersToKitStep,
+  createKitBroadcastStep,
+} from "../steps"
+import { SendBlogSubscribersInput } from "../types"
+import { notifyOnFailureStep, sendNotificationsStep } from "@medusajs/medusa/core-flows"
+
+export const sendBlogSubscribersWorkflowId = "send-blog-subscribers"
+
+/**
+ * This workflow sends a blog post to all subscribers (persons with email addresses).
+ * 
+ * The workflow runs in the background and handles batching subscribers to avoid
+ * overwhelming the email service. It updates the page with information about the
+ * sending process when complete.
+ * 
+ * @example
+ * To send a blog post to subscribers:
+ * 
+ * ```ts
+ * const { result } = await sendBlogSubscribersWorkflow(container)
+ * .run({
+ *   input: {
+ *     page_id: "blog_123",
+ *     subject: "Check out our latest blog post!",
+ *     customMessage: "We thought you might be interested in our latest article."
+ *   }
+ * })
+ * ```
+ * 
+ * @summary
+ * 
+ * Send a blog post to all subscribers (persons with email addresses).
+ */
+export const sendBlogSubscribersWorkflow = createWorkflow(
+  sendBlogSubscribersWorkflowId,
+  (
+    input: WorkflowData<SendBlogSubscribersInput>
+  ): WorkflowResponse<{
+    page_id: string
+    totalSubscribers: number
+    sentCount: number
+    failedCount: number
+    queuedCount: number
+  }> => {
+    // Step 1: Fetch blog data
+    const blogData = fetchBlogDataStep(input)
+    
+    // Step 2: Get subscribers
+    const subscribers = getSubscribersStep()
+    
+    // Calculate total subscribers count early for the initial response
+    const subscriberCount = subscribers.length
+
+    // Deploy-time flag: route the mass send through Kit (kit.com) broadcasts
+    // instead of the per-recipient transactional distributor. Evaluated at
+    // workflow-build time (boot), so the graph is fixed per deploy. [#1059]
+    const useKit = process.env.EMAILKIT_ENABLED === "true"
+
+    // Wait for confirmation before proceeding (shared by both send lanes).
+    // This makes the workflow long-running and requires explicit confirmation.
+    const confirmed = waitConfirmationBlogSendStep()
+
+    // Create failure notification configuration
+    const failureNotification = transform({ input, blogData }, (data) => {
+      return [
+        {
+          to: "",
+          channel: "feed",
+          template: "admin-ui",
+          data: {
+            title: "Blog broadcast failed",
+            description: `“${data.blogData.title}” could not be sent to subscribers. Check the workflow logs and retry.`,
+          },
+        },
+      ]
+    })
+
+    // Set up failure notification
+    notifyOnFailureStep(failureNotification)
+
+    let sendingSummary
+    if (useKit) {
+      // Kit lane: sync-time gate + push subscribers to Kit, then fire ONE
+      // broadcast to the tag. No per-recipient loop, no daily cap.
+      const synced = syncSubscribersToKitStep({ subscribers })
+        .config({ async: true, backgroundExecution: true })
+
+      const kitResult = createKitBroadcastStep({
+        page_id: input.page_id,
+        blogData,
+        emailConfig: {
+          subject: input.subject,
+          customMessage: input.customMessage,
+        },
+        recipientCount: synced.syncedCount,
+      })
+
+      // Guard against the initial `.run()` where the workflow suspends at the
+      // confirmation wait step: `createKitBroadcastStep` hasn't executed yet, so
+      // `kitResult` is undefined while the WorkflowResponse transforms are being
+      // evaluated. Mirror the legacy lane's default-shape fallback. [#1059]
+      sendingSummary = transform({ kitResult }, (data) => {
+        return data.kitResult?.summary || {
+          totalSubscribers: 0,
+          sentCount: 0,
+          failedCount: 0,
+          queuedCount: 0,
+          sentList: [],
+          failedList: [],
+          sentAt: new Date().toISOString(),
+        }
+      })
+    } else {
+      // Legacy lane: per-recipient send distributed across mailjet/resend.
+      const batches = prepareSubscriberBatchesStep({
+        subscribers,
+        blogData,
+        emailConfig: {
+          subject: input.subject,
+          customMessage: input.customMessage
+        }
+      })
+
+      const batchResults = processAllBatchesStep(batches)
+        .config({ async: true, backgroundExecution: true })
+
+      sendingSummary = transform({ batchResults }, (data) => {
+        // If we have results, use them directly
+        return data.batchResults || {
+          totalSubscribers: 0,
+          sentCount: 0,
+          failedCount: 0,
+          queuedCount: 0,
+          sentList: [],
+          failedList: [],
+          sentAt: new Date().toISOString()
+        }
+      })
+    }
+
+    // Step 6: Update page with results
+    const pageUpdateResult = updatePageWithResultsStep({
+      page_id: input.page_id,
+      summary: sendingSummary
+    })
+    
+    // Step 7: Send success notification
+    const successNotification = transform({ input, blogData, sendingSummary }, (data) => {
+      const queuedCount = data.sendingSummary.queuedCount || 0
+      const queuedMsg = queuedCount > 0
+        ? ` ${queuedCount} queued for tomorrow.`
+        : ""
+      return [
+        {
+          to: "",
+          channel: "feed",
+          template: "admin-ui",
+          data: {
+            title: "Blog broadcast sent",
+            description: `“${data.blogData.title}” was sent to ${data.sendingSummary.sentCount} subscriber${data.sendingSummary.sentCount === 1 ? "" : "s"}.${queuedMsg}`,
+          },
+        },
+      ]
+    })
+    
+    sendNotificationsStep(successNotification)
+    
+    // Return the final result
+    const result = transform({ input, sendingSummary, subscriberCount }, (data) => {
+      return {
+        page_id: data.input.page_id,
+        totalSubscribers: data.subscriberCount,
+        sentCount: data.sendingSummary.sentCount,
+        failedCount: data.sendingSummary.failedCount,
+        queuedCount: data.sendingSummary.queuedCount || 0
+      }
+    })
+    
+    return new WorkflowResponse(result)
+  }
+)

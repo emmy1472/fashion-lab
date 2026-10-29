@@ -1,0 +1,48 @@
+---
+title: '@freesewing/i18n'
+---
+
+import { flags, measurements } from '@freesewing/i18n'
+
+FreeSewing's **i18n** package bundles English translations for measurements
+and flags used in FreeSewing's designs.
+
+It is published on NPM as [@freesewing/i18n
+](https://www.npmjs.com/package/@freesewing/i18n).\
+The source code for this package is available in [our monorepo on Codeberg
+](https://codeberg.org/freesewing/freesewing) under [packages/i18n
+](https://codeberg.org/freesewing/freesewing/src/branch/develop/packages/i18n).
+
+:::note
+This package does not provide a default export.
+:::
+
+## Installation
+
+```sh
+npm install --save @freesewing/i18n
+```
+
+## Named Exports
+
+### flags
+
+An object holding English translations for the flags that are used in
+FreeSewing's designs to flag information to the user.
+
+```js
+import { flags } from '@freesewing/config'
+```
+
+<ConsoleButton data={flags} />
+
+### measurements
+
+An object holding English translations for the measurements that are used in
+FreeSewing's designs.
+
+```js
+import { measurements } from '@freesewing/config'
+```
+
+<ConsoleButton data={measurements} />

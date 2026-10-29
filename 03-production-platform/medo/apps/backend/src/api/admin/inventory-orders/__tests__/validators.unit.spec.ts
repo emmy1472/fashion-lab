@@ -1,0 +1,228 @@
+import {
+  createInventoryOrdersSchema,
+  updateInventoryOrdersSchema,
+  updateOrderLineSchema,
+} from "../validators"
+
+describe("inventory-order validators", () => {
+  describe("updateInventoryOrdersSchema — is_sample default must not survive .partial()", () => {
+    it("does NOT inject is_sample on a status-only update", () => {
+      // Regression: `.optional().default(false)` survives `.partial()` in Zod v4,
+      // so an omitted is_sample used to inject `false` and silently flip a sample
+      // order to a non-sample one (the route spreads ...validatedBody into update).
+      const parsed = updateInventoryOrdersSchema.parse({ status: "Shipped" })
+      expect(parsed.is_sample).toBeUndefined()
+      expect("is_sample" in parsed).toBe(false)
+      expect(parsed.status).toBe("Shipped")
+    })
+
+    it("preserves an explicit is_sample=true", () => {
+      const parsed = updateInventoryOrdersSchema.parse({ is_sample: true })
+      expect(parsed.is_sample).toBe(true)
+    })
+
+    it("preserves an explicit is_sample=false", () => {
+      const parsed = updateInventoryOrdersSchema.parse({ is_sample: false })
+      expect(parsed.is_sample).toBe(false)
+    })
+  })
+
+  describe("createInventoryOrdersSchema — default stays intact on create", () => {
+    it("still defaults is_sample to false when omitted on create", () => {
+      const parsed = createInventoryOrdersSchema.parse({
+        order_lines: [
+          { inventory_item_id: "ii_1", quantity: 1, price: 1 },
+        ],
+        quantity: 1,
+        total_price: 1,
+        status: "Pending",
+        expected_delivery_date: "2026-06-20T00:00:00.000Z",
+        order_date: "2026-06-18T00:00:00.000Z",
+        shipping_address: {},
+        stock_location_id: "sloc_1",
+      })
+      expect(parsed.is_sample).toBe(false)
+    })
+  })
+})
+
+/**
+ * Samples/swatch orders. A sample is ordered precisely because nobody knows
+ * what will arrive, so it must be creatable with NO lines and filled in later.
+ */
+describe("createInventoryOrdersSchema — a sample may start with no lines", () => {
+  const base = {
+    quantity: 0,
+    total_price: 0,
+    status: "Pending" as const,
+    expected_delivery_date: "2026-10-01T00:00:00.000Z",
+    order_date: "2026-09-12T00:00:00.000Z",
+    shipping_address: {},
+    stock_location_id: "sloc_1",
+  }
+
+  it("accepts a sample order with no order_lines at all", () => {
+    const parsed = createInventoryOrdersSchema.safeParse({
+      ...base,
+      is_sample: true,
+    })
+    expect(parsed.success).toBe(true)
+    if (parsed.success) expect(parsed.data.order_lines).toEqual([])
+  })
+
+  it("accepts a sample order with an explicitly empty array", () => {
+    expect(
+      createInventoryOrdersSchema.safeParse({
+        ...base,
+        is_sample: true,
+        order_lines: [],
+      }).success
+    ).toBe(true)
+  })
+
+  it("STILL rejects a non-sample order with no lines", () => {
+    // The relaxation must not leak into ordinary procurement.
+    const parsed = createInventoryOrdersSchema.safeParse({
+      ...base,
+      quantity: 5,
+      is_sample: false,
+      order_lines: [],
+    })
+    expect(parsed.success).toBe(false)
+    if (!parsed.success) {
+      expect(JSON.stringify(parsed.error.issues)).toMatch(/only a sample order/)
+    }
+  })
+
+  it("rejects a non-sample order that omits order_lines entirely", () => {
+    expect(
+      createInventoryOrdersSchema.safeParse({ ...base, quantity: 5 }).success
+    ).toBe(false)
+  })
+})
+
+describe("updateOrderLineSchema — naming a material that does not exist yet", () => {
+  it("accepts a line with new_material and no item or variant", () => {
+    const parsed = updateOrderLineSchema.safeParse({
+      new_material: { name: "Tangaliya Weave", color: "Indigo" },
+      quantity: 1,
+      price: 0,
+    })
+    expect(parsed.success).toBe(true)
+  })
+
+  it("rejects new_material alongside an existing item", () => {
+    // It would create a duplicate of the item that was picked.
+    const parsed = updateOrderLineSchema.safeParse({
+      inventory_item_id: "iitem_1",
+      new_material: { name: "Tangaliya Weave" },
+      quantity: 1,
+      price: 0,
+    })
+    expect(parsed.success).toBe(false)
+    if (!parsed.success) {
+      expect(JSON.stringify(parsed.error.issues)).toMatch(/duplicate/)
+    }
+  })
+
+  it("rejects a nameless new_material", () => {
+    expect(
+      updateOrderLineSchema.safeParse({
+        new_material: { name: "" },
+        quantity: 1,
+        price: 0,
+      }).success
+    ).toBe(false)
+  })
+
+  it("still rejects a line that points at nothing at all", () => {
+    const parsed = updateOrderLineSchema.safeParse({ quantity: 1, price: 0 })
+    expect(parsed.success).toBe(false)
+    if (!parsed.success) {
+      expect(JSON.stringify(parsed.error.issues)).toMatch(/new_material/)
+    }
+  })
+})
+
+describe("updateOrderLineSchema — cloth is measured in metres, not whole units", () => {
+  const line = (quantity: unknown) => ({
+    id: "ol_1",
+    inventory_item_id: "iitem_1",
+    quantity,
+    price: 165,
+  })
+
+  // Every line of GOF invoice GOF/2026-27/007 is a decimal. The create path has
+  // always accepted these; only the edit path floored them at 1.
+  it.each([5.7, 5.6, 5.8, 5.9, 1.2, 0.25])(
+    "accepts %s m",
+    (quantity) => {
+      expect(updateOrderLineSchema.safeParse(line(quantity)).success).toBe(true)
+    }
+  )
+
+  it("still refuses 0 — an emptied line is a removal, and removal has its own spelling", () => {
+    const parsed = updateOrderLineSchema.safeParse(line(0))
+    expect(parsed.success).toBe(false)
+    if (!parsed.success) {
+      expect(JSON.stringify(parsed.error.issues)).toMatch(/removal/)
+    }
+  })
+
+  it("still refuses a negative quantity", () => {
+    expect(updateOrderLineSchema.safeParse(line(-5.7)).success).toBe(false)
+  })
+
+  it("still refuses a missing quantity", () => {
+    expect(updateOrderLineSchema.safeParse(line(undefined)).success).toBe(false)
+  })
+
+  it("refuses NaN, which is neither greater than nor less than 0", () => {
+    // `NaN <= 0` is false, so a bare comparison would have let it through and
+    // written a NaN metre count onto the order.
+    expect(updateOrderLineSchema.safeParse(line(NaN)).success).toBe(false)
+  })
+
+  it("does not apply the quantity rule to a removal marker", () => {
+    expect(
+      updateOrderLineSchema.safeParse({ id: "ol_1", remove: true }).success
+    ).toBe(true)
+  })
+})
+
+describe("payment terms (#2315)", () => {
+  it("accepts advance with a percent", () => {
+    const parsed = updateInventoryOrdersSchema.parse({
+      payment_terms: "advance",
+      advance_percent: 100,
+    })
+    expect(parsed.payment_terms).toBe("advance")
+    expect(parsed.advance_percent).toBe(100)
+  })
+
+  it("refuses advance without a percent", () => {
+    expect(
+      updateInventoryOrdersSchema.safeParse({ payment_terms: "advance" }).success
+    ).toBe(false)
+  })
+
+  it("refuses a percent outside 1–100", () => {
+    expect(
+      updateInventoryOrdersSchema.safeParse({ payment_terms: "advance", advance_percent: 0 }).success
+    ).toBe(false)
+    expect(
+      updateInventoryOrdersSchema.safeParse({ payment_terms: "advance", advance_percent: 101 }).success
+    ).toBe(false)
+  })
+
+  it("refuses a percent on a pay-on-receipt order", () => {
+    expect(
+      updateInventoryOrdersSchema.safeParse({ payment_terms: "on_receipt", advance_percent: 50 }).success
+    ).toBe(false)
+  })
+
+  it("leaves terms out of an update that does not mention them", () => {
+    const parsed = updateInventoryOrdersSchema.parse({ status: "Shipped" })
+    expect("payment_terms" in parsed).toBe(false)
+  })
+})

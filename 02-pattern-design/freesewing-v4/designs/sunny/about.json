@@ -1,0 +1,19 @@
+{
+  "id": "sunny",
+  "code": "Timur Duehr",
+  "design": "halbmoki",
+  "description": "A FreeSewing pattern for an 18th century split side skirt",
+  "name": "Sunny Split-side Skirt",
+  "difficulty": 1,
+  "tags": [
+    "skirt",
+    "bottoms"
+  ],
+  "techniques": [
+    "hem",
+    "pleat"
+  ],
+  "version": "4.2.0",
+  "pkg": "@freesewing/sunny",
+  "collection": true
+}

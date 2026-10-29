@@ -1,0 +1,538 @@
+import { createAdminUser, getAuthHeaders } from "../helpers/create-admin-user"
+import { getSharedTestEnv, setupSharedTestSuite } from "./shared-test-setup"
+
+jest.setTimeout(120000)
+
+setupSharedTestSuite(() => {
+  describe("Production Run Complete — Yield & Cost", () => {
+    const { api, getContainer } = getSharedTestEnv()
+
+    async function setupTestData() {
+      const container = getContainer()
+      const unique = Date.now()
+
+      await createAdminUser(container)
+      const adminHeaders = await getAuthHeaders(api)
+
+      const emailTemplates = [
+        { name: "Admin Partner Created", template_key: "partner-created-from-admin", subject: "Partner account at {{partner_name}}", html_content: "<div>Partner {{partner_name}} created.</div>", from: "partners@jaalyantra.com", variables: { partner_name: "name", temp_password: "pwd" }, template_type: "email" },
+        { name: "Design Production Started", template_key: "design-production-started", subject: "Production started for {{design_name}}", html_content: "<div>Production for {{design_name}} has started.</div>", from: "designs@jaalyantra.com", variables: { design_name: "name" }, template_type: "email" },
+        { name: "Design Production Completed", template_key: "design-production-completed", subject: "Production completed for {{design_name}}", html_content: "<div>Production for {{design_name}} is complete.</div>", from: "designs@jaalyantra.com", variables: { design_name: "name" }, template_type: "email" },
+      ]
+      for (const tpl of emailTemplates) {
+        try { await api.post("/admin/email-templates", tpl, adminHeaders) } catch {}
+      }
+
+      return { adminHeaders, unique }
+    }
+
+    async function createPartner(unique: number) {
+      const email = `yield-partner-${unique}@jyt.test`
+      const password = "supersecret"
+
+      await api.post("/auth/partner/emailpass/register", { email, password })
+      let loginRes = await api.post("/auth/partner/emailpass", { email, password })
+      let headers = { Authorization: `Bearer ${loginRes.data.token}` }
+
+      const res = await api.post(
+        "/partners",
+        {
+          name: `Yield Partner ${unique}`,
+          handle: `yield-partner-${unique}`,
+          admin: { email, first_name: "Test", last_name: "Partner" },
+        },
+        { headers }
+      )
+      expect(res.status).toBe(200)
+
+      loginRes = await api.post("/auth/partner/emailpass", { email, password })
+      headers = { Authorization: `Bearer ${loginRes.data.token}` }
+
+      return { partnerId: res.data.partner.id, partnerHeaders: headers }
+    }
+
+    async function createTemplates(adminHeaders: any, unique: number) {
+      const name = `yield-cutting-${unique}`
+      const res = await api.post(
+        "/admin/task-templates",
+        {
+          name,
+          description: "Cutting",
+          priority: "medium",
+          estimated_duration: 60,
+          required_fields: {},
+          eventable: false,
+          notifiable: false,
+          message_template: "",
+          metadata: { workflow_type: "production_run" },
+          category: "Yield Test",
+        },
+        adminHeaders
+      )
+      expect(res.status).toBe(201)
+      return { templateName: name }
+    }
+
+    async function createDesign(adminHeaders: any, unique: number) {
+      const res = await api.post(
+        "/admin/designs",
+        {
+          name: `Yield Design ${unique}`,
+          description: "Design for yield test",
+          design_type: "Original",
+          status: "Approved",
+          priority: "Medium",
+        },
+        adminHeaders
+      )
+      expect(res.status).toBe(201)
+      return res.data.design.id
+    }
+
+    /** Helper to advance a run to the "ready to complete" state */
+    async function advanceToFinished(runId: string, partnerHeaders: any) {
+      await api.post(`/partners/production-runs/${runId}/accept`, {}, { headers: partnerHeaders })
+      await api.post(`/partners/production-runs/${runId}/start`, {}, { headers: partnerHeaders })
+      await api.post(`/partners/production-runs/${runId}/finish`, {}, { headers: partnerHeaders })
+    }
+
+    // ── Test: Complete with yield data ──────────────────────────────
+
+    it("should store produced_quantity and rejected_quantity on complete", async () => {
+      const { adminHeaders, unique } = await setupTestData()
+      const { partnerId, partnerHeaders } = await createPartner(unique)
+      const { templateName } = await createTemplates(adminHeaders, unique)
+      const designId = await createDesign(adminHeaders, unique)
+
+      const createRes = await api.post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          quantity: 10,
+          assignments: [{ partner_id: partnerId, quantity: 10, template_names: [templateName] }],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.children[0].id
+
+      await advanceToFinished(runId, partnerHeaders)
+
+      // Complete with yield data: 8 good, 2 rejected
+      const completeRes = await api.post(
+        `/partners/production-runs/${runId}/complete`,
+        {
+          produced_quantity: 8,
+          rejected_quantity: 2,
+          rejection_reason: "stitching_defect",
+          rejection_notes: "Thread pull on collar area",
+          partner_cost_estimate: 5000,
+          cost_type: "total",
+          notes: "Batch completed with minor defects",
+        },
+        { headers: partnerHeaders }
+      )
+      expect(completeRes.status).toBe(200)
+      expect(completeRes.data.production_run.status).toBe("completed")
+      expect(completeRes.data.production_run.produced_quantity).toBe(8)
+      expect(completeRes.data.production_run.rejected_quantity).toBe(2)
+      expect(completeRes.data.production_run.rejection_reason).toBe("stitching_defect")
+      expect(completeRes.data.production_run.rejection_notes).toBe("Thread pull on collar area")
+      expect(completeRes.data.production_run.partner_cost_estimate).toBe(5000)
+      expect(completeRes.data.production_run.cost_type).toBe("total")
+      expect(completeRes.data.production_run.completion_notes).toBe("Batch completed with minor defects")
+    })
+
+    // ── Test: Per-unit cost type ────────────────────────────────────
+
+    it("should store per_unit cost verbatim (raw), not normalized to total", async () => {
+      const { adminHeaders, unique } = await setupTestData()
+      const { partnerId, partnerHeaders } = await createPartner(unique)
+      const { templateName } = await createTemplates(adminHeaders, unique)
+      const designId = await createDesign(adminHeaders, unique)
+
+      const createRes = await api.post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          quantity: 10,
+          assignments: [{ partner_id: partnerId, quantity: 10, template_names: [templateName] }],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.children[0].id
+
+      await advanceToFinished(runId, partnerHeaders)
+
+      // Complete with per-unit cost: 500/piece (readers multiply by qty)
+      const completeRes = await api.post(
+        `/partners/production-runs/${runId}/complete`,
+        {
+          produced_quantity: 7,
+          rejected_quantity: 3,
+          rejection_reason: "fabric_flaw",
+          partner_cost_estimate: 500,
+          cost_type: "per_unit",
+        },
+        { headers: partnerHeaders }
+      )
+      expect(completeRes.status).toBe(200)
+      // Stored verbatim as the partner entered it (500/unit), paired with
+      // cost_type="per_unit"; readers multiply by quantity themselves. #456
+      expect(completeRes.data.production_run.partner_cost_estimate).toBe(500)
+      expect(completeRes.data.production_run.cost_type).toBe("per_unit")
+      expect(completeRes.data.production_run.produced_quantity).toBe(7)
+    })
+
+    // ── Test: Complete with zero rejections ─────────────────────────
+
+    it("should complete with 100% yield (no rejections)", async () => {
+      const { adminHeaders, unique } = await setupTestData()
+      const { partnerId, partnerHeaders } = await createPartner(unique)
+      const { templateName } = await createTemplates(adminHeaders, unique)
+      const designId = await createDesign(adminHeaders, unique)
+
+      const createRes = await api.post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          quantity: 5,
+          assignments: [{ partner_id: partnerId, quantity: 5, template_names: [templateName] }],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.children[0].id
+
+      await advanceToFinished(runId, partnerHeaders)
+
+      const completeRes = await api.post(
+        `/partners/production-runs/${runId}/complete`,
+        {
+          produced_quantity: 5,
+          partner_cost_estimate: 2500,
+          cost_type: "total",
+        },
+        { headers: partnerHeaders }
+      )
+      expect(completeRes.status).toBe(200)
+      expect(completeRes.data.production_run.produced_quantity).toBe(5)
+      expect(completeRes.data.production_run.rejected_quantity).toBeNull()
+      expect(completeRes.data.production_run.rejection_reason).toBeNull()
+    })
+
+    // ── Test: Complete without yield data (backward compat) ─────────
+
+    /**
+     * This asserted the OPPOSITE until #1262: completing with no output fields
+     * used to be a 200, and this test was named for that backward
+     * compatibility. #1262 closed the gap deliberately — a run could be closed
+     * with nothing said about what came out of it, which is the cause behind
+     * the #1248 thread — so an unaccounted completion is now REFUSED. The
+     * spec was never updated with the code, so it has been failing since.
+     *
+     * Compatibility is preserved only where it was always meaningful: a run
+     * with no ordered quantity has nothing to measure against and still
+     * completes without output fields (covered below).
+     */
+    it("should refuse a completion that says nothing about output", async () => {
+      const { adminHeaders, unique } = await setupTestData()
+      const { partnerId, partnerHeaders } = await createPartner(unique)
+      const { templateName } = await createTemplates(adminHeaders, unique)
+      const designId = await createDesign(adminHeaders, unique)
+
+      const createRes = await api.post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          quantity: 3,
+          assignments: [{ partner_id: partnerId, quantity: 3, template_names: [templateName] }],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.children[0].id
+
+      await advanceToFinished(runId, partnerHeaders)
+
+      // Complete with no yield fields — just like the old API. 3 were ordered
+      // and this says nothing about how many were made.
+      //
+      // ⚠️ `cost_type` is sent even though this case is about OUTPUT, because
+      // the route-level cost-type guard (#1555) runs before the workflow's
+      // output check. Without it the payload has TWO defects, the guard refuses
+      // first, and the case passes on the wrong 400 — proving only that some
+      // refusal happened, not the one it names. The cost here is incidental
+      // scenery; it has to be VALID scenery so the missing output is the single
+      // thing under test.
+      const completeErr = await api
+        .post(
+          `/partners/production-runs/${runId}/complete`,
+          {
+            partner_cost_estimate: 1500,
+            cost_type: "per_unit",
+            notes: "Done",
+          },
+          { headers: partnerHeaders }
+        )
+        .then(
+          (res: any) => {
+            throw new Error(
+              `Expected the completion to be refused, got ${res.status}`
+            )
+          },
+          (err: any) => err
+        )
+
+      expect(completeErr.response?.status).toBe(400)
+      expect(String(completeErr.response?.data?.message)).toContain(
+        "produced_quantity is required"
+      )
+
+      // The run is untouched — a refused completion must not half-close it.
+      const afterRes = await api.get(
+        `/admin/production-runs/${runId}`,
+        adminHeaders
+      )
+      expect(afterRes.data.production_run.status).not.toBe("completed")
+      expect(afterRes.data.production_run.produced_quantity ?? null).toBeNull()
+    })
+
+    // ── Test: Complete with consumptions + yield ────────────────────
+
+    it("should log consumptions alongside yield data", async () => {
+      const { adminHeaders, unique } = await setupTestData()
+      const { partnerId, partnerHeaders } = await createPartner(unique)
+      const { templateName } = await createTemplates(adminHeaders, unique)
+      const designId = await createDesign(adminHeaders, unique)
+
+      // Create inventory item
+      const invRes = await api.post(
+        "/admin/inventory-items",
+        { title: `Yield Fabric ${unique}`, description: "For yield+consumption test" },
+        adminHeaders
+      )
+      expect(invRes.status).toBe(200)
+      const inventoryItemId = invRes.data.inventory_item.id
+
+      const createRes = await api.post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          quantity: 9,
+          assignments: [{ partner_id: partnerId, quantity: 9, template_names: [templateName] }],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.children[0].id
+
+      await advanceToFinished(runId, partnerHeaders)
+
+      const completeRes = await api.post(
+        `/partners/production-runs/${runId}/complete`,
+        {
+          produced_quantity: 7,
+          rejected_quantity: 2,
+          rejection_reason: "color_mismatch",
+          partner_cost_estimate: 600,
+          cost_type: "per_unit",
+          consumptions: [
+            {
+              inventory_item_id: inventoryItemId,
+              quantity: 18.5,
+              unit_cost: 120,
+              unit_of_measure: "Meter",
+              notes: "Main fabric consumption",
+            },
+          ],
+          notes: "Color batch variation caused 2 rejects",
+        },
+        { headers: partnerHeaders }
+      )
+      expect(completeRes.status).toBe(200)
+      expect(completeRes.data.consumptions_logged).toBe(1)
+      expect(completeRes.data.production_run.produced_quantity).toBe(7)
+      // Stored verbatim: 600/unit (cost_type records per_unit). #456
+      expect(completeRes.data.production_run.partner_cost_estimate).toBe(600)
+      expect(completeRes.data.message).toContain("1 consumption(s) recorded")
+    })
+
+    // ── Test: All rejection reasons are valid ───────────────────────
+
+    it("should accept all valid rejection reasons", async () => {
+      const reasons = [
+        "stitching_defect",
+        "fabric_flaw",
+        "color_mismatch",
+        "sizing_error",
+        "print_defect",
+        "material_damage",
+        "quality_below_standard",
+        "other",
+      ]
+
+      const { adminHeaders, unique } = await setupTestData()
+      const { partnerId, partnerHeaders } = await createPartner(unique)
+      const { templateName } = await createTemplates(adminHeaders, unique)
+
+      // Test with first reason (full flow)
+      const designId = await createDesign(adminHeaders, unique)
+      const createRes = await api.post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          quantity: 2,
+          assignments: [{ partner_id: partnerId, quantity: 2, template_names: [templateName] }],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.children[0].id
+
+      await advanceToFinished(runId, partnerHeaders)
+
+      const completeRes = await api.post(
+        `/partners/production-runs/${runId}/complete`,
+        {
+          produced_quantity: 1,
+          rejected_quantity: 1,
+          rejection_reason: "other",
+          rejection_notes: "Custom reason test",
+        },
+        { headers: partnerHeaders }
+      )
+      expect(completeRes.status).toBe(200)
+      expect(completeRes.data.production_run.rejection_reason).toBe("other")
+    })
+
+    // ── Test: Admin can see yield data ──────────────────────────────
+
+    it("should expose yield data to admin GET endpoint", async () => {
+      const { adminHeaders, unique } = await setupTestData()
+      const { partnerId, partnerHeaders } = await createPartner(unique)
+      const { templateName } = await createTemplates(adminHeaders, unique)
+      const designId = await createDesign(adminHeaders, unique)
+
+      const createRes = await api.post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          quantity: 10,
+          assignments: [{ partner_id: partnerId, quantity: 10, template_names: [templateName] }],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.children[0].id
+
+      await advanceToFinished(runId, partnerHeaders)
+
+      await api.post(
+        `/partners/production-runs/${runId}/complete`,
+        {
+          produced_quantity: 9,
+          rejected_quantity: 1,
+          rejection_reason: "sizing_error",
+          partner_cost_estimate: 450,
+          cost_type: "per_unit",
+        },
+        { headers: partnerHeaders }
+      )
+
+      // Admin should see the yield data
+      const adminDetail = await api.get(
+        `/admin/production-runs/${runId}`,
+        adminHeaders
+      )
+      expect(adminDetail.status).toBe(200)
+      expect(adminDetail.data.production_run.produced_quantity).toBe(9)
+      expect(adminDetail.data.production_run.rejected_quantity).toBe(1)
+      expect(adminDetail.data.production_run.rejection_reason).toBe("sizing_error")
+      expect(adminDetail.data.production_run.cost_type).toBe("per_unit")
+      // Stored verbatim: 450/unit (cost_type records per_unit). #456
+      expect(adminDetail.data.production_run.partner_cost_estimate).toBe(450)
+    })
+
+    // ── Test: admin corrects an over-reported yield ─────────────────
+
+    it("should let an admin correct the partner's reported output after completion", async () => {
+      const { adminHeaders, unique } = await setupTestData()
+      const { partnerId, partnerHeaders } = await createPartner(unique)
+      const { templateName } = await createTemplates(adminHeaders, unique)
+      const designId = await createDesign(adminHeaders, unique)
+
+      const createRes = await api.post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          quantity: 9,
+          assignments: [{ partner_id: partnerId, quantity: 9, template_names: [templateName] }],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.children[0].id
+
+      await advanceToFinished(runId, partnerHeaders)
+
+      // The partner over-reports: claims all 9 were made (prod_run_01KYPM4G…).
+      await api.post(
+        `/partners/production-runs/${runId}/complete`,
+        { produced_quantity: 9 },
+        { headers: partnerHeaders }
+      )
+
+      const correction = await api.post(
+        `/admin/production-runs/${runId}`,
+        {
+          produced_quantity: 3,
+          correction_reason: "Partner reported 9; physical count was 3",
+        },
+        adminHeaders
+      )
+      expect(correction.status).toBe(200)
+      expect(correction.data.production_run.produced_quantity).toBe(3)
+      // The ordered quantity is a different fact and must survive untouched.
+      expect(correction.data.production_run.quantity).toBe(9)
+      expect(correction.data.production_run.status).toBe("completed")
+
+      // The correction is auditable, not a silent overwrite.
+      const activities = await api.get(
+        `/admin/production-runs/${runId}/activities`,
+        adminHeaders
+      )
+      expect(activities.status).toBe(200)
+      const corrections = activities.data.activities.filter(
+        (a: any) => a.kind === "output_corrected"
+      )
+      expect(corrections).toHaveLength(1)
+      expect(corrections[0].actor_type).toBe("admin")
+      expect(corrections[0].payload.previous.produced_quantity).toBe(9)
+      expect(corrections[0].payload.corrected.produced_quantity).toBe(3)
+      expect(corrections[0].payload.reason).toBe(
+        "Partner reported 9; physical count was 3"
+      )
+    })
+
+    it("should reject a negative output correction", async () => {
+      const { adminHeaders, unique } = await setupTestData()
+      const { partnerId, partnerHeaders } = await createPartner(unique)
+      const { templateName } = await createTemplates(adminHeaders, unique)
+      const designId = await createDesign(adminHeaders, unique)
+
+      const createRes = await api.post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          quantity: 4,
+          assignments: [{ partner_id: partnerId, quantity: 4, template_names: [templateName] }],
+        },
+        adminHeaders
+      )
+      const runId = createRes.data.children[0].id
+      await advanceToFinished(runId, partnerHeaders)
+      await api.post(
+        `/partners/production-runs/${runId}/complete`,
+        { produced_quantity: 4 },
+        { headers: partnerHeaders }
+      )
+
+      await expect(
+        api.post(`/admin/production-runs/${runId}`, { produced_quantity: -1 }, adminHeaders)
+      ).rejects.toMatchObject({ response: { status: 400 } })
+    })
+  })
+})

@@ -1,0 +1,88 @@
+import {  LoaderFunctionArgs, UIMatch, useLoaderData, useParams } from "react-router-dom";
+import { PERSON_DETAIL_FIELDS } from "./constants";
+import { usePerson } from "../../../hooks/api/persons";
+import { TwoColumnPageSkeleton } from "../../../components/table/skeleton";
+import { PersonGeneralSection } from "../../../components/persons/person-general-section";
+import { PersonsAddressSection } from "../../../components/persons/persons-address-section";
+import { TwoColumnPage } from "../../../components/pages/two-column-pages";
+import { PersonContactSection } from "../../../components/persons/person-contact-sections";
+import { PersonTagsComponent } from "../../../components/persons/person-tags-component";
+import { PersonTypesComponent } from "../../../components/persons/person-types-component";
+import { PersonPartnerComponent } from "../../../components/persons/person-partner-component";
+import { PersonAgreementsSection } from "../../../components/persons/person-agreements-section";
+import { PersonPaymentsSection } from "../../../components/persons/person-payments-section";
+import { PersonNewsletterSection } from "../../../components/persons/person-newsletter-section";
+import { AdminPerson } from "../../../hooks/api/personandtype";
+import { personLoader } from "./loader";
+
+const PersonDetailPage = () => {
+  const { id } = useParams();
+  
+  const initialData = useLoaderData() as Awaited<{ person: AdminPerson } >
+  
+  const { person, isPending: isLoading, isError, error } = usePerson(id!, {
+    fields: PERSON_DETAIL_FIELDS,
+  }, {
+    initialData: initialData
+  });
+
+  // Show loading skeleton while data is being fetched
+  if (isLoading || !person) {
+    return (
+    <TwoColumnPageSkeleton 
+      mainSections={3} 
+      sidebarSections={3} 
+      showJSON 
+      showMetadata 
+      />
+    );
+  }
+
+  // Handle error state
+  if (isError) {
+    throw error;
+  }
+
+
+  // Render main content when data is available
+  return (
+    <TwoColumnPage data={person} hasOutlet={true} showJSON showMetadata={true} >
+      <TwoColumnPage.Main>
+      <PersonGeneralSection person={person} />
+      <PersonsAddressSection
+        personId={person.id}
+        initialAddresses={person.addresses}
+      />
+      <PersonPartnerComponent person={person} />
+      <PersonAgreementsSection person={person} />
+      <PersonPaymentsSection person={person} />
+      </TwoColumnPage.Main>
+      <TwoColumnPage.Sidebar>
+        <PersonNewsletterSection personId={person.id} email={person.email} />
+        <PersonContactSection
+          personId={person.id}
+          initialContacts={person.contact_details}
+        />
+        <PersonTagsComponent
+          personId={person.id}
+          initialTags={person.tags}
+        />
+        <PersonTypesComponent personTypes={person.person_types} />
+      </TwoColumnPage.Sidebar>
+    </TwoColumnPage>
+  );
+};
+
+export async function loader({ params }: LoaderFunctionArgs) {
+  return await personLoader({ params });
+}
+
+
+export const handle = {
+  breadcrumb: (match: UIMatch<{ id: string }>) => {
+    const { id } = match.params;
+    return `${id}`;
+  },
+};
+
+export default PersonDetailPage;

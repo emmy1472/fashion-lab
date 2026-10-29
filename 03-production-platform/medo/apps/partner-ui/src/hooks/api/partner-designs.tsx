@@ -1,0 +1,700 @@
+import { FetchError } from "@medusajs/js-sdk"
+import {
+  QueryKey,
+  UseMutationOptions,
+  UseQueryOptions,
+  useMutation,
+  useQuery,
+} from "@tanstack/react-query"
+import qs from "qs"
+
+import { sdk } from "../../lib/client"
+import { queryClient } from "../../lib/query-client"
+import { queryKeysFactory } from "../../lib/query-key-factory"
+
+const PARTNER_DESIGNS_QUERY_KEY = "partner-designs" as const
+export const partnerDesignsQueryKeys = queryKeysFactory(PARTNER_DESIGNS_QUERY_KEY)
+
+export type PartnerDesignPartnerInfo = {
+  // The full set both partner-designs routes can emit. `awaiting_review` and
+  // `cancelled` were missing (#2018 tail), which made a correct
+  // `=== "cancelled"` guard a comparison TypeScript proved impossible — see
+  // work-orders/production-run-card.tsx, which had to compare as a string.
+  partner_status?:
+    | "incoming"
+    | "assigned"
+    | "in_progress"
+    | "awaiting_review"
+    | "finished"
+    | "completed"
+    | "cancelled"
+  partner_phase?: "redo" | null
+  partner_started_at?: string | null
+  partner_finished_at?: string | null
+  partner_completed_at?: string | null
+  workflow_tasks_count?: number
+  assigned_partner_id?: string
+}
+
+/** #1901 — the three engagement states; see `partner_engagement` below. */
+export type PartnerDesignEngagement = "owned" | "assigned" | "shared"
+
+export type PartnerDesign = Record<string, any> & {
+  id: string
+  name?: string | null
+  status?: string | null
+  created_at?: string
+  updated_at?: string
+  partner_info?: PartnerDesignPartnerInfo
+  inventory_items?: Array<Record<string, any>>
+  /**
+   * True when the *current* partner owns this design (not merely assigned to it
+   * via the design-partners link). Set by `GET /partners/designs/:id`. Owner-only
+   * surfaces (cost estimate, BOM add/remove) gate on this — do NOT infer ownership
+   * from a truthiness check on `owner_partner_id`, which is true for any owned
+   * design regardless of who is viewing.
+   */
+  is_owner?: boolean
+  /**
+   * Is this design work the partner is expected to DO, or was it only shared
+   * with them? A `design_partners_link` row alone puts a design on this
+   * dashboard, so being listed said nothing about expectation.
+   *   owned    — the partner created it
+   *   assigned — the partner holds a production run on it
+   *   shared   — linked only; no run of theirs (an in-house run does NOT count)
+   * Derived server-side in `partner-design-engagement.ts`; never re-derive it
+   * from `production_runs` in the UI.
+   */
+  partner_engagement?: PartnerDesignEngagement
+  /** True iff at least one run on this design belongs to this partner. */
+  has_partner_run?: boolean
+  partner_run_count?: number
+}
+
+/** #6 — the partner "work" tab buckets (server-side lens over the same set). */
+export type DesignBucket = "all" | "incoming" | "in_progress" | "completed" | "yours"
+
+export type DesignBucketFacets = Record<DesignBucket, number>
+
+export type ListPartnerDesignsParams = {
+  limit?: number
+  offset?: number
+  status?: string
+  q?: string
+  bucket?: DesignBucket
+}
+
+export type PartnerDesignListResponse = {
+  designs: PartnerDesign[]
+  count: number
+  /** #6 — per-bucket counts (accurate across all pages) for the work tabs. */
+  facets?: DesignBucketFacets
+  limit: number
+  offset: number
+}
+
+export type PartnerDesignDetailResponse = {
+  design: PartnerDesign
+}
+
+const buildQuery = (params?: Record<string, any>) => {
+  const query = qs.stringify(params || {}, { skipNulls: true })
+  return query ? `?${query}` : ""
+}
+
+export const usePartnerDesigns = (
+  params?: ListPartnerDesignsParams,
+  options?: Omit<
+    UseQueryOptions<
+      PartnerDesignListResponse,
+      FetchError,
+      PartnerDesignListResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: partnerDesignsQueryKeys.list(params),
+    queryFn: async () => {
+      const q = buildQuery(params)
+      return await sdk.client.fetch<PartnerDesignListResponse>(
+        `/partners/designs${q}`,
+        {
+          method: "GET",
+        }
+      )
+    },
+    ...options,
+  })
+
+  return {
+    ...data,
+    designs: data?.designs ?? [],
+    ...rest,
+  }
+}
+
+export const usePartnerDesign = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<
+      PartnerDesignDetailResponse,
+      FetchError,
+      PartnerDesignDetailResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: partnerDesignsQueryKeys.detail(id),
+    queryFn: async () => {
+      return await sdk.client.fetch<PartnerDesignDetailResponse>(
+        `/partners/designs/${id}`,
+        {
+          method: "GET",
+        }
+      )
+    },
+    ...options,
+  })
+
+  return {
+    ...data,
+    design: data?.design,
+    ...rest,
+  }
+}
+
+// Roadmap #6 Phase 1 — partner-owned design CRUD.
+export type CreatePartnerDesignPayload = {
+  name: string
+  description?: string
+  design_type?: "Original" | "Derivative" | "Custom" | "Collaboration"
+  status?: string
+  priority?: "Low" | "Medium" | "High" | "Urgent"
+  tags?: string[]
+  estimated_cost?: number
+  designer_notes?: string
+}
+
+export const useCreatePartnerDesign = (
+  options?: UseMutationOptions<
+    { design: PartnerDesign },
+    FetchError,
+    CreatePartnerDesignPayload
+  >
+) => {
+  return useMutation({
+    mutationFn: async (payload) => {
+      return await sdk.client.fetch<{ design: PartnerDesign }>(
+        `/partners/designs`,
+        { method: "POST", body: payload }
+      )
+    },
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.lists() })
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}
+
+export const useUpdatePartnerDesign = (
+  id: string,
+  options?: UseMutationOptions<
+    { design: PartnerDesign },
+    FetchError,
+    Partial<CreatePartnerDesignPayload>
+  >
+) => {
+  return useMutation({
+    mutationFn: async (payload) => {
+      return await sdk.client.fetch<{ design: PartnerDesign }>(
+        `/partners/designs/${id}`,
+        { method: "PUT", body: payload }
+      )
+    },
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.lists() })
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.detail(id) })
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}
+
+export const useDeletePartnerDesign = (
+  id: string,
+  options?: UseMutationOptions<
+    { id: string; deleted: boolean },
+    FetchError,
+    void
+  >
+) => {
+  return useMutation({
+    mutationFn: async () => {
+      return await sdk.client.fetch<{ id: string; deleted: boolean }>(
+        `/partners/designs/${id}`,
+        { method: "DELETE" }
+      )
+    },
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.lists() })
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}
+
+/** #1113 S3 — the Excalidraw scene shape stored in the `moodboard` column. */
+export type MoodboardScene = {
+  type?: string
+  version?: number
+  source?: string
+  elements?: any[]
+  appState?: Record<string, any>
+  files?: Record<string, any>
+}
+
+/**
+ * #1113 S3 — regenerate the brief-as-cards moodboard from the design's
+ * structured columns (owner OR invited/assigned designer). Returns the merged
+ * scene; the caller loads it straight into the canvas.
+ */
+export const useGenerateMoodboard = (
+  id: string,
+  options?: UseMutationOptions<{ moodboard: MoodboardScene }, FetchError, void>
+) => {
+  return useMutation({
+    mutationFn: async () => {
+      return await sdk.client.fetch<{ moodboard: MoodboardScene }>(
+        `/partners/designs/${id}/moodboard/generate`,
+        { method: "POST" }
+      )
+    },
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.detail(id) })
+      // #2017 — generate now persists to the partner's OWN board row, and a
+      // first generate MINTS that row. Without this the switcher still reads
+      // `own: null` and offers them only our board, read-only, while their
+      // freshly generated one sits on the canvas in front of them.
+      await queryClient.invalidateQueries({ queryKey: partnerMoodboardsKey(id) })
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}
+
+/**
+ * #2228 — one of the board's images, as a real `data:` URI.
+ *
+ * Through our API rather than fetching the CDN directly: the CDN sends no
+ * `Access-Control-Allow-Origin`, so the browser blocks that request before it
+ * is made. Returns null on any failure — the caller keeps the original URL and
+ * the board renders exactly as it did before.
+ */
+export const fetchMoodboardImageDataUrl = async (
+  designId: string,
+  src: string
+): Promise<string | null> => {
+  try {
+    const res = await sdk.client.fetch<{ data_url: string }>(
+      `/partners/designs/${designId}/moodboard/image`,
+      { method: "GET", query: { src } }
+    )
+    return res?.data_url ?? null
+  } catch {
+    return null
+  }
+}
+
+/** #1113 S3+ — one insertable moodboard block in the palette. */
+export type MoodboardBlockListing = {
+  key: string
+  label: string
+  group: string
+  available: boolean
+}
+
+/**
+ * #1113 S3+ — the insert-block palette: every drop-in frame the designer can
+ * add to the canvas, flagged by whether the design has data for it. Owner OR
+ * assigned/invited designer.
+ */
+export const useMoodboardBlocks = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<{ blocks: MoodboardBlockListing[] }, FetchError>,
+    "queryKey" | "queryFn"
+  >
+) => {
+  return useQuery({
+    queryKey: [...partnerDesignsQueryKeys.detail(id), "moodboard-blocks"],
+    queryFn: async () =>
+      sdk.client.fetch<{ blocks: MoodboardBlockListing[] }>(
+        `/partners/designs/${id}/moodboard/blocks`,
+        { method: "GET" }
+      ),
+    enabled: !!id,
+    ...options,
+  })
+}
+
+/**
+ * #1113 S3+ — build ONE block from the design's current data (positioned at
+ * origin). Not persisted server-side: the caller translates + re-ids it onto
+ * the live canvas, then saves via useSaveMoodboard.
+ */
+export const useInsertMoodboardBlock = (
+  id: string,
+  options?: UseMutationOptions<{ block: MoodboardScene }, FetchError, string>
+) => {
+  return useMutation({
+    mutationFn: async (block: string) =>
+      sdk.client.fetch<{ block: MoodboardScene }>(
+        `/partners/designs/${id}/moodboard/blocks`,
+        { method: "POST", body: { block } }
+      ),
+    ...options,
+  })
+}
+
+// ── Construction techniques (#1113 Feature B) ────────────────────────────────
+
+export type ConstructionParamDef = {
+  key: string
+  label: string
+  min: number
+  max: number
+  step: number
+  default: number
+}
+export type ConstructionPreset = {
+  value: string
+  label: string
+  detailLabel: string
+  params?: Record<string, number>
+  fabricRules?: string[]
+  note?: string
+}
+export type ConstructionTechnique = {
+  slug: string
+  label: string
+  family: string
+  garmentAreas: string[]
+  params: ConstructionParamDef[]
+  defaultFabricRules: string[]
+  presets: ConstructionPreset[]
+}
+export type ConstructionCatalog = {
+  families: string[]
+  techniques: ConstructionTechnique[]
+}
+export type ConstructionDetailRecord = {
+  id: string
+  title?: string | null
+  details?: string | null
+  metadata?: {
+    technique?: string
+    params?: Record<string, number>
+    fabricRules?: string[]
+  } | null
+}
+export type CreateConstructionPayload = {
+  technique: string
+  label?: string
+  params?: Record<string, number>
+  fabricRules?: string[]
+  note?: string
+}
+
+/**
+ * #1113 Feature B — the categorized construction catalog the picker renders
+ * (families + techniques with param defs, default fabric rules, presets). Served
+ * verbatim from the canonical backend module, so the picker never hardcodes it.
+ */
+export const useConstructionTechniques = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<ConstructionCatalog, FetchError>,
+    "queryKey" | "queryFn"
+  >
+) => {
+  return useQuery({
+    queryKey: [...partnerDesignsQueryKeys.detail(id), "construction-techniques"],
+    queryFn: async () =>
+      sdk.client.fetch<ConstructionCatalog>(
+        `/partners/designs/${id}/construction-techniques`,
+        { method: "GET" }
+      ),
+    enabled: !!id,
+    staleTime: Infinity, // static catalog
+    ...options,
+  })
+}
+
+/** #1113 Feature B — this design's authored construction details. */
+export const useConstructionDetails = (
+  id: string,
+  options?: Omit<
+    UseQueryOptions<
+      { construction_details: ConstructionDetailRecord[]; count: number },
+      FetchError
+    >,
+    "queryKey" | "queryFn"
+  >
+) => {
+  return useQuery({
+    queryKey: [...partnerDesignsQueryKeys.detail(id), "construction-details"],
+    queryFn: async () =>
+      sdk.client.fetch<{
+        construction_details: ConstructionDetailRecord[]
+        count: number
+      }>(`/partners/designs/${id}/construction-details`, { method: "GET" }),
+    enabled: !!id,
+    ...options,
+  })
+}
+
+/** #1113 Feature B — add a construction detail (author-scoped). */
+export const useCreateConstructionDetail = (
+  id: string,
+  options?: UseMutationOptions<
+    { construction_detail: ConstructionDetailRecord },
+    FetchError,
+    CreateConstructionPayload
+  >
+) => {
+  return useMutation({
+    mutationFn: async (body: CreateConstructionPayload) =>
+      sdk.client.fetch<{ construction_detail: ConstructionDetailRecord }>(
+        `/partners/designs/${id}/construction-details`,
+        { method: "POST", body }
+      ),
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      // Refreshes the detail list, the block-availability list and the catalog.
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.detail(id) })
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}
+
+/** #1113 Feature B — remove a construction detail (author-scoped). */
+export const useDeleteConstructionDetail = (
+  id: string,
+  options?: UseMutationOptions<{ id: string; deleted: boolean }, FetchError, string>
+) => {
+  return useMutation({
+    mutationFn: async (detailId: string) =>
+      sdk.client.fetch<{ id: string; deleted: boolean }>(
+        `/partners/designs/${id}/construction-details/${detailId}`,
+        { method: "DELETE" }
+      ),
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.detail(id) })
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}
+
+/**
+ * #1113 — idempotent, brief-friendly seed: fills an EMPTY moodboard from the
+ * brief so the designer opens onto an editable snapshot (Figma-style) without a
+ * manual "Generate" click. No-throw: nothing to render yet, or a board that's
+ * already populated → `{ moodboard: null }` (never clobbers).
+ */
+export const useSeedMoodboard = (
+  id: string,
+  options?: UseMutationOptions<{ moodboard: MoodboardScene | null }, FetchError, void>
+) => {
+  return useMutation({
+    mutationFn: async () => {
+      return await sdk.client.fetch<{ moodboard: MoodboardScene | null }>(
+        `/partners/designs/${id}/moodboard/seed`,
+        { method: "POST" }
+      )
+    },
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      if (data?.moodboard) {
+        await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.detail(id) })
+        // #2019 — seeding MINTS this partner's board row. Without this the
+        // switcher still reads `own: null` and keeps offering "start a board"
+        // to someone who now has one, on the canvas in front of them.
+        await queryClient.invalidateQueries({ queryKey: partnerMoodboardsKey(id) })
+      }
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}
+
+/**
+ * #1113 S3 — persist the moodboard scene the designer edited on the canvas.
+ * Author-scoped route (owner OR assigned designer), so an invited stranger can
+ * save without owning the design.
+ */
+export const useSaveMoodboard = (
+  id: string,
+  options?: UseMutationOptions<{ moodboard: MoodboardScene }, FetchError, MoodboardScene>
+) => {
+  return useMutation({
+    mutationFn: async (moodboard) => {
+      return await sdk.client.fetch<{ moodboard: MoodboardScene }>(
+        `/partners/designs/${id}/moodboard`,
+        { method: "PUT", body: { moodboard } }
+      )
+    },
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.detail(id) })
+      // #2017 — the save now targets a BOARD ROW, so the boards list is what
+      // goes stale. Without this the switcher keeps showing the scene the
+      // partner has just replaced.
+      await queryClient.invalidateQueries({ queryKey: partnerMoodboardsKey(id) })
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}
+
+// ── Per-owner moodboards (#2017) ────────────────────────────────────────────
+
+/**
+ * One board, as the boards route presents it.
+ *
+ * `is_own` is the whole point: a partner edits theirs and views everyone
+ * else's. `is_legacy` marks the pre-#2017 `design.moodboard` blob, shown when
+ * a design has no board rows at all so an unmigrated design does not read as
+ * empty — it is never the viewer's own to edit.
+ */
+export type PartnerMoodboard = {
+  id: string
+  owner_type: "core" | "partner" | string
+  partner_id?: string | null
+  title?: string | null
+  scene?: MoodboardScene | null
+  thumbnail_url?: string | null
+  updated_at?: string | null
+  is_own: boolean
+  is_legacy: boolean
+}
+
+export type PartnerMoodboardsResponse = {
+  own: PartnerMoodboard | null
+  others: PartnerMoodboard[]
+  usedLegacyFallback: boolean
+}
+
+export const partnerMoodboardsKey = (designId: string) => [
+  ...partnerDesignsQueryKeys.detail(designId),
+  "moodboards",
+]
+
+export const usePartnerDesignMoodboards = (
+  designId: string,
+  options?: Omit<
+    UseQueryOptions<
+      PartnerMoodboardsResponse,
+      FetchError,
+      PartnerMoodboardsResponse,
+      QueryKey
+    >,
+    "queryKey" | "queryFn"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: partnerMoodboardsKey(designId),
+    queryFn: async () =>
+      sdk.client.fetch<PartnerMoodboardsResponse>(
+        `/partners/designs/${designId}/moodboards`
+      ),
+    enabled: !!designId,
+    ...options,
+  })
+  return { ...(data ?? { own: null, others: [], usedLegacyFallback: false }), ...rest }
+}
+
+/** #1113 S3 — the subset of brief columns the moodboard cards round-trip to. */
+export type PartnerBriefUpdate = {
+  concept_theme?: string | null
+  aesthetic_keywords?: string[] | null
+  persona?: Record<string, any> | null
+  competitors?: Array<Record<string, any>> | null
+  price_point?: "luxury" | "mid_market" | "budget" | null
+  design_budget?: number | null
+  cost_currency?: string | null
+  milestones?: Array<{ label: string; date?: string | null }> | null
+}
+
+/**
+ * #1113 S3 — partial brief update, driven by `brief-field` card edits on the
+ * canvas. Author-scoped (owner OR assigned designer).
+ */
+export const useUpdatePartnerBrief = (
+  id: string,
+  options?: UseMutationOptions<{ brief: Record<string, any> }, FetchError, PartnerBriefUpdate>
+) => {
+  return useMutation({
+    mutationFn: async (payload) => {
+      return await sdk.client.fetch<{ brief: Record<string, any> }>(
+        `/partners/designs/${id}/brief`,
+        { method: "PUT", body: payload }
+      )
+    },
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.detail(id) })
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}
+
+export const useUploadPartnerDesignMedia = (
+  id: string,
+  options?: UseMutationOptions<{ files: Array<{ id?: string; url: string }> }, FetchError, FormData>
+) => {
+  return useMutation({
+    mutationFn: async (formData) => {
+      return await sdk.client.fetch<{ files: Array<{ id?: string; url: string }> }>(
+        `/partners/designs/${id}/media`,
+        {
+          method: "POST",
+          // Medusa JS SDK sets default "content-type: application/json".
+          // For multipart, we must delete it and let the browser set the boundary.
+          headers: { "content-type": null } as any,
+          body: formData,
+        }
+      )
+    },
+    ...options,
+  })
+}
+
+export const useAttachPartnerDesignMedia = (
+  id: string,
+  options?: UseMutationOptions<
+    { message: string; design?: PartnerDesign },
+    FetchError,
+    { media_files: Array<{ id?: string; url: string; isThumbnail?: boolean }>; metadata?: Record<string, unknown> }
+  >
+) => {
+  return useMutation({
+    mutationFn: async (payload) => {
+      return await sdk.client.fetch<{ message: string; design?: PartnerDesign }>(
+        `/partners/designs/${id}/media/attach`,
+        {
+          method: "POST",
+          body: payload,
+        }
+      )
+    },
+    onSuccess: async (data, variables, onMutateResult, context) => {
+      await queryClient.invalidateQueries({ queryKey: partnerDesignsQueryKeys.detail(id) })
+      options?.onSuccess?.(data, variables, onMutateResult, context)
+    },
+    ...options,
+  })
+}

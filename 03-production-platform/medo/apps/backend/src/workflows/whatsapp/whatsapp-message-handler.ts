@@ -1,0 +1,3031 @@
+import { ContainerRegistrationKeys, MedusaError } from "@medusajs/utils"
+import { PRODUCTION_RUNS_MODULE } from "../../modules/production_runs"
+import type ProductionRunService from "../../modules/production_runs/service"
+import { PARTNER_MODULE } from "../../modules/partner"
+import { TASKS_MODULE } from "../../modules/tasks"
+import { acceptProductionRunWorkflow } from "../production-runs/accept-production-run"
+import { startProductionRunWorkflow } from "../production-runs/start-production-run"
+import { finishProductionRunWorkflow } from "../production-runs/finish-production-run"
+import { completeProductionRunWorkflow } from "../production-runs/complete-production-run"
+import WhatsAppService from "../../modules/social-provider/whatsapp-service"
+import { SOCIAL_PROVIDER_MODULE } from "../../modules/social-provider"
+import type SocialProviderService from "../../modules/social-provider/service"
+import { MESSAGING_MODULE } from "../../modules/messaging"
+import { phraseRunAck } from "./whatsapp-run-ack"
+import { phraseLine } from "./whatsapp-line"
+import type { LineSpec } from "./whatsapp-line-prompt"
+import { resolveLivePhotoContextAction } from "./whatsapp-photo-context-routing"
+import { fileInventoryOfferAnalysis } from "./whatsapp-photo-inventory-offer"
+import {
+  isPhotoContextLive,
+  recordPhoto,
+} from "./whatsapp-photo-batch"
+import {
+  MEDIA_CTX_NO,
+  MEDIA_CTX_YES,
+  recordMediaAck,
+  type MediaAckEntry,
+} from "./whatsapp-media-ack-batch"
+import { describePhotoForContext } from "./whatsapp-photo-vision"
+import { classify } from "../../lib/ai/classify"
+import {
+  buildPhotoRunQuestion,
+  decidePhotoRun,
+  PHOTO_RUN_SCOPE,
+  type CandidateRun,
+} from "./whatsapp-photo-run-match"
+import type { WhatsAppAuditContext } from "../../modules/social-provider/whatsapp-service"
+import {
+  downloadAndSaveWhatsAppMedia,
+  attachMediaToRunDesign,
+  resolvePartnerDefaultSharedFolder,
+  listPartnerSharedFolders,
+  getPartnerOpenWork,
+  detachMediaFromRunDesign,
+} from "./whatsapp-media-helper"
+import { BUTTON_TITLE_ACTIONS } from "../../scripts/whatsapp-templates/partner-run-templates"
+import { buildPartnerProductUrl } from "./partner-product-url"
+import { handleFreeFormPartnerReply, isFreeformChatEnabled } from "./whatsapp-freeform-chat"
+import { extractPartnerIntent } from "./whatsapp-intent"
+import { phoneMatches } from "./whatsapp-phone"
+import { partnersHoldingNumber } from "../partner/whatsapp-number-owner"
+
+interface IncomingMessage {
+  from: string // WhatsApp phone number
+  messageId: string
+  type: "text" | "interactive" | "image" | "document" | "video" | "audio"
+  text?: string
+  buttonReplyId?: string
+  buttonReplyTitle?: string
+  mediaId?: string
+  mediaUrl?: string
+  mediaMimeType?: string
+  /** The sender's own filename. 🔴 Only a `document` has one — never an `image`. */
+  mediaFilename?: string
+  replyToWaMessageId?: string
+}
+
+interface HandlerResult {
+  handled: boolean
+  action?: string
+  runId?: string
+  error?: string
+}
+
+/**
+ * Resolves a partner by matching the phone number against PartnerAdmin records.
+ * Returns { partnerId, adminPhone } or null.
+ */
+interface ResolvedPartner {
+  partnerId: string
+  adminName: string
+  adminId?: string
+  isNewVerification?: boolean // true if this admin's WhatsApp was just auto-verified
+}
+
+export async function resolvePartnerByPhone(
+  scope: any,
+  phone: string
+): Promise<ResolvedPartner | null> {
+  try {
+    const normalized = phone.replace(/[^0-9]/g, "")
+    const partnerService = scope.resolve(PARTNER_MODULE) as any
+
+    const [partners] = await partnerService.listAndCountPartners(
+      {},
+      { take: 200, relations: ["admins"] }
+    )
+
+    // Priority 1: Match against partner.whatsapp_number (verified)
+    // #2350 — collect EVERY match first. A number held by two partners must act
+    // for neither: taking the first match let one partner accept or start
+    // another's run. Treated as unregistered ("contact the admin") instead.
+    const verifiedMatches = (partners || []).filter(
+      (partner: any) =>
+        partner.whatsapp_number &&
+        partner.whatsapp_verified &&
+        phoneMatches(partner.whatsapp_number.replace(/[^0-9]/g, ""), normalized)
+    )
+    if (verifiedMatches.length > 1) {
+      console.error(
+        `[whatsapp-handler] #2350 ${normalized} is the verified WhatsApp of ${verifiedMatches.length} partners (${verifiedMatches
+          .map((p: any) => p.id)
+          .join(", ")}) — acting for none`
+      )
+      return null
+    }
+    const verified: any = verifiedMatches[0]
+    if (verified) {
+      // Find which admin this phone belongs to
+      const matchedAdmin = (verified.admins || []).find((a: any) => {
+        if (!a.phone) return false
+        return phoneMatches(a.phone.replace(/[^0-9]/g, ""), normalized)
+      })
+      return {
+        partnerId: verified.id,
+        adminName: matchedAdmin
+          ? [matchedAdmin.first_name, matchedAdmin.last_name].filter(Boolean).join(" ")
+          : verified.admins?.[0]
+            ? [verified.admins[0].first_name, verified.admins[0].last_name].filter(Boolean).join(" ")
+            : verified.name || "Partner",
+        adminId: matchedAdmin?.id,
+      }
+    }
+
+    // Priority 2: Match against admin phone numbers (even if partner whatsapp not verified)
+    // This enables multi-admin WhatsApp — any admin with a phone can message in
+    // #2350 — the same refusal when admins of two DIFFERENT partners share it.
+    const adminMatchPartnerIds = new Set(
+      (partners || [])
+        .filter((partner: any) =>
+          (partner.admins || []).some(
+            (admin: any) =>
+              admin.phone && admin.is_active && phoneMatches(admin.phone.replace(/[^0-9]/g, ""), normalized)
+          )
+        )
+        .map((partner: any) => partner.id)
+    )
+    if (adminMatchPartnerIds.size > 1) {
+      console.error(
+        `[whatsapp-handler] #2350 ${normalized} is an admin phone on ${adminMatchPartnerIds.size} partners (${[
+          ...adminMatchPartnerIds,
+        ].join(", ")}) — acting for none`
+      )
+      return null
+    }
+    for (const partner of partners || []) {
+      for (const admin of partner.admins || []) {
+        if (!admin.phone || !admin.is_active) continue
+        const adminNormalized = admin.phone.replace(/[^0-9]/g, "")
+        if (phoneMatches(adminNormalized, normalized)) {
+          const adminName = [admin.first_name, admin.last_name].filter(Boolean).join(" ") || "Partner"
+
+          // Auto-verify: this admin's phone is messaging our business number
+          // Mark their WhatsApp as verified in admin metadata
+          const adminMeta = (admin.metadata as Record<string, any>) || {}
+          let isNewVerification = false
+
+          if (!adminMeta.whatsapp_verified) {
+            try {
+              await partnerService.updatePartnerAdmins({
+                id: admin.id,
+                metadata: {
+                  ...adminMeta,
+                  whatsapp_verified: true,
+                  whatsapp_verified_at: new Date().toISOString(),
+                  whatsapp_verified_phone: phone,
+                },
+              })
+              isNewVerification = true
+            } catch (e: any) {
+              console.warn("[whatsapp-handler] Failed to auto-verify admin:", e.message)
+            }
+          }
+
+          // Also update partner-level whatsapp if not set — unless another
+          // partner already holds this number (#2350).
+          if (
+            (!partner.whatsapp_number || !partner.whatsapp_verified) &&
+            !partnersHoldingNumber(partners || [], phone, partner.id).length
+          ) {
+            try {
+              await partnerService.updatePartners({
+                id: partner.id,
+                whatsapp_number: phone,
+                whatsapp_verified: true,
+              })
+            } catch { /* non-fatal */ }
+          }
+
+          return {
+            partnerId: partner.id,
+            adminName,
+            adminId: admin.id,
+            isNewVerification,
+          }
+        }
+      }
+    }
+
+    return null
+  } catch (e: any) {
+    console.error("[whatsapp-handler] Failed to resolve partner:", e.message)
+    return null
+  }
+}
+
+/**
+ * Parse an incoming WhatsApp message and execute the appropriate action.
+ *
+ * @param boundWa - Optional sender-bound WhatsAppService. Passed by the
+ *   webhook once it has resolved the inbound phone_number_id so that replies
+ *   go out from the correct WhatsApp number. Omitting falls back to the
+ *   default sender for backwards compatibility.
+ */
+export async function handleIncomingMessage(
+  scope: any,
+  message: IncomingMessage,
+  boundWa?: import("../../modules/social-provider/whatsapp-service").default
+): Promise<HandlerResult> {
+  const whatsappRaw =
+    boundWa ?? (scope.resolve(SOCIAL_PROVIDER_MODULE) as SocialProviderService).getWhatsApp(scope)
+
+  // Mark message as read
+  await whatsappRaw.markAsRead(message.messageId)
+
+  // Resolve partner
+  const partner = await resolvePartnerByPhone(scope, message.from)
+  if (!partner) {
+    await whatsappRaw.sendTextMessage(
+      message.from,
+      "Sorry, your phone number is not registered with any partner account. Please contact the admin."
+    ).catch((e: any) => {
+      // May fail if the number isn't in Meta's allowed test recipients — that's fine
+      console.warn("[whatsapp-handler] Could not notify unregistered phone:", e.message)
+    })
+    return { handled: true, error: "unregistered_phone" }
+  }
+
+  // Persist inbound message and get the conversation for outbound tracking + state checks.
+  // The sender platform id (when known) is stamped on the conversation so
+  // subsequent replies auto-route through the same WhatsApp number.
+  const senderPlatformId = whatsappRaw.getSenderPlatformId?.() ?? null
+  const conversation = await persistInboundMessage(
+    scope,
+    message,
+    partner.partnerId,
+    partner.adminName,
+    senderPlatformId
+  ).catch((e: any) => {
+    console.warn("[whatsapp-handler] Failed to persist inbound message:", e.message)
+    return null as { id: string; metadata: Record<string, any> | null; isNew: boolean } | null
+  })
+
+  const conversationId = conversation?.id || null
+  // `let`: the consent gate below both writes to this and re-reads it in the
+  // same pass (mark pending → decide whether to prompt → collect on consent).
+  let conversationMeta: Record<string, any> = conversation?.metadata || {}
+
+  // Create a scoped wrapper that auto-persists outbound bot replies
+  // without mutating the shared WhatsAppService instance
+  const persistSend = (result: any, text: string) => {
+    if (conversationId) {
+      persistOutboundMessage(scope, conversationId, text, result?.messages?.[0]?.id).catch((e: any) => {
+        console.warn("[whatsapp-handler] Failed to persist outbound message:", e.message)
+      })
+    }
+  }
+  // Default audit context for every send the message handler makes — picked
+  // up by WhatsAppService and written to the Notification Module after Meta
+  // accepts. Per-call sites that want a more specific trigger_type override
+  // by passing audit themselves.
+  const defaultAudit: WhatsAppAuditContext = {
+    partner_id: partner.partnerId,
+    trigger_type: "whatsapp_message_handler",
+    data: { conversation_id: conversationId },
+  }
+  const whatsapp = Object.create(whatsappRaw) as typeof whatsappRaw
+  whatsapp.sendTextMessage = async (
+    to: string,
+    text: string,
+    replyTo?: string,
+    audit?: WhatsAppAuditContext
+  ) => {
+    const result = await whatsappRaw.sendTextMessage(to, text, replyTo, audit ?? defaultAudit)
+    persistSend(result, text)
+    return result
+  }
+  whatsapp.sendInteractiveMessage = async (
+    to: string,
+    interactive: any,
+    audit?: WhatsAppAuditContext
+  ) => {
+    const result = await whatsappRaw.sendInteractiveMessage(to, interactive, audit ?? defaultAudit)
+    persistSend(result, interactive?.body?.text || "[interactive]")
+    return result
+  }
+
+  // --- First interaction: send welcome + consent request ---
+  const consentGiven = conversationMeta.consent_given === true
+
+  // Handle consent button replies
+  if (message.type === "interactive" && message.buttonReplyId) {
+    if (message.buttonReplyId === "consent_agree") {
+      await updateConversationMetadata(scope, conversationId, {
+        ...conversationMeta,
+        consent_given: true,
+        consent_given_at: new Date().toISOString(),
+      })
+      // Ask for language preference before onboarding
+      await sendLanguageSelection(whatsapp, message.from)
+      return { handled: true, action: "consent_agreed" }
+    }
+    if (message.buttonReplyId === "consent_decline") {
+      await whatsapp.sendTextMessage(
+        message.from,
+        `We understand. You can still use the web portal to manage your production runs.\n\nIf you change your mind, just send us a message anytime.`
+      )
+      return { handled: true, action: "consent_declined" }
+    }
+
+    // Handle language selection
+    if (message.buttonReplyId === "lang_hi" || message.buttonReplyId === "lang_en") {
+      const lang = message.buttonReplyId === "lang_hi" ? "hi" : "en"
+      await updateConversationMetadata(scope, conversationId, {
+        ...conversationMeta,
+        consent_given: true,
+        language: lang,
+        onboarded: true,
+      })
+      // Also persist onto the partner_admin row(s). The conversation
+      // metadata is the source of truth for the *handler* but outbound
+      // visual flows (seed-partner-run-whatsapp-flow.ts, seed-partner-
+      // payment-status-flow.ts, …) read partner.admins[*].preferred_language
+      // when resolving template language. Without this write, partners
+      // who tap "हिंदी" still get every subsequent template in English.
+      // Match priority: admin whose phone equals message.from first; fall
+      // back to all admins on this partner so we don't miss when the
+      // selecting number isn't yet stored on a specific admin row.
+      await persistPartnerAdminLanguage(scope, partner.partnerId, message.from, lang)
+      await sendWelcomeCommands(scope, whatsapp, message.from, partner.partnerId, partner.adminName, lang)
+      return { handled: true, action: `language_selected_${lang}` }
+    }
+  }
+
+  // If consent not yet given, send the consent prompt
+  if (!consentGiven) {
+    /**
+     * 🔴 Media that arrives before consent must be REMEMBERED, not discarded.
+     *
+     * This gate returns before the media branch below ever runs, so the row
+     * keeps the `lookaside.fbsbx.com` URL it was created with — 401 without a
+     * bearer token, and dead about five minutes later. On 2026-08-25 ten
+     * photographs from Bhagalpur Handloom SHG arrived in a two-second burst
+     * twenty-eight seconds before consent was recorded, and every one became
+     * an unfixable broken thumbnail. Nothing errored.
+     *
+     * The bytes are deliberately NOT fetched here: downloading someone's
+     * photographs before they have agreed that the conversation is recorded is
+     * the exact thing this gate is asking permission for. Marking the row is
+     * enough — Meta holds the media ~30 days, so consent given any time in the
+     * next month still recovers all of it.
+     */
+    if (message.mediaId) {
+      await markMediaPendingConsent(scope, conversationId, message.messageId)
+      conversationMeta = {
+        ...conversationMeta,
+        media_pending_consent: true,
+      }
+      await updateConversationMetadata(scope, conversationId, conversationMeta)
+    }
+
+    /**
+     * 🔴 AN ACTION THAT ARRIVES BEFORE CONSENT MUST BE REMEMBERED TOO.
+     *
+     * The paragraph above learned this for photographs and the lesson was
+     * never carried across to button taps, which is the more expensive half:
+     * a partner's very first contact is the run-assignment template, so the
+     * FIRST thing they ever tap is "Accept" — and it lands here, before
+     * consent exists, and this gate returns without running it.
+     *
+     * Measured on prod: Ksaman Naturals tapped Accept on three runs on
+     * 2026-09-09. Two landed pre-consent (09:40:22 and 09:40:39) and were
+     * discarded; the third, at 12:23 once consent was recorded, worked. The
+     * platform then sent six "you have not responded" reminders over nine days
+     * for runs she HAD accepted, and on 2026-09-18 auto-reassigned one away
+     * from her with `cancelled_reason: "Auto-reassigned: no response after 2
+     * reminders"`. She had responded. Nothing errored, and the only trace was
+     * the absence of an `accepted_at` (#2211).
+     *
+     * 🔴 The run id is resolved and stored NOW, not on replay. It comes from
+     * `pending_run_id`, one mutable slot, and by the time consent arrives it
+     * will name whatever run was sent last (#2212).
+     */
+    const pendingAction =
+      message.type === "interactive" && message.buttonReplyId
+        ? resolveRunActionFromButton(
+            message.buttonReplyId,
+            message.buttonReplyTitle,
+            conversationMeta
+          )
+        : null
+    if (
+      pendingAction &&
+      isTemplateTitleButton(message.buttonReplyId, message.buttonReplyTitle)
+    ) {
+      const fromReply = await resolveRunFromReplyContext(
+        scope,
+        message.replyToWaMessageId
+      )
+      if (fromReply) pendingAction.runId = fromReply
+    }
+    if (pendingAction?.runId && REPLAYABLE_PRE_CONSENT_ACTIONS.has(pendingAction.action)) {
+      conversationMeta = {
+        ...conversationMeta,
+        action_pending_consent: {
+          action: pendingAction.action,
+          run_id: pendingAction.runId,
+          at: new Date().toISOString(),
+        },
+      }
+      await updateConversationMetadata(scope, conversationId, conversationMeta)
+    }
+
+    /**
+     * 🔑 One prompt per BURST, not one per message.
+     *
+     * The gate fires per message, so those ten photographs produced nine
+     * identical "Welcome to JYT Commerce" prompts in the partner's chat. A
+     * consent request repeated ten times reads as a malfunction, which is a
+     * poor advertisement for the thing being consented to.
+     */
+    const lastPrompt = typeof conversationMeta.consent_prompted_at === "string"
+      ? Date.parse(conversationMeta.consent_prompted_at)
+      : NaN
+    const promptedRecently =
+      !Number.isNaN(lastPrompt) &&
+      Date.now() - lastPrompt < CONSENT_PROMPT_COOLDOWN_MS
+
+    if (promptedRecently) {
+      return { handled: true, action: "consent_already_requested" }
+    }
+
+    await sendConsentRequest(whatsapp, message.from, partner.adminName)
+    await updateConversationMetadata(scope, conversationId, {
+      ...conversationMeta,
+      consent_prompted_at: new Date().toISOString(),
+    })
+    return { handled: true, action: "consent_requested" }
+  }
+
+  /**
+   * Consent IS given. If anything arrived while it was not, collect it now.
+   *
+   * 🔑 Hung off the marker rather than off the consent-granting code, because
+   * consent is granted in FOUR places — the `consent_agree` button above,
+   * `connect-partner-whatsapp`, and two admin messaging routes — and a
+   * collector wired into one of them would work for that path and silently do
+   * nothing for the other three. This one runs whichever way consent arrived.
+   * (The conversation that exposed the bug was `admin_initiated`, i.e. not the
+   * button.)
+   */
+  if (conversationMeta.media_pending_consent === true) {
+    const collected = await collectMediaPendingConsent(scope, {
+      conversationId,
+      partnerId: partner.partnerId,
+      partnerName: partner.adminName,
+    })
+    if (collected.remaining === 0) {
+      conversationMeta = {
+        ...conversationMeta,
+        media_pending_consent: undefined,
+      }
+      await updateConversationMetadata(scope, conversationId, conversationMeta)
+    }
+  }
+
+  /**
+   * The tap they made before consent existed, honoured now.
+   *
+   * Cleared BEFORE it runs, not after: a replay that throws must not be
+   * retried on every subsequent message for the rest of the conversation's
+   * life. One attempt, then it is gone — the partner still has the buttons.
+   *
+   * ⚠️ Bounded by REPLAY_TTL. "Accept" means accept THIS job, and a tap that
+   * has been sitting unreplayed for days is no longer a safe statement about
+   * what the partner wants today; past the window we re-offer the buttons
+   * instead of moving the run on their behalf.
+   */
+  const stashed = conversationMeta.action_pending_consent as
+    | { action?: string; run_id?: string; at?: string }
+    | undefined
+  if (stashed?.action && stashed.run_id) {
+    conversationMeta = { ...conversationMeta, action_pending_consent: undefined }
+    await updateConversationMetadata(scope, conversationId, conversationMeta)
+
+    const stashedAt = Date.parse(String(stashed.at ?? ""))
+    const fresh =
+      !Number.isNaN(stashedAt) &&
+      Date.now() - stashedAt < PRE_CONSENT_ACTION_TTL_MS
+
+    if (fresh && stashed.action === "accept") {
+      try {
+        await whatsapp.sendTextMessage(
+          message.from,
+          `Thanks — picking up the *Accept* you sent before we had your consent.`
+        )
+        return await handleAccept(
+          scope,
+          whatsapp,
+          message.from,
+          stashed.run_id,
+          partner.partnerId,
+          String(conversationMeta.language || "en")
+        )
+      } catch (e: any) {
+        console.warn(
+          "[whatsapp-handler] pre-consent accept replay failed:",
+          e?.message
+        )
+        await whatsapp.sendTextMessage(
+          message.from,
+          `I couldn't complete the *Accept* you sent earlier. Please tap Accept again on run ${stashed.run_id}.`
+        )
+        return { handled: true, action: "pre_consent_replay_failed" }
+      }
+    }
+
+    /*
+     * Everything else is re-offered rather than replayed. A Decline needs a
+     * reason the partner has not given yet, and a stale tap of any kind is a
+     * statement about a moment that has passed — so the run's own buttons go
+     * back to them and they decide again.
+     */
+    const designName = await getDesignName(scope, stashed.run_id).catch(() => "")
+    await whatsapp.sendRunActions(
+      message.from,
+      stashed.run_id,
+      "sent_to_partner",
+      designName
+    )
+    return { handled: true, action: "pre_consent_action_reoffered" }
+  }
+
+  // If consent given but language not yet selected, prompt for it
+  if (!conversationMeta.language) {
+    await sendLanguageSelection(whatsapp, message.from)
+    return { handled: true, action: "language_requested" }
+  }
+
+  // --- Normal message processing (consent already given) ---
+
+  // Determine action from button reply or text
+  let action = ""
+  let runId = ""
+  // Structured extras + language from the intent "query planner" model call
+  // (when it succeeded) — consumed by finish/complete and the free-form reply.
+  let intentExtras: { quantity?: number | null; rejectedQuantity?: number | null; notes?: string | null } | null = null
+  let intentLanguage: string | undefined
+
+  if (message.type === "interactive" && message.buttonReplyId) {
+    // W5 — product-create Confirm / Cancel taps. Distinct prefix so the
+    // production-run dispatch below doesn't try to parse them. Exit
+    // immediately once handled; the product status mutation IS the
+    // intent — no follow-on action needed.
+    if (message.buttonReplyId === MEDIA_CTX_YES || message.buttonReplyId === MEDIA_CTX_NO) {
+      return await handleMediaContextReply(
+        scope,
+        whatsapp,
+        message,
+        partner.partnerId,
+        conversationId
+      )
+    }
+
+    if (message.buttonReplyId.startsWith("wa_pc_")) {
+      return await handleProductCreateButtonReply(
+        scope,
+        whatsapp,
+        message,
+        partner
+      )
+    }
+
+    // Precedence:
+    //   1. Template quick-reply buttons → arrive as the localized title
+    //      (e.g. "✅ Accept" / "✅ स्वीकार करें") with no runId embedded.
+    //      Map title → action via BUTTON_TITLE_ACTIONS and pull the runId
+    //      from conversation.metadata.pending_run_id which the outbound
+    //      send_whatsapp operation set when the template was dispatched.
+    //   2. Decline list-reply ids `decline_<reason>_<runId>` — carry a
+    //      reason token that the generic split would swallow.
+    //   3. Native interactive ids `<action>_prod_run_<id>` — the long-
+    //      standing shape used by sendProductionRunAssignment,
+    //      sendRunActions, etc.
+    const resolved = resolveRunActionFromButton(
+      message.buttonReplyId,
+      message.buttonReplyTitle,
+      conversationMeta
+    )
+    if (resolved) {
+      action = resolved.action
+      runId = resolved.runId
+
+      /*
+       * 🔴 The message she replied to outranks the conversation slot (#2212).
+       * Only for the title path — a native `accept_prod_run_X` id names its
+       * own run explicitly and nothing should second-guess it.
+       */
+      if (isTemplateTitleButton(message.buttonReplyId, message.buttonReplyTitle)) {
+        const fromReply = await resolveRunFromReplyContext(
+          scope,
+          message.replyToWaMessageId
+        )
+        if (fromReply) runId = fromReply
+      }
+      // A template quick-reply with no pinned run: we know WHAT they meant,
+      // not on what. Only the title path can produce this.
+      if (!runId && isTemplateTitleButton(message.buttonReplyId, message.buttonReplyTitle)) {
+        await whatsapp.sendTextMessage(
+          message.from,
+          `I couldn't tell which run this ${action} refers to. Please reply with \`${action} <run id>\`.`
+        )
+        return { handled: true, action: "template_button_no_context" }
+      }
+    }
+  } else if (message.type === "text" && message.text) {
+    // Query planner: one model call strips the partner's intent + language.
+    // Falls back to the old regex parser only when no model is reachable.
+    const intent = await extractPartnerIntent(scope, {
+      text: message.text,
+      partnerName: partner.adminName,
+      openRuns: await openRunsForIntent(scope, partner.partnerId),
+      recentMessages: [],
+    })
+    if (intent) {
+      // "acknowledgment" (bare ok/haan/theek) is not a command — route it to
+      // the free-form path (which already has a "no follow-up question" rule).
+      action = intent.action === "acknowledgment" ? "" : (intent.action ?? "")
+      runId = intent.run_id ?? ""
+
+      /**
+       * 🔴 COMMANDS MUTATE; QUESTIONS CONVERSE.
+       *
+       * A partner asked "Mera koi kaam pending h kya?" — do I have any work
+       * pending. The planner classified it `runs`, the command path ran, and
+       * `sendRunsSummary` with zero runs replied with a hardcoded English
+       * string: "You have no active production runs at the moment."
+       *
+       * Not a model, not their language, not a conversation. A constant — and a
+       * dead end, because the one thing a partner asking that wants next is to
+       * talk about what they COULD pick up.
+       *
+       * The branching was backwards: the assistant only ran when the planner
+       * found NOTHING, so the better the planner got at recognising questions,
+       * the more often a partner hit a canned reply instead of an answer.
+       *
+       * So read-only intents go to the conversation, which answers grounded on
+       * the same live data AND can say something useful when the answer is
+       * "nothing". Intents that CHANGE something — accept, start, finish,
+       * complete, decline — stay on the deterministic command path, where a
+       * model must never be the thing that moves a run.
+       *
+       * A `status` naming a specific run is a lookup and keeps its exact
+       * formatted reply; a bare `status` with no run id is a question.
+       */
+      const isQuestion =
+        action === "runs" ||
+        action === "open" ||
+        (action === "status" && !runId)
+      if (isQuestion && isFreeformChatEnabled()) {
+        action = ""
+      }
+      intentExtras = {
+        quantity: intent.quantity,
+        rejectedQuantity: intent.rejected_quantity,
+        notes: intent.notes,
+      }
+      intentLanguage = intent.language
+    } else {
+      const parsed = parseTextCommand(message.text.trim())
+      action = parsed.action
+      runId = parsed.runId
+    }
+  } else if (message.type === "image" || message.type === "video" || message.type === "document") {
+    // Inbound media. Resolution order:
+    //   1. `active_media_run_id` — partner tapped "📸 Add Media" on a
+    //      started run (10-min TTL). Existing run-attachment behavior.
+    //   2. Single active run — auto-attach to it. Existing auto-route.
+    //   3. Partner has a shared folder — silent, no command needed.
+    //      File lands in the most-recently-active shared folder.
+    //   4. Fall back to per-partner WhatsApp catchall + inbox nudge.
+    //
+    // The destination folder is decided BEFORE we ask Meta for the
+    // download URL: if any folder is shared with the partner we route
+    // the upload there directly; otherwise downloadAndSaveWhatsAppMedia
+    // creates / reuses the catchall.
+    if (message.mediaId) {
+      try {
+        const sharedFolder = await resolvePartnerDefaultSharedFolder(
+          scope,
+          partner.partnerId,
+        ).catch(() => null)
+
+        const saved = await downloadAndSaveWhatsAppMedia(scope, {
+          mediaId: message.mediaId,
+          mediaUrl: message.mediaUrl,
+          mimeType: message.mediaMimeType,
+          partnerId: partner.partnerId,
+          partnerName: partner.adminName,
+          caption: message.text,
+          targetFolderId: sharedFolder?.id,
+        })
+
+        // Resolve the attachment target.
+        //
+        // Priority:
+        //   1. `active_media_run_id` on conversation.metadata — set when the
+        //      partner recently tapped "📸 Add Media" on a started run.
+        //      Short-lived (10-min TTL).
+        //   2. Auto-route — if the partner has exactly one in_progress run
+        //      with `started_at` set, attach photos to it automatically.
+        //      Covers the common case where a partner snaps progress pics
+        //      without remembering to tap the button first.
+        //   3. Fall through to "saved to inbox" with a nudge.
+        const pointedRunId = typeof conversationMeta.active_media_run_id === "string"
+          ? conversationMeta.active_media_run_id
+          : null
+        const expiresAt = typeof conversationMeta.active_media_expires_at === "string"
+          ? Date.parse(conversationMeta.active_media_expires_at)
+          : NaN
+        const contextStillValid =
+          !!pointedRunId && !Number.isNaN(expiresAt) && expiresAt > Date.now()
+
+        let autoResolvedRunId: string | null = null
+        let autoResolveReason: "none" | "single" | "multiple" = "none"
+        // True whenever WE picked the run — the burst reply then asks ✅ / ❌.
+        let runWasGuessed = false
+        // What the photo shows, read once and reused by the batch question.
+        let photoSeen: string | null | undefined
+        if (saved && !contextStillValid) {
+          const lookup = await findSinglePartnerActiveRun(scope, partner.partnerId)
+          autoResolvedRunId = lookup.runId
+          autoResolveReason = lookup.reason
+          runWasGuessed = lookup.reason === "single"
+
+          /**
+           * With any run in progress, let System One read what the photo shows
+           * against each run's design. It may pick a run (still a guess — asked
+           * about), or say none, which sends the photo to the question instead
+           * of filing a swatch on a shirt run. When it cannot answer, the old
+           * rule (the one run, or nothing) stands.
+           */
+          if (lookup.reason !== "none") {
+            const matched = await matchPhotoToRun(scope, partner.partnerId, saved.fileUrl, message.text ?? null)
+            photoSeen = matched.seen
+            if (matched.decided) {
+              autoResolvedRunId = matched.runId
+              runWasGuessed = !!matched.runId
+            }
+          }
+        }
+
+        const targetRunId: string | null = contextStillValid
+          ? pointedRunId
+          : autoResolvedRunId
+
+        let attachedRunId: string | null = null
+        let attachError: string | null = null
+        /**
+         * #2138 — what a live photo context says back to the partner.
+         *
+         * `photoContextOwnsReply` is separate from the text on purpose: for
+         * `product_submission` the VISUAL FLOW sends the reply, so the right
+         * answer here is "say nothing", which is not the same as "no context".
+         * One nullable string could not tell those apart and the partner would
+         * get two messages for one photo.
+         */
+        let photoContextReply: string | null = null
+        let photoContextOwnsReply = false
+        // Set when the photo joins `pending_photo_batch`: the sweep asks about
+        // the whole burst once, so nothing may be said about it per photo.
+        let queuedForQuestion = false
+
+        if (saved && targetRunId) {
+          const result = await attachMediaToRunDesign(scope, {
+            runId: targetRunId,
+            partnerId: partner.partnerId,
+            fileUrl: saved.fileUrl,
+          })
+
+          if (result.ok) {
+            attachedRunId = result.runId
+          } else {
+            // Translate internal reason into a partner-facing hint.
+            const msgMap: Record<typeof result.reason, string> = {
+              run_not_found: `Run ${targetRunId} no longer exists.`,
+              not_partner_run: `Run ${targetRunId} is not assigned to your account.`,
+              not_started: `Run ${targetRunId} hasn't been started yet. Tap Start, then send the photo.`,
+              terminal_state: `Run ${targetRunId} is ${result.detail ?? "closed"} — can't attach media.`,
+              no_design: `Run ${targetRunId} has no design linked — can't attach media.`,
+              attach_failed: "Couldn't attach to the run. Saved to inbox instead.",
+            }
+            attachError = msgMap[result.reason]
+          }
+        }
+
+        // Persist the media URL + (if attached) the run context on the
+        // messaging_message row so the inbox shows which run it belonged to.
+        if (saved && conversationId) {
+          const messagingService = scope.resolve(MESSAGING_MODULE) as any
+          /**
+           * 🔴 Looked up by `wa_message_id`, NOT by "the newest row in this
+           * conversation".
+           *
+           * The newest-row version was a race that lost photographs silently:
+           * ten arriving in a two-second burst mean the newest row is usually
+           * NOT the one being handled, so the guard failed and the row kept
+           * Meta's `lookaside` URL — which 401s and expires in five minutes.
+           * Nothing threw; the update just quietly did not happen.
+           */
+          const [row] = await messagingService.listMessagingMessages(
+            { wa_message_id: message.messageId },
+            { take: 1 }
+          )
+          if (row) {
+            await messagingService.updateMessagingMessages({
+              id: row.id,
+              media_url: saved.fileUrl,
+              media_mime_type: saved.mimeType,
+              media_pending_reason: null,
+              content: message.text || `[${message.type}]`,
+              ...(attachedRunId
+                ? { context_type: "production_run", context_id: attachedRunId }
+                : {}),
+            })
+          }
+        }
+
+        /**
+         * #2138 — a photo with NO established purpose joins a batch instead of
+         * being guessed at.
+         *
+         * Only when nothing has already claimed it: a run attachment is an
+         * explicit instruction (the partner tapped "Add Media", or has exactly
+         * one run in progress), and a live `photo_context` means an admin
+         * already said what these photos are for. Either way the purpose is
+         * known and there is nothing to ask.
+         *
+         * Otherwise the photo is recorded and NOTHING is sent from here. The
+         * question is asked once, by `jobs/ask-about-photo-batches.ts`, after
+         * the partner stops sending — asking per photo would mean eight
+         * questions for eight photos, which is worse than guessing.
+         */
+        if (saved && conversationId && !attachedRunId) {
+          /**
+           * #2138 — a live context now CAUSES something.
+           *
+           * Until this, the context was read only to decide not to batch the
+           * photo, and the photo then fell through to the ordinary shared-folder
+           * reply. An admin who said "these will be the lot they're offering us"
+           * got a file in a catchall and a partner who was told nothing — a
+           * context set and never acted on, which is worse than none, because
+           * the admin believes it was honoured.
+           *
+           * An unrecognised or expired kind returns null and the photo rejoins
+           * the batch-and-ask path. Silence is the failure #2138 exists to
+           * remove, so no branch here may produce it.
+           */
+          const contextAction = resolveLivePhotoContextAction(
+            conversationMeta.photo_context as any
+          )
+
+          if (contextAction) {
+            photoContextReply =
+              contextAction.reply === "here" ? contextAction.confirmation : null
+            photoContextOwnsReply = true
+
+            if (contextAction.analyse) {
+              // Awaited, like the vision description above it: the partner is
+              // not waiting on a reply that depends on this, but an unawaited
+              // promise in a webhook is a write that may simply never happen.
+              // It never throws — a failed reading must not turn a saved photo
+              // into an error.
+              const filed = await fileInventoryOfferAnalysis(scope, {
+                mediaFileId: saved.mediaFileId,
+                imageUrl: saved.fileUrl,
+                note:
+                  (conversationMeta.photo_context as any)?.note ?? null,
+              })
+              if (filed.skipped_reason) {
+                console.warn(
+                  `[whatsapp-handler] inventory-offer photo not analysed (${filed.skipped_reason})`
+                )
+              }
+            }
+          } else {
+            const [mediaRow] = await (scope.resolve(MESSAGING_MODULE) as any)
+              .listMessagingMessages({ wa_message_id: message.messageId }, { take: 1 })
+              .catch(() => [null])
+            if (mediaRow?.id) {
+              // What the photo SHOWS — never what it is for. Null when no
+              // vision model is reachable, which only makes the question
+              // plainer. Awaited because the batch row must carry it, and the
+              // partner is not waiting on this reply (the question comes later
+              // from the sweep).
+              const seen =
+                photoSeen !== undefined
+                  ? { text: photoSeen }
+                  : await describePhotoForContext(scope, saved.fileUrl).catch(() => null)
+
+              await updateConversationMetadata(scope, conversationId, {
+                ...conversationMeta,
+                pending_photo_batch: recordPhoto(
+                  conversationMeta.pending_photo_batch as any,
+                  mediaRow.id,
+                  new Date(),
+                  seen?.text ?? null
+                ),
+              })
+              queuedForQuestion = true
+            }
+          }
+        }
+
+        // Clear the one-shot attach pointer so the next photo doesn't
+        // silently land on the same run.
+        if (contextStillValid && conversationId) {
+          await updateConversationMetadata(scope, conversationId, {
+            ...conversationMeta,
+            active_media_run_id: undefined,
+            active_media_expires_at: undefined,
+          })
+        }
+
+        /**
+         * 🔴 A SUCCESSFUL upload is acknowledged ONCE PER BURST, not per file.
+         *
+         * #2138 batched the question and left the acknowledgement firing per
+         * message, so a partner sending twelve swatches got twelve near-
+         * identical replies — each a push notification, and each burying
+         * anything we actually needed them to read. A burst of photos is one
+         * event that happens to arrive as twelve webhooks.
+         *
+         * So the success branches below RECORD and send nothing;
+         * `jobs/send-media-ack-batches.ts` sends one reply once the partner
+         * goes quiet. Errors are NOT deferred — see the note in
+         * whatsapp-media-ack-batch.ts.
+         */
+        const ackEntry: MediaAckEntry | null = photoContextOwnsReply
+          ? photoContextReply
+            ? { kind: "context", label: photoContextReply }
+            : null // the flow owns the reply; nothing for us to say
+          : attachedRunId
+            ? {
+                kind: "run",
+                label: attachedRunId,
+                // We picked this run (their only one in progress) — say so and
+                // ask; a tapped "📸 Add Media" is their choice and is not asked.
+                ...(runWasGuessed
+                  ? { auto: true, design: await getDesignName(scope, attachedRunId) }
+                  : {}),
+              }
+            : !attachError && sharedFolder
+              ? { kind: "shared_folder", label: sharedFolder.name }
+              : null
+
+        if (ackEntry && conversationId) {
+          const [ackRow] = await (scope.resolve(MESSAGING_MODULE) as any)
+            .listMessagingMessages({ wa_message_id: message.messageId }, { take: 1 })
+            .catch(() => [null])
+          if (ackRow?.id) {
+            /**
+             * Re-read rather than reusing `conversationMeta`: the batch write
+             * above may have already updated this conversation in this same
+             * handler, and writing a stale object back would drop the photo
+             * that was just recorded.
+             */
+            const freshMeta = await readConversationMetadata(scope, conversationId)
+            await updateConversationMetadata(scope, conversationId, {
+              ...freshMeta,
+              pending_media_ack: recordMediaAck(
+                freshMeta.pending_media_ack as any,
+                ackRow.id,
+                ackEntry
+              ),
+            })
+          }
+        }
+
+        if (photoContextOwnsReply || attachedRunId || (!attachError && sharedFolder)) {
+          // Recorded above; the sweep replies once the burst settles.
+        } else if (attachError) {
+          await whatsapp.sendTextMessage(message.from, attachError)
+        } else if (!pointedRunId) {
+          // No tap, no single run to auto-match, no shared folder.
+          // File is in the per-partner WhatsApp catchall — admin will
+          // see it in the inbox and assign appropriately.
+          //
+          // Two branches depending on whether the partner gave a caption:
+          //
+          //   With caption  → suppress this reply entirely. That's the W4
+          //                   entry condition; the "Partner WhatsApp —
+          //                   Product Create" visual flow owns the reply
+          //                   and sends "✅ Draft product created — open
+          //                   in admin" via its notify_partner step.
+          //                   Without this guard the partner sees two
+          //                   messages for one inbound.
+          //
+          //   Without caption → nudge toward W4. The legacy "Tap 📸 Add
+          //                   Media on a run" hint is misleading now —
+          //                   it points at the production-run lifecycle,
+          //                   not product create. Tell partners how to
+          //                   turn this into a draft if that's what they
+          //                   wanted; otherwise admin still sees the file
+          //                   in their inbox.
+          const hasCaption = typeof message.text === "string" && message.text.trim().length > 0
+          /**
+           * 🔴 Not per photo when the photo is queued for the burst question.
+           * This line fired once PER IMAGE — Bhagalpur got ~25 identical
+           * "📥 Received" replies for one burst on 2026-09-15 — on top of the
+           * sweep's own "what are these for?". It is only the fallback now,
+           * for a photo that could not be queued.
+           */
+          if (!hasCaption && !queuedForQuestion) {
+            const hint =
+              autoResolveReason === "multiple"
+                ? "You have several runs in progress — tap *📸 Add Media* on the specific run, then send the photo."
+                : "Add a caption (e.g. \"Saree silk ₹4500\") and re-send to create a draft product on your storefront. Otherwise admin will sort it from your inbox."
+            await whatsapp.sendTextMessage(
+              message.from,
+              `📥 Received. ${hint}`
+            )
+          }
+        }
+      } catch (e: any) {
+        console.warn("[whatsapp-handler] Failed to save media:", e.message)
+      }
+    }
+    return { handled: true, action: "media_saved" }
+  }
+
+  if (!action) {
+    // Free-form message. When the free-form chat service is enabled, route a
+    // partner's non-command text through the LLM conversational agent, which
+    // answers in natural language grounded on their live runs/designs/payments
+    // and may ask a follow-up (e.g. "could you share a photo?"). Media and
+    // button replies keep the existing behaviour; a plain text message that
+    // isn't a command is the only thing that reaches the LLM.
+    if (
+      message.type === "text" &&
+      message.text &&
+      isFreeformChatEnabled()
+    ) {
+      try {
+        return await handleFreeFormPartnerReply(scope, {
+          text: message.text,
+          phone: message.from,
+          partnerId: partner.partnerId,
+          partnerName: partner.adminName,
+          conversationId,
+          whatsapp,
+          language:
+            intentLanguage ??
+            (typeof conversationMeta.language === "string" ? conversationMeta.language : undefined),
+        })
+      } catch (e: any) {
+        console.warn("[whatsapp-handler] free-form reply failed:", e.message)
+        // fall through to silent-save below
+      }
+    }
+
+    // Casual message — just save to conversation, no bot reply
+    // Admin will see it in the messaging inbox and can respond manually
+    return { handled: true, action: "conversation" }
+  }
+
+  /*
+   * The language the partner chose, for any wording we generate rather than
+   * template. Read from the conversation, which is where the choice was made
+   * — NOT from partner_admin.preferred_language, which is a portal setting
+   * and has silently outranked this choice before.
+   */
+  const partnerLang = String(conversationMeta.language || "en")
+
+  // Execute action
+  try {
+    switch (action) {
+      case "accept":
+        return await handleAccept(scope, whatsapp, message.from, runId, partner.partnerId, partnerLang)
+      case "start":
+        return await handleStart(scope, whatsapp, message.from, runId, partner.partnerId, partnerLang)
+      case "finish":
+        return await handleFinish(
+          scope,
+          whatsapp,
+          message.from,
+          runId,
+          partner.partnerId,
+          message.text,
+          intentExtras,
+          partnerLang
+        )
+      case "complete":
+        return await handleComplete(
+          scope,
+          whatsapp,
+          message.from,
+          runId,
+          partner.partnerId,
+          message.text,
+          intentExtras,
+          partnerLang
+        )
+      case "decline":
+        // Top-level decline (button tap or text "decline prod_run_…") →
+        // prompt for a reason. The reason reply loops back through the
+        // same handler and hits one of the handleDecline* cases.
+        return await handleDeclinePrompt(scope, whatsapp, message.from, runId)
+      case "media":
+        return await handleMediaPrompt(
+          scope,
+          whatsapp,
+          message.from,
+          runId,
+          partner.partnerId,
+          conversationId,
+          conversationMeta
+        )
+      case "decline_capacity":
+      case "decline_materials":
+      case "decline_scheduling":
+      case "decline_other":
+        return await handleDecline(
+          scope,
+          whatsapp,
+          message.from,
+          runId,
+          partner.partnerId,
+          action.replace("decline_", "") as DeclineReason,
+          partnerLang
+        )
+      case "view":
+      case "status":
+        return await handleViewStatus(scope, whatsapp, message.from, runId, partner.partnerId)
+      case "runs":
+      case "list":
+        return await handleListRuns(scope, whatsapp, message.from, partner.partnerId)
+      case "folders":
+        return await handleListFolders(scope, whatsapp, message.from, partner.partnerId)
+      case "open":
+        return await handleShowOpenWork(scope, whatsapp, message.from, partner.partnerId)
+      case "help":
+        await sendHelpMessage(scope, whatsapp, message.from, partner.partnerId, partner.adminName, conversationMeta.language)
+        return { handled: true, action: "help" }
+      default:
+        await sendPhrasedLine(scope, whatsapp, message.from, partnerLang, {
+          brief:
+            "We did not understand what they asked for. Say so without making them feel stupid, and tell them to reply with the word help to see what they can do. Write that word in English as 'help' because that is what the system listens for.",
+          fallback: `Unknown action: "${action}". Reply *help* to see available commands.`,
+        })
+        return { handled: true, action: "unknown", error: action }
+    }
+  } catch (e: any) {
+    console.error(`[whatsapp-handler] Action ${action} failed:`, e.message)
+    /*
+     * 🔴 `e.message` is deliberately NOT given to the model. It is internal
+     * text written for us, and it can carry a run id — which the model would
+     * then be free to paraphrase into a code that refers to nothing. The
+     * partner gets "something went wrong at our end, try again"; the detail
+     * stays in the log and in the fallback, where it is at least verbatim.
+     */
+    await sendPhrasedLine(scope, whatsapp, message.from, partnerLang, {
+      brief:
+        "Something went wrong at our end while doing what they asked — this is our fault, not theirs. Apologise briefly and tell them to try again or use the web portal.",
+      fallback: `⚠️ Action failed: ${e.message}\n\nPlease try again or use the web portal.`,
+    })
+    return { handled: true, action, runId, error: e.message }
+  }
+}
+
+/**
+ * Parse free-text commands like "accept prod_run_123" or "complete prod_run_123 100"
+ */
+type DeclineReason = "capacity" | "materials" | "scheduling" | "other"
+
+const DECLINE_REASON_TOKENS: DeclineReason[] = ["capacity", "materials", "scheduling", "other"]
+
+/**
+ * Decline button ids ship as `decline_<reason>_<runId>` where reason is one
+ * of a fixed set and runId may itself contain underscores (prod_run_…).
+ * The generic `split("_")` parser in the dispatcher would swallow the
+ * reason into the runId, so we match the reason explicitly here and
+ * return both. Plain `decline_<runId>` (tapped directly on assignment)
+ * returns action="decline" so the prompt flow fires.
+ */
+/**
+ * Did this tap come from a template QUICK_REPLY (title only, no run id)?
+ *
+ * The distinction matters because only that shape has to guess at the run —
+ * and only that shape should let the reply context override it.
+ */
+export function isTemplateTitleButton(
+  buttonReplyId: string | undefined,
+  buttonReplyTitle: string | undefined
+): boolean {
+  if (!buttonReplyId) return false
+  return Boolean(
+    (buttonReplyTitle && BUTTON_TITLE_ACTIONS[buttonReplyTitle]) ||
+      BUTTON_TITLE_ACTIONS[buttonReplyId]
+  )
+}
+
+/**
+ * PURE: the production run a stored `context_id` names.
+ *
+ * Outbound rows tag the run they are about. An assignment carries the bare id;
+ * a reminder carries `prod_run_…:reminder:2026-09-15`, because the send needs
+ * a distinct key per day to deduplicate. A run id never contains a colon, so
+ * the first colon is the boundary — more general than matching `:reminder:`
+ * alone, which would silently return a whole dedup key if the suffix scheme
+ * ever grows a second shape.
+ */
+export function runIdFromContextId(
+  contextType: string | null | undefined,
+  contextId: string | null | undefined
+): string | null {
+  if (contextType !== "production_run") return null
+  const raw = String(contextId ?? "")
+  if (!raw) return null
+  const colon = raw.indexOf(":")
+  const runId = colon >= 0 ? raw.slice(0, colon) : raw
+  return runId.startsWith("prod_run_") ? runId : null
+}
+
+/**
+ * Which run a template quick-reply is REALLY about (#2212).
+ *
+ * 🔴 `pending_run_id` is ONE SLOT per conversation. Meta forbids variables
+ * inside template QUICK_REPLY buttons, so the tap carries only its title and
+ * the run has to come from state we kept — and the next assignment template
+ * overwrites that state. Ksaman Naturals got two 69 seconds apart on
+ * 2026-09-09; every later tap, on either template, resolved to the newer run.
+ *
+ * But WhatsApp tells us what she tapped: the webhook carries `context.id`, the
+ * wa_message_id of the message the button belongs to, and our own outbound row
+ * for that message is tagged with the run. That is an exact answer where the
+ * slot is a guess, so it is preferred and the slot stays only as the fallback
+ * for taps that arrive with no reply context at all.
+ *
+ * ⚠️ Never throws. A lookup failure must fall back to the slot, not take down
+ * a partner's Accept.
+ */
+async function resolveRunFromReplyContext(
+  scope: any,
+  replyToWaMessageId: string | undefined
+): Promise<string | null> {
+  if (!replyToWaMessageId) return null
+  try {
+    const messagingService = scope.resolve(MESSAGING_MODULE) as any
+    const [row] = await messagingService.listMessagingMessages(
+      { wa_message_id: replyToWaMessageId },
+      { take: 1 }
+    )
+    if (!row) return null
+    return runIdFromContextId(row.context_type, row.context_id)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * PURE: which run action a button reply means, and on which run.
+ *
+ * Extracted because the consent gate and the normal command path both have to
+ * answer this and must never answer it differently. Before this existed only
+ * the command path could, and the gate — which runs FIRST on a partner's very
+ * first message — dropped the tap on the floor (#2211).
+ *
+ * Returns `runId: ""` when the reply is a template quick-reply and the
+ * conversation carries no `pending_run_id`; the caller decides what to say.
+ */
+export function resolveRunActionFromButton(
+  buttonReplyId: string,
+  buttonReplyTitle: string | undefined,
+  conversationMeta: Record<string, any>
+): { action: string; runId: string } | null {
+  if (!buttonReplyId) return null
+
+  const titleAction =
+    (buttonReplyTitle && BUTTON_TITLE_ACTIONS[buttonReplyTitle]) ||
+    BUTTON_TITLE_ACTIONS[buttonReplyId]
+  if (titleAction) {
+    /*
+     * 🔴 `pending_run_id` IS ONE SLOT ON THE CONVERSATION. Meta forbids
+     * variables inside template quick-reply buttons, so a tap carries the
+     * button's title and nothing else, and the run has to come from state we
+     * kept. Two assignment templates sent close together overwrite it, and
+     * every later tap then resolves to the last run sent.
+     *
+     * That is a real defect and it is NOT fixed here — see #2212. What this
+     * function does is make the read happen ONCE, at the moment the tap is
+     * seen, so nothing downstream re-reads a slot that has since moved on.
+     */
+    return {
+      action: titleAction,
+      runId:
+        typeof conversationMeta?.pending_run_id === "string"
+          ? conversationMeta.pending_run_id
+          : "",
+    }
+  }
+
+  const declineParsed = parseDeclineButtonId(buttonReplyId)
+  if (declineParsed) return declineParsed
+
+  // Native interactive ids: "accept_prod_run_123", "start_prod_run_123", …
+  const parts = buttonReplyId.split("_")
+  return {
+    action: parts[0],
+    // rejoined in case the run id itself contains underscores
+    runId: parts.slice(1).join("_"),
+  }
+}
+
+function parseDeclineButtonId(
+  buttonId: string
+): { action: string; runId: string } | null {
+  if (!buttonId.startsWith("decline_")) return null
+  const rest = buttonId.slice("decline_".length)
+
+  for (const reason of DECLINE_REASON_TOKENS) {
+    const prefix = `${reason}_`
+    if (rest.startsWith(prefix)) {
+      return {
+        action: `decline_${reason}`,
+        runId: rest.slice(prefix.length),
+      }
+    }
+  }
+
+  // No reason token → treat as the initial Decline button on an assignment
+  return { action: "decline", runId: rest }
+}
+
+function parseTextCommand(text: string): { action: string; runId: string; extra?: string } {
+  const trimmed = text.trim()
+  const lower = trimmed.toLowerCase()
+
+  // Check for simple keywords
+  if (lower === "help" || lower === "menu") {
+    return { action: "help", runId: "" }
+  }
+  // Greetings — treated as no specific action (nudge will handle)
+  if (lower === "hi" || lower === "hello" || lower === "hey") {
+    return { action: "", runId: "" }
+  }
+  // Multi-word matches must come before the single-word "list" → runs
+  // alias, otherwise "list folders" would resolve to action=runs.
+  if (
+    lower === "folders" ||
+    lower === "list folders" ||
+    lower === "my folders" ||
+    lower === "shared folders"
+  ) {
+    return { action: "folders", runId: "" }
+  }
+  if (
+    lower === "open" ||
+    lower === "todo" ||
+    lower === "open work" ||
+    lower === "what's open" ||
+    lower === "what is open" ||
+    lower === "pending"
+  ) {
+    return { action: "open", runId: "" }
+  }
+  if (lower === "runs" || lower === "list" || lower === "my runs") {
+    return { action: "runs", runId: "" }
+  }
+
+  // Pattern: <action> <run_id> [extra] — match against original to preserve run ID case
+  const match = trimmed.match(/^(accept|start|finish|complete|status|view|media|decline)\s+(prod_run_\S+)(.*)$/i)
+  if (match) {
+    return { action: match[1].toLowerCase(), runId: match[2], extra: match[3]?.trim() }
+  }
+
+  // Pattern: just a run ID
+  const runMatch = trimmed.match(/^(prod_run_\S+)$/i)
+  if (runMatch) {
+    return { action: "status", runId: runMatch[1] }
+  }
+
+  return { action: "", runId: "" }
+}
+
+/**
+ * The lifecycle acknowledgement a partner actually receives.
+ *
+ * Wraps `sendRunActions` so the three lifecycle hops read the same way: work
+ * out the facts, ask for a sentence, fall back to the constant. The language
+ * comes from the conversation the partner is in, which is where they chose it.
+ *
+ * ⚠️ Never throws. Phrasing sits AFTER the state change — the run has already
+ * moved by the time we are choosing words, so a failure here must degrade the
+ * wording and nothing else.
+ */
+async function sendRunAck(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  runId: string,
+  status: "in_progress" | "started" | "finished",
+  designName: string,
+  language: string,
+  extra?: { quantity?: number | null }
+): Promise<void> {
+  const intent =
+    status === "in_progress"
+      ? "accepted"
+      : status === "started"
+        ? "started"
+        : "finished"
+  try {
+    const body = await phraseRunAck(scope, {
+      intent,
+      facts: {
+        runId,
+        designName: designName || null,
+        quantity: extra?.quantity ?? null,
+      },
+      language,
+      // "" tells sendRunActions to keep the wording it already had.
+      fallback: "",
+    })
+    await whatsapp.sendRunActions(phone, runId, status, designName, body)
+  } catch {
+    await whatsapp.sendRunActions(phone, runId, status, designName)
+  }
+}
+
+async function handleAccept(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  runId: string,
+  partnerId: string,
+  /** The language the partner chose, for the acknowledgement wording. */
+  language = "en"
+): Promise<HandlerResult> {
+  const { result, errors } = await acceptProductionRunWorkflow(scope).run({
+    input: { production_run_id: runId, partner_id: partnerId },
+  })
+
+  if (errors?.length) {
+    const msg = errors.map((e: any) => e?.error?.message || String(e)).join(", ")
+    throw new Error(msg)
+  }
+
+  // Emit event
+  await emitEvent(scope, "production_run.accepted", { id: runId, production_run_id: runId, partner_id: partnerId, action: "accepted" })
+
+  // Send next-step buttons
+  const designName = await getDesignName(scope, runId)
+  await sendRunAck(scope, whatsapp, phone, runId, "in_progress", designName, language)
+
+  return { handled: true, action: "accept", runId }
+}
+
+/**
+ * One reply, in the partner's language, with the constant as the floor (#2216).
+ *
+ * Every call site keeps its original English string as `fallback`, so the flag
+ * being off — or the model being slow, absent or wrong — leaves the partner
+ * with exactly the message they got before. The id never goes to the model; it
+ * is appended by code via `tail`.
+ *
+ * ⚠️ Awaited, like the constant it replaces. The partner is waiting on their
+ * phone either way, and `phraseLine` owns the 3.5s ceiling; firing this off
+ * unawaited would reorder replies against the buttons that follow them.
+ */
+async function sendPhrasedLine(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  language: string,
+  spec: LineSpec
+): Promise<void> {
+  await whatsapp.sendTextMessage(phone, await phraseLine(scope, { spec, language }))
+}
+
+/**
+ * Partner tapped "📸 Add Media" on a started run. Verify the run is in a
+ * state where media is allowed (between start and complete), then stash a
+ * short-lived pointer on the conversation so the next inbound photo /
+ * video / document gets attached to this run automatically. The pointer
+ * expires in 10 minutes to prevent stray photos from landing on an old
+ * run context.
+ */
+async function handleMediaPrompt(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  runId: string,
+  partnerId: string,
+  conversationId: string | null,
+  conversationMeta: Record<string, any>
+): Promise<HandlerResult> {
+  const productionRunService = scope.resolve(PRODUCTION_RUNS_MODULE) as ProductionRunService
+  const run = await productionRunService.retrieveProductionRun(runId).catch(() => null) as any
+
+  const mediaLang = String(conversationMeta.language || "en")
+
+  if (!run) {
+    await sendPhrasedLine(scope, whatsapp, phone, mediaLang, {
+      brief:
+        "They tried to add a photo to a job we cannot find. Tell them we could not find it and they should check the job.",
+      tail: `*Run:* ${runId}`,
+      fallback: `Run ${runId} not found.`,
+    })
+    return { handled: true, action: "media_not_found", runId }
+  }
+  if (run.partner_id !== partnerId) {
+    await sendPhrasedLine(scope, whatsapp, phone, mediaLang, {
+      brief:
+        "They tried to add a photo to a job that belongs to someone else. Tell them plainly that this job is not theirs, without blaming them.",
+      tail: `*Run:* ${runId}`,
+      fallback: `Run ${runId} is not assigned to your account.`,
+    })
+    return { handled: true, action: "media_forbidden", runId }
+  }
+  if (run.status === "cancelled" || run.status === "completed") {
+    await sendPhrasedLine(scope, whatsapp, phone, mediaLang, {
+      brief:
+        "They tried to add a photo to a job that is already finished with. Tell them photos can no longer be added to it.",
+      facts: [{ label: "Job state", value: String(run.status) }],
+      tail: `*Run:* ${runId}`,
+      fallback: `Run ${runId} is ${run.status} — can't attach media anymore.`,
+    })
+    return { handled: true, action: "media_blocked_terminal", runId }
+  }
+  if (!run.started_at || run.status !== "in_progress") {
+    await sendPhrasedLine(scope, whatsapp, phone, mediaLang, {
+      brief:
+        "They tried to add a photo before starting the job. Tell them to tap the Start button first, then send the photo. Write the button name in English as '▶️ Start' because that is what it says on their screen.",
+      tail: `*Run:* ${runId}`,
+      fallback: `Run ${runId} hasn't been started yet. Tap *▶️ Start* first, then add media.`,
+    })
+    return { handled: true, action: "media_blocked_not_started", runId }
+  }
+
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString()
+  await updateConversationMetadata(scope, conversationId, {
+    ...conversationMeta,
+    active_media_run_id: runId,
+    active_media_expires_at: expiresAt,
+  })
+
+  const designName = await getDesignName(scope, runId).catch(() => runId)
+  await sendPhrasedLine(scope, whatsapp, phone, mediaLang, {
+    brief:
+      "We are ready for their photo. Tell them to send the photo, video or document in their next message and it will be attached to this job, and that they have ten minutes.",
+    facts: [
+      { label: "Design", value: designName },
+      { label: "Minutes they have", value: 10 },
+    ],
+    tail: `*Run:* ${runId}`,
+    fallback: `📸 Ready — send your photo, video, or document in the next message and I'll attach it to run ${runId} (${designName}).\n\n_Window: 10 minutes._`,
+  })
+  return { handled: true, action: "media_prompt", runId }
+}
+
+/**
+ * Prompt the partner with the decline-reason list. Fires on the initial
+ * `decline_<runId>` tap (or `decline prod_run_…` text) before we make the
+ * backend call, so the partner's "why" is captured and admin has context.
+ */
+async function handleDeclinePrompt(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  runId: string
+): Promise<HandlerResult> {
+  const designName = await getDesignName(scope, runId).catch(() => undefined)
+  await whatsapp.sendDeclineReasons(phone, runId, designName)
+  return { handled: true, action: "decline_prompt", runId }
+}
+
+/**
+ * Commit a partner decline to the backend once a reason has been picked.
+ * Uses the WhatsApp-mapped reason token (`materials` / `scheduling` / …)
+ * and maps to the API's stricter enum (`materials_unavailable`, etc.) to
+ * keep the button ids short while the backend stays explicit.
+ */
+async function handleDecline(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  runId: string,
+  partnerId: string,
+  reason: DeclineReason,
+  /** The language the partner chose, for any wording we generate (#2216). */
+  language = "en"
+): Promise<HandlerResult> {
+  // Short token → backend enum
+  const reasonMap: Record<DeclineReason, string> = {
+    capacity: "capacity",
+    materials: "materials_unavailable",
+    scheduling: "scheduling_conflict",
+    other: "other",
+  }
+  const apiReason = reasonMap[reason]
+
+  // Reuse the partner HTTP route so we share guard logic (ownership,
+  // started_at check, task cancellation). Going through the route also
+  // emits `production_run.declined` + `production_run.cancelled` for
+  // downstream subscribers.
+  const productionRunService = scope.resolve(PRODUCTION_RUNS_MODULE) as ProductionRunService
+  const run = await productionRunService.retrieveProductionRun(runId).catch(() => null) as any
+  if (!run) {
+    await sendPhrasedLine(scope, whatsapp, phone, language, {
+      brief:
+        "They tried to decline a job we cannot find. Tell them we could not find it.",
+      tail: `*Run:* ${runId}`,
+      fallback: `Run ${runId} not found.`,
+    })
+    return { handled: true, action: "decline_not_found", runId }
+  }
+  if (run.partner_id !== partnerId) {
+    await sendPhrasedLine(scope, whatsapp, phone, language, {
+      brief:
+        "They tried to decline a job that belongs to someone else. Tell them plainly that this job is not theirs, without blaming them.",
+      tail: `*Run:* ${runId}`,
+      fallback: `Run ${runId} is not assigned to your account.`,
+    })
+    return { handled: true, action: "decline_forbidden", runId }
+  }
+  if (run.status === "cancelled") {
+    await sendPhrasedLine(scope, whatsapp, phone, language, {
+      brief:
+        "They tried to decline a job that is already cancelled. Tell them there is nothing left to do here.",
+      tail: `*Run:* ${runId}`,
+      fallback: `Run ${runId} is already cancelled.`,
+    })
+    return { handled: true, action: "decline_already", runId }
+  }
+  if (run.started_at) {
+    await sendPhrasedLine(scope, whatsapp, phone, language, {
+      brief:
+        "They tried to decline a job they have already started. Tell them it cannot be declined now and they should contact the admin to stop it mid-production.",
+      tail: `*Run:* ${runId}`,
+      fallback: `Can't decline ${runId} — work has already started. Please contact admin to cancel mid-production.`,
+    })
+    return { handled: true, action: "decline_blocked_started", runId }
+  }
+
+  await productionRunService.updateProductionRuns({
+    id: runId,
+    status: "cancelled",
+    cancelled_at: new Date(),
+    cancelled_reason: `Declined by partner (${apiReason})`,
+  })
+
+  // Cancel linked tasks — mirrors the HTTP decline route at
+  // src/api/partners/production-runs/[id]/decline/route.ts:113-128. Without
+  // this, tasks stay "pending" on the partner's task list after decline
+  // and cause confusion (ghost work items for a run that's already gone).
+  try {
+    const query = scope.resolve(ContainerRegistrationKeys.QUERY) as any
+    const taskService = scope.resolve(TASKS_MODULE) as any
+    const { data: runData } = await query.graph({
+      entity: "production_runs",
+      fields: ["tasks.id", "tasks.status"],
+      filters: { id: runId },
+    })
+    const tasks = runData?.[0]?.tasks || []
+    for (const task of tasks) {
+      if (task.status !== "completed" && task.status !== "cancelled") {
+        await taskService.updateTasks({ id: task.id, status: "cancelled" })
+      }
+    }
+  } catch (e: any) {
+    console.error(
+      `[whatsapp-decline] Failed to cancel linked tasks for ${runId}:`,
+      e.message
+    )
+  }
+
+  // Fire both events (mirrors the HTTP route) so admin feed + existing
+  // cancellation subscribers see this.
+  await emitEvent(scope, "production_run.declined", {
+    id: runId,
+    production_run_id: runId,
+    partner_id: partnerId,
+    action: "declined",
+    reason: apiReason,
+  })
+  await emitEvent(scope, "production_run.cancelled", {
+    id: runId,
+    production_run_id: runId,
+    partner_id: partnerId,
+    action: "cancelled",
+    notes: `Declined by partner (${apiReason})`,
+  })
+
+  await sendPhrasedLine(scope, whatsapp, phone, language, {
+    brief:
+      "They declined this job and gave a reason. Acknowledge it without pressure and tell them the admin has been told.",
+    facts: [{ label: "Reason they gave", value: apiReason.replace(/_/g, " ") }],
+    tail: `*Run:* ${runId}`,
+    fallback: `✖️ Run ${runId} declined (${apiReason.replace(/_/g, " ")}). Admin has been notified.`,
+  })
+  return { handled: true, action: `decline_${reason}`, runId }
+}
+
+async function handleStart(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  runId: string,
+  partnerId: string,
+  language = "en"
+): Promise<HandlerResult> {
+  /**
+   * 🔴 The tap runs the SAME workflow as the partner portal's Start button.
+   *
+   * It used to stamp `started_at` on the row and emit the event by hand, which
+   * skipped two things the workflow does: the design's move out of
+   * `Conceptual` (→ `In_Development`, or `Sample_Production` for a sample
+   * run), and the unified work-order's in_progress mirror. Partners start
+   * work from WhatsApp, so on prod a started run left its design reading
+   * "Conceptual" (Ksaman's Pashmina Inspired Tunic, started 2026-09-09).
+   *
+   * The workflow's own validation is the policy the portal uses
+   * (`assertCanStartWork`: in_progress, not already started) plus the
+   * partner-ownership check, so a tap that was refused before is refused
+   * now, with the same MedusaError types the caller already handles.
+   */
+  const { result } = await startProductionRunWorkflow(scope).run({
+    input: { production_run_id: runId, partner_id: partnerId },
+  })
+  const run = (result as any)?.run as any
+
+  const designName = await getDesignName(scope, runId)
+  await sendRunAck(scope, whatsapp, phone, runId, "started", designName, language, {
+    quantity: run?.quantity ?? null,
+  })
+
+  return { handled: true, action: "start", runId }
+}
+
+async function handleFinish(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  runId: string,
+  partnerId: string,
+  rawText?: string,
+  extras?: { quantity?: number | null; notes?: string | null } | null,
+  language = "en"
+): Promise<HandlerResult> {
+  const productionRunService: ProductionRunService = scope.resolve(PRODUCTION_RUNS_MODULE)
+  const run = await productionRunService.retrieveProductionRun(runId).catch(() => null) as any
+
+  if (!run || run.partner_id !== partnerId) {
+    throw new MedusaError(MedusaError.Types.NOT_FOUND, `Production run ${runId} not found`)
+  }
+
+  if (run.status !== "in_progress") {
+    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, `Run must be in_progress. Current: ${run.status}`)
+  }
+  if (!run.started_at) {
+    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Run must be started first")
+  }
+
+  // Scrap + notes now come from the intent query planner (structured model
+  // output). The regex parser below is only a degraded fallback for when no
+  // model was reachable.
+  const { scrap, notes, finishNote } = extras
+    ? {
+        scrap: extras.quantity ?? null,
+        notes: extras.notes ?? null,
+        finishNote:
+          extras.quantity != null || extras.notes
+            ? [
+                extras.quantity != null ? `Scrap: ${extras.quantity}` : null,
+                extras.notes ? `Notes: ${extras.notes}` : null,
+              ]
+                .filter(Boolean)
+                .join(". ") + "."
+            : null,
+      }
+    : parseFinishExtras(rawText)
+
+  /**
+   * #2248 — the SAME workflow the partner portal runs. The hand-written
+   * version here set `finished_at`, moved the design to a different status
+   * than the portal did, swallowed every lifecycle-signal error and never
+   * mirrored the unified work order. A guard the workflow enforces (terminal
+   * run, not started) now throws into the dispatcher's catch, as Start does.
+   */
+  await finishProductionRunWorkflow(scope).run({
+    input: {
+      production_run_id: runId,
+      partner_id: partnerId,
+      ...(finishNote ? { notes: finishNote } : {}),
+    },
+  })
+
+  // Scrap is a WhatsApp-only input the finish workflow has no field for.
+  if (scrap != null) {
+    await productionRunService.updateProductionRuns({ id: runId, rejected_quantity: scrap })
+  }
+
+  const designName = await getDesignName(scope, runId)
+  await sendRunAck(scope, whatsapp, phone, runId, "finished", designName, language, {
+    quantity: run?.quantity ?? null,
+  })
+
+  // Extra feedback to the partner when they logged scrap/notes so they
+  // see their input landed.
+  if (scrap != null || notes) {
+    const parts: string[] = []
+    if (scrap != null) parts.push(`scrap recorded: ${scrap}`)
+    if (notes) parts.push(`notes saved`)
+    await whatsapp.sendTextMessage(phone, `📝 ${parts.join(" · ")}.`)
+  }
+
+  return { handled: true, action: "finish", runId }
+}
+
+/**
+ * Extract scrap quantity + freeform notes from the finish text command.
+ * Returns a normalized `finishNote` string to persist on the run so admins
+ * see a consistent shape regardless of how the partner typed it.
+ */
+function parseFinishExtras(
+  rawText?: string
+): { scrap: number | null; notes: string | null; finishNote: string | null } {
+  if (!rawText) return { scrap: null, notes: null, finishNote: null }
+
+  // scrap:5 / scrap 5 / rejected:5 / defect:5
+  const scrapMatch = rawText.match(/\b(?:scrap|rejected|defect)s?[:\s]+(\d+)/i)
+  // notes:anything (takes everything until end or before another keyword)
+  const notesMatch = rawText.match(/\bnotes?[:\s]+(.+?)(?:\s+(?:scrap|rejected|defects?)[:\s]|$)/i)
+
+  const scrap = scrapMatch ? parseInt(scrapMatch[1], 10) : null
+  const notes = notesMatch ? notesMatch[1].trim().slice(0, 500) : null
+
+  if (scrap == null && !notes) {
+    return { scrap: null, notes: null, finishNote: null }
+  }
+
+  const pieces: string[] = []
+  if (scrap != null) pieces.push(`Scrap: ${scrap}`)
+  if (notes) pieces.push(`Notes: ${notes}`)
+  return { scrap, notes, finishNote: pieces.join(". ") + "." }
+}
+
+async function handleComplete(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  runId: string,
+  partnerId: string,
+  rawText?: string,
+  extras?: { quantity?: number | null; rejectedQuantity?: number | null } | null,
+  /** The language the partner chose, for any wording we generate (#2216). */
+  language = "en"
+): Promise<HandlerResult> {
+  const productionRunService: ProductionRunService = scope.resolve(PRODUCTION_RUNS_MODULE)
+  const run = await productionRunService.retrieveProductionRun(runId).catch(() => null) as any
+
+  if (!run || run.partner_id !== partnerId) {
+    throw new MedusaError(MedusaError.Types.NOT_FOUND, `Production run ${runId} not found`)
+  }
+
+  if (run.status !== "in_progress") {
+    throw new MedusaError(MedusaError.Types.NOT_ALLOWED, `Run must be in_progress. Current: ${run.status}`)
+  }
+  if (!run.finished_at) {
+    // If not finished, prompt to finish first or ask for completion prompt
+    const designName = await getDesignName(scope, runId)
+    await whatsapp.sendCompletionPrompt(phone, runId, designName)
+    return { handled: true, action: "complete_prompt", runId }
+  }
+
+  // Produced/rejected quantities come from the intent query planner (structured
+  // model output); the regex block below is only a degraded fallback.
+  let producedQuantity: number | undefined
+  let rejectedQuantity: number | undefined
+
+  if (extras) {
+    producedQuantity = extras.quantity ?? undefined
+    rejectedQuantity = extras.rejectedQuantity ?? undefined
+  } else if (rawText) {
+    // "complete prod_run_123 produced:100 rejected:5" or "complete prod_run_123 100"
+    const producedMatch = rawText.match(/produced[:\s]+(\d+)/i)
+    const rejectedMatch = rawText.match(/rejected[:\s]+(\d+)/i)
+    const simpleMatch = rawText.match(/\b(\d+)\s*$/)
+
+    if (producedMatch) producedQuantity = parseInt(producedMatch[1])
+    else if (simpleMatch) producedQuantity = parseInt(simpleMatch[1])
+    if (rejectedMatch) rejectedQuantity = parseInt(rejectedMatch[1])
+  }
+
+  /**
+   * The workflow refuses a run with pieces owed and no count (its output
+   * check), so ask for the count rather than failing: the partner tapped
+   * Complete, they did not do anything wrong.
+   */
+  if (producedQuantity == null && Number(run.quantity ?? 0) > 0) {
+    const designName = await getDesignName(scope, runId)
+    await whatsapp.sendCompletionPrompt(phone, runId, designName)
+    return { handled: true, action: "complete_prompt", runId }
+  }
+
+  /**
+   * #2248 — the SAME workflow the partner portal runs. The hand-written
+   * version only flipped the status: it never banked the finished goods,
+   * reserved them for an order, closed the run's tasks, wrote the design's
+   * cost, cascaded a parent run or mirrored the unified work order. Its
+   * refusals (a shortfall with no reason, a partner with no stock location)
+   * now throw into the dispatcher's catch instead of being skipped silently.
+   */
+  await completeProductionRunWorkflow(scope).run({
+    input: {
+      production_run_id: runId,
+      partner_id: partnerId,
+      ...(producedQuantity != null ? { produced_quantity: producedQuantity } : {}),
+      ...(rejectedQuantity != null ? { rejected_quantity: rejectedQuantity } : {}),
+    },
+  })
+
+  const qtyInfo = producedQuantity != null
+    ? `\n*Produced:* ${producedQuantity}${rejectedQuantity ? ` | *Rejected:* ${rejectedQuantity}` : ""}`
+    : ""
+
+  /*
+   * The last thing a partner hears about a job they have just finished, and
+   * the one place in this file where the old constant was not merely plain but
+   * slightly cold: "*Production Run Completed!*" is a status line, not a thank
+   * you. The numbers stay in the tail, written by code — they are what the
+   * partner is paid on.
+   */
+  await sendPhrasedLine(scope, whatsapp, phone, language, {
+    brief:
+      "They have completed this job and the admin has been told. Confirm it and thank them.",
+    facts: [
+      ...(producedQuantity != null
+        ? [{ label: "Pieces they made", value: producedQuantity }]
+        : []),
+      ...(rejectedQuantity
+        ? [{ label: "Pieces rejected", value: rejectedQuantity }]
+        : []),
+    ],
+    tail: `*Run:* ${runId}${qtyInfo}`,
+    fallback: `✅ *Production Run Completed!*\n*Run:* ${runId}${qtyInfo}\n\nThe admin has been notified. Thank you!`,
+  })
+
+  return { handled: true, action: "complete", runId }
+}
+
+async function handleViewStatus(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  runId: string,
+  partnerId: string
+): Promise<HandlerResult> {
+  const productionRunService: ProductionRunService = scope.resolve(PRODUCTION_RUNS_MODULE)
+  const run = await productionRunService.retrieveProductionRun(runId).catch(() => null) as any
+
+  if (!run || run.partner_id !== partnerId) {
+    await whatsapp.sendTextMessage(phone, `Production run ${runId} not found.`)
+    return { handled: true, action: "view", runId, error: "not_found" }
+  }
+
+  const designName = await getDesignName(scope, runId)
+
+  // If actionable, send with buttons
+  if (["sent_to_partner", "in_progress"].includes(run.status) && run.status !== "completed") {
+    if (run.status === "sent_to_partner") {
+      await whatsapp.sendProductionRunAssignment(phone, {
+        designName,
+        runId,
+        runType: run.run_type || "production",
+        quantity: run.quantity,
+      })
+    } else {
+      const displayStatus = run.finished_at ? "finished" : run.started_at ? "started" : "in_progress"
+      await whatsapp.sendRunActions(phone, runId, displayStatus, designName)
+    }
+  } else {
+    const lines = [
+      `📋 *Production Run:* ${runId}`,
+      `*Design:* ${designName}`,
+      `*Status:* ${run.status}`,
+      `*Type:* ${run.run_type || "production"}`,
+    ]
+    if (run.quantity) lines.push(`*Quantity:* ${run.quantity}`)
+    if (run.produced_quantity != null) lines.push(`*Produced:* ${run.produced_quantity}`)
+    if (run.rejected_quantity) lines.push(`*Rejected:* ${run.rejected_quantity}`)
+    await whatsapp.sendTextMessage(phone, lines.join("\n"))
+  }
+
+  return { handled: true, action: "view", runId }
+}
+
+async function handleListRuns(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  partnerId: string
+): Promise<HandlerResult> {
+  const query = scope.resolve("query") as any
+  const { data: runs } = await query.graph({
+    entity: "production_runs",
+    fields: ["id", "status", "run_type", "design_id", "quantity"],
+    filters: {
+      partner_id: partnerId,
+      status: { $in: ["sent_to_partner", "in_progress"] },
+    },
+    pagination: { skip: 0, take: 20 },
+  })
+
+  const enriched: Array<{ id: string; designName: string; status: string; runType: string }> = []
+  for (const run of runs || []) {
+    const designName = await getDesignNameFromDesignId(scope, run.design_id)
+    enriched.push({
+      id: run.id,
+      designName,
+      status: run.status,
+      runType: run.run_type || "production",
+    })
+  }
+
+  await whatsapp.sendRunsSummary(phone, enriched)
+  return { handled: true, action: "list" }
+}
+
+/**
+ * Send consent request on first interaction — partner must agree before we process commands.
+ */
+async function sendConsentRequest(
+  whatsapp: WhatsAppService,
+  phone: string,
+  adminName: string
+): Promise<void> {
+  await whatsapp.sendInteractiveMessage(phone, {
+    type: "button",
+    body: {
+      text:
+        `Hi ${adminName}! Welcome to JYT Commerce on WhatsApp.\n\n` +
+        `Before we get started, please note that this conversation ` +
+        `will be recorded for quality assurance and order management purposes.\n\n` +
+        `Do you agree to continue?`,
+    },
+    footer: { text: "You can manage runs from the web portal at any time." },
+    action: {
+      buttons: [
+        { type: "reply", reply: { id: "consent_agree", title: "I Agree" } },
+        { type: "reply", reply: { id: "consent_decline", title: "No Thanks" } },
+      ],
+    },
+  })
+}
+
+/**
+ * Ask the partner to choose their preferred language.
+ */
+async function sendLanguageSelection(
+  whatsapp: WhatsAppService,
+  phone: string
+): Promise<void> {
+  await whatsapp.sendInteractiveMessage(phone, {
+    type: "button",
+    body: {
+      text: `कृपया अपनी भाषा चुनें / Please choose your language:`,
+    },
+    action: {
+      buttons: [
+        { type: "reply", reply: { id: "lang_hi", title: "हिंदी" } },
+        { type: "reply", reply: { id: "lang_en", title: "English" } },
+      ],
+    },
+  })
+}
+
+/**
+ * After consent + language selection, send a one-time welcome with available commands.
+ */
+async function sendWelcomeCommands(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  partnerId: string,
+  adminName: string,
+  lang: string = "en"
+): Promise<void> {
+  const query = scope.resolve("query") as any
+  const { data: runs } = await query.graph({
+    entity: "production_runs",
+    fields: ["id"],
+    filters: {
+      partner_id: partnerId,
+      status: { $in: ["sent_to_partner", "in_progress"] },
+    },
+    pagination: { skip: 0, take: 1 },
+  })
+
+  const activeCount = runs?.length || 0
+
+  if (lang === "hi") {
+    await whatsapp.sendTextMessage(
+      phone,
+      `बहुत अच्छा ${adminName}, आप तैयार हैं!\n\n` +
+      `आप यह कर सकते हैं:\n` +
+      `• *runs* — अपने सक्रिय प्रोडक्शन रन देखें${activeCount > 0 ? ` (${activeCount})` : ""}\n` +
+      `• *accept <run_id>* — असाइन किया गया रन स्वीकार करें\n` +
+      `• *start <run_id>* — रन पर काम शुरू करें\n` +
+      `• *finish <run_id>* — रन को पूरा हुआ चिह्नित करें\n` +
+      `• *complete <run_id> <qty>* — उत्पादित मात्रा के साथ पूरा करें\n` +
+      `• *status <run_id>* — रन विवरण देखें\n` +
+      `• *help* — यह संदेश दिखाएं\n\n` +
+      `_या बटन दबाकर तुरंत कार्रवाई करें।_`
+    )
+  } else {
+    await whatsapp.sendTextMessage(
+      phone,
+      `Great, you're all set ${adminName}!\n\n` +
+      `Here's what you can do:\n` +
+      `• *runs* — List your active production runs${activeCount > 0 ? ` (${activeCount})` : ""}\n` +
+      `• *accept <run_id>* — Accept an assigned run\n` +
+      `• *start <run_id>* — Start working on a run\n` +
+      `• *finish <run_id>* — Mark a run as finished\n` +
+      `• *complete <run_id> <qty>* — Complete with produced quantity\n` +
+      `• *status <run_id>* — View run details\n` +
+      `• *help* — Show this message\n\n` +
+      `_Or tap buttons in messages to take quick actions._`
+    )
+  }
+}
+
+/**
+ * Show help when partner explicitly asks for it (already onboarded).
+ */
+async function handleListFolders(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  partnerId: string,
+): Promise<HandlerResult> {
+  const folders = await listPartnerSharedFolders(scope, partnerId).catch(() => [])
+
+  if (!folders.length) {
+    await whatsapp.sendTextMessage(
+      phone,
+      `📁 No shared folders yet. Send a photo and we'll save it for you, or reach out to the team to get a folder shared with your account.`,
+    )
+    return { handled: true, action: "folders" }
+  }
+
+  const lines = folders.slice(0, 15).map((f, i) => {
+    const fileNote =
+      f.fileCount > 0
+        ? ` (${f.fileCount} ${f.fileCount === 1 ? "file" : "files"})`
+        : " (empty)"
+    return `${i + 1}. *${f.name}*${fileNote}`
+  })
+  const more = folders.length > 15 ? `\n…and ${folders.length - 15} more.` : ""
+  const tail = `\n\n_Send any photo and we'll save it to your most-recent folder._`
+
+  await whatsapp.sendTextMessage(
+    phone,
+    `📁 *Your shared folders (${folders.length}):*\n\n${lines.join("\n")}${more}${tail}`,
+  )
+  return { handled: true, action: "folders" }
+}
+
+async function handleShowOpenWork(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  partnerId: string,
+): Promise<HandlerResult> {
+  const work = await getPartnerOpenWork(scope, partnerId).catch(
+    () =>
+      ({
+        pendingRuns: [],
+        pendingPayments: [],
+      }) as Awaited<ReturnType<typeof getPartnerOpenWork>>,
+  )
+
+  if (!work.pendingRuns.length && !work.pendingPayments.length) {
+    await whatsapp.sendTextMessage(
+      phone,
+      `✅ All clear. Nothing pending right now.`,
+    )
+    return { handled: true, action: "open" }
+  }
+
+  const lines: string[] = []
+  if (work.pendingRuns.length) {
+    const awaitingAcceptance = work.pendingRuns.filter((r) => !r.accepted).length
+    const inProgress = work.pendingRuns.filter((r) => r.accepted).length
+    lines.push(
+      `*🛠 Production runs:* ${work.pendingRuns.length}` +
+        (awaitingAcceptance ? ` (${awaitingAcceptance} awaiting acceptance)` : "") +
+        (inProgress ? ` (${inProgress} in progress)` : ""),
+    )
+    for (const r of work.pendingRuns.slice(0, 5)) {
+      const tag = r.accepted ? "in progress" : "awaiting accept"
+      const name = r.designName ? ` — ${r.designName}` : ""
+      lines.push(`   • ${r.id}${name} _(${tag})_`)
+    }
+    if (work.pendingRuns.length > 5) {
+      lines.push(`   …and ${work.pendingRuns.length - 5} more — reply *runs*.`)
+    }
+  }
+
+  if (work.pendingPayments.length) {
+    if (lines.length) lines.push("")
+    lines.push(`*💳 Payment requests:* ${work.pendingPayments.length}`)
+    for (const p of work.pendingPayments.slice(0, 5)) {
+      const amt =
+        p.totalAmount != null
+          ? `${p.currency ? p.currency + " " : "₹"}${Number(p.totalAmount).toLocaleString("en-IN")}`
+          : "amount pending"
+      lines.push(`   • ${p.id} — ${amt} _(${p.status})_`)
+    }
+    if (work.pendingPayments.length > 5) {
+      lines.push(`   …and ${work.pendingPayments.length - 5} more.`)
+    }
+  }
+
+  await whatsapp.sendTextMessage(phone, `📋 *Open work:*\n\n${lines.join("\n")}`)
+  return { handled: true, action: "open" }
+}
+
+async function sendHelpMessage(
+  scope: any,
+  whatsapp: WhatsAppService,
+  phone: string,
+  partnerId: string,
+  adminName: string,
+  lang?: string
+): Promise<void> {
+  const query = scope.resolve("query") as any
+  const { data: runs } = await query.graph({
+    entity: "production_runs",
+    fields: ["id"],
+    filters: {
+      partner_id: partnerId,
+      status: { $in: ["sent_to_partner", "in_progress"] },
+    },
+    pagination: { skip: 0, take: 1 },
+  })
+
+  const activeCount = runs?.length || 0
+
+  if (lang === "hi") {
+    await whatsapp.sendTextMessage(
+      phone,
+      `*उपलब्ध कमांड:*\n` +
+      `• *open* — आपका लंबित कार्य देखें\n` +
+      `• *runs* — सक्रिय प्रोडक्शन रन${activeCount > 0 ? ` (${activeCount})` : ""}\n` +
+      `• *folders* — साझा फ़ोल्डर देखें\n` +
+      `• *accept <run_id>* — असाइन किया गया रन स्वीकार करें\n` +
+      `• *start <run_id>* — रन पर काम शुरू करें\n` +
+      `• *finish <run_id>* — रन को पूरा हुआ चिह्नित करें\n` +
+      `• *complete <run_id> <qty>* — उत्पादित मात्रा के साथ पूरा करें\n` +
+      `• *status <run_id>* — रन विवरण देखें\n` +
+      `• *help* — यह संदेश दिखाएं\n\n` +
+      `_कोई भी फोटो भेजें — यह आपके साझा फ़ोल्डर में सेव हो जाएगा।_`
+    )
+  } else {
+    await whatsapp.sendTextMessage(
+      phone,
+      `*Available Commands:*\n` +
+      `• *open* — See your pending work (runs + payments)\n` +
+      `• *runs* — List active production runs${activeCount > 0 ? ` (${activeCount})` : ""}\n` +
+      `• *folders* — List your shared folders\n` +
+      `• *accept <run_id>* — Accept an assigned run\n` +
+      `• *start <run_id>* — Start working on a run\n` +
+      `• *finish <run_id>* — Mark a run as finished\n` +
+      `• *complete <run_id> <qty>* — Complete with produced quantity\n` +
+      `• *status <run_id>* — View run details\n` +
+      `• *help* — Show this message\n\n` +
+      `_Send any photo — it'll be saved to your shared folder automatically._`
+    )
+  }
+}
+
+/**
+ * Update conversation metadata (consent state, onboarding, etc.)
+ */
+/**
+ * Re-read a conversation's metadata from the database.
+ *
+ * 🔴 The in-scope `conversationMeta` is a snapshot taken at the top of the
+ * handler, and this same handler may have written to the conversation since —
+ * the photo batch is recorded a few lines before the acknowledgement batch.
+ * Spreading the stale snapshot over a fresh write silently DROPS whatever the
+ * earlier write added; the update succeeds and the photo is simply not in the
+ * batch. A metadata blob is one value, so two writers of different keys still
+ * clobber each other.
+ *
+ * Returns `{}` rather than throwing: a failed read must not turn a saved
+ * photograph into an error.
+ */
+async function readConversationMetadata(
+  scope: any,
+  conversationId: string | null
+): Promise<Record<string, any>> {
+  if (!conversationId) return {}
+  try {
+    const messagingService = scope.resolve(MESSAGING_MODULE) as any
+    const conv = await messagingService.retrieveMessagingConversation(conversationId)
+    return (conv?.metadata ?? {}) as Record<string, any>
+  } catch (e: any) {
+    console.warn("[whatsapp-handler] Failed to read conversation metadata:", e.message)
+    return {}
+  }
+}
+
+async function updateConversationMetadata(
+  scope: any,
+  conversationId: string | null,
+  metadata: Record<string, any>
+): Promise<void> {
+  if (!conversationId) return
+  try {
+    const messagingService = scope.resolve(MESSAGING_MODULE) as any
+    await messagingService.updateMessagingConversations({
+      id: conversationId,
+      metadata,
+    })
+  } catch (e: any) {
+    console.warn("[whatsapp-handler] Failed to update conversation metadata:", e.message)
+  }
+}
+
+// Helpers
+
+/**
+ * Inspect a partner's production runs and return the single run that's
+ * currently *actively in progress* (status === "in_progress" AND
+ * `started_at` is set). Used by the media upload fallback — if the
+ * partner sends a photo without tapping "Add Media" first, auto-attach
+ * only when there's no ambiguity.
+ *
+ * Returns:
+ *   - { runId, reason: "single" }   — exactly one match, safe to auto-route
+ *   - { runId: null, reason: "none" } — partner has nothing in progress
+ *   - { runId: null, reason: "multiple" } — needs explicit choice, caller
+ *     should prompt
+ */
+async function findSinglePartnerActiveRun(
+  scope: any,
+  partnerId: string
+): Promise<{ runId: string | null; reason: "none" | "single" | "multiple" }> {
+  try {
+    const productionRunService: ProductionRunService = scope.resolve(PRODUCTION_RUNS_MODULE)
+    const [runs] = await productionRunService.listAndCountProductionRuns(
+      { partner_id: partnerId, status: "in_progress" as any },
+      { take: 50 }
+    )
+    const started = (runs as any[] | null | undefined ?? []).filter(
+      (r: any) => r && r.started_at
+    )
+    if (started.length === 1) {
+      return { runId: started[0].id, reason: "single" }
+    }
+    if (started.length === 0) {
+      return { runId: null, reason: "none" }
+    }
+    return { runId: null, reason: "multiple" }
+  } catch {
+    return { runId: null, reason: "none" }
+  }
+}
+
+/**
+ * Ask System One which of the partner's started runs a photo is for (see
+ * whatsapp-photo-run-match.ts). `decided: false` means it could not answer —
+ * off, unconfigured, nothing to judge from — and the caller keeps its old
+ * rule. Never throws: a photo must be saved whatever the classifier does.
+ */
+async function matchPhotoToRun(
+  scope: any,
+  partnerId: string,
+  fileUrl: string,
+  caption: string | null
+): Promise<{ decided: boolean; runId: string | null; seen: string | null }> {
+  try {
+    const productionRunService: ProductionRunService = scope.resolve(PRODUCTION_RUNS_MODULE)
+    const [runs] = await productionRunService.listAndCountProductionRuns(
+      { partner_id: partnerId, status: "in_progress" as any },
+      { take: 20 }
+    )
+    const started = ((runs as any[]) ?? []).filter((r) => r?.started_at)
+    const candidates: CandidateRun[] = []
+    for (const r of started) {
+      candidates.push({ id: r.id, design: await getDesignName(scope, r.id) })
+    }
+    const seen = (await describePhotoForContext(scope, fileUrl).catch(() => null))?.text ?? null
+    if (!candidates.length || (!seen && !caption)) return { decided: false, runId: null, seen }
+
+    const { state, questions } = buildPhotoRunQuestion(candidates, { seen, caption })
+    const result = await classify(scope, { scope: PHOTO_RUN_SCOPE, state, questions, timeoutMs: 15_000 })
+    if (!result) return { decided: false, runId: null, seen }
+    return { decided: true, runId: decidePhotoRun(result.answers.run, candidates).runId, seen }
+  } catch {
+    return { decided: false, runId: null, seen: null }
+  }
+}
+
+async function getDesignName(scope: any, runId: string): Promise<string> {
+  try {
+    const productionRunService: ProductionRunService = scope.resolve(PRODUCTION_RUNS_MODULE)
+    const run = await productionRunService.retrieveProductionRun(runId) as any
+    if (run?.design_id) {
+      return getDesignNameFromDesignId(scope, run.design_id)
+    }
+  } catch { /* fall through */ }
+  return "Unknown Design"
+}
+
+async function getDesignNameFromDesignId(scope: any, designId: string | null): Promise<string> {
+  if (!designId) return "Unknown Design"
+  try {
+    const designService = scope.resolve("design") as any
+    const design = await designService.retrieveDesign(designId)
+    return design?.name || design?.title || designId
+  } catch {
+    return designId
+  }
+}
+
+/**
+ * The partner's open runs, in the shape the intent query planner consumes —
+ * id + design name + status, so the model can match a design name to its
+ * run id instead of inventing one.
+ */
+async function openRunsForIntent(
+  scope: any,
+  partnerId: string
+): Promise<Array<{ run_id: string; design_name: string | null; status: string }>> {
+  const work = await getPartnerOpenWork(scope, partnerId).catch(() => ({
+    pendingRuns: [] as any[],
+    pendingPayments: [] as any[],
+  }))
+  return (work.pendingRuns ?? []).map((r: any) => ({
+    run_id: r.id,
+    design_name: r.designName ?? null,
+    status: r.status,
+  }))
+}
+
+async function emitEvent(scope: any, name: string, data: Record<string, any>): Promise<void> {
+  try {
+    const { Modules } = await import("@medusajs/framework/utils")
+    const eventService = scope.resolve(Modules.EVENT_BUS) as any
+    await eventService.emit([{ name, data }])
+  } catch { /* non-fatal */ }
+}
+
+/**
+ * Match two phone numbers accounting for country code prefix variations.
+ */
+
+/**
+ * Persist an inbound WhatsApp message to the messaging module.
+ * Resolves or creates a conversation for the partner+phone pair.
+ * Returns conversation info including metadata for consent/onboarding checks.
+ */
+async function persistInboundMessage(
+  scope: any,
+  message: IncomingMessage,
+  partnerId: string,
+  senderName: string,
+  senderPlatformId: string | null = null
+): Promise<{ id: string; metadata: Record<string, any> | null; isNew: boolean }> {
+  const messagingService = scope.resolve(MESSAGING_MODULE) as any
+
+  // Normalize incoming phone: digits only
+  const incomingDigits = message.from.replace(/[^0-9]/g, "")
+
+  // Find existing conversation for this partner by matching phone numbers
+  // WhatsApp sends digits-only (393933806825), but conversations may store
+  // with "+" prefix (+393933806825) or other formatting
+  const [allConversations] = await messagingService.listAndCountMessagingConversations(
+    { partner_id: partnerId },
+    { take: 50 }
+  )
+
+  const existing = (allConversations || []).find((conv: any) => {
+    const convDigits = (conv.phone_number || "").replace(/[^0-9]/g, "")
+    return phoneMatches(convDigits, incomingDigits)
+  })
+
+  let conversationId: string
+  let metadata: Record<string, any> | null = null
+  let isNew = false
+
+  if (existing) {
+    conversationId = existing.id
+    metadata = existing.metadata || null
+    const needsReactivate = existing.status === "archived"
+    // Stamp the sender platform once, if we know it and the conversation
+    // doesn't already have one. Don't overwrite — an admin may have pinned
+    // a different sender deliberately.
+    const needsSenderStamp =
+      senderPlatformId && !existing.default_sender_platform_id
+    if (needsReactivate || needsSenderStamp) {
+      await messagingService.updateMessagingConversations({
+        id: existing.id,
+        ...(needsReactivate ? { status: "active" } : {}),
+        ...(needsSenderStamp ? { default_sender_platform_id: senderPlatformId } : {}),
+      })
+    }
+  } else {
+    const conv = await messagingService.createMessagingConversations({
+      partner_id: partnerId,
+      phone_number: message.from,
+      title: senderName,
+      status: "active",
+      ...(senderPlatformId ? { default_sender_platform_id: senderPlatformId } : {}),
+    })
+    conversationId = conv.id
+    isNew = true
+  }
+
+  // Determine message type
+  let messageType = "text"
+  if (message.type === "interactive") messageType = "interactive"
+  else if (["image", "video", "document", "audio"].includes(message.type)) messageType = "media"
+
+  // For media messages, use caption if available — don't show "[image]" noise
+  const content = message.text
+    || message.buttonReplyTitle
+    || (messageType === "media" ? "" : `[${message.type}]`)
+
+  // Resolve reply-to if this message is a reply to another
+  let replyToId: string | null = null
+  let replyToSnapshot: Record<string, any> | null = null
+
+  if (message.replyToWaMessageId) {
+    try {
+      const [replyMsg] = await messagingService.listMessagingMessages(
+        { wa_message_id: message.replyToWaMessageId },
+        { take: 1 }
+      )
+      if (replyMsg) {
+        replyToId = replyMsg.id
+        replyToSnapshot = {
+          content: replyMsg.content?.substring(0, 200) || "",
+          sender_name: replyMsg.sender_name,
+          direction: replyMsg.direction,
+          media_url: replyMsg.media_url,
+          media_mime_type: replyMsg.media_mime_type,
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  await messagingService.createMessagingMessages({
+    conversation_id: conversationId,
+    direction: "inbound",
+    sender_name: senderName,
+    content,
+    message_type: messageType as any,
+    wa_message_id: message.messageId,
+    status: "delivered",
+    media_url: message.mediaUrl || null,
+    media_mime_type: message.mediaMimeType || null,
+    /**
+     * 🔴 Stored BECAUSE `media_url` above is Meta's `lookaside.fbsbx.com` URL
+     * at this point, and that URL 401s without a bearer token and expires
+     * about five minutes from now. If the download later in this handler does
+     * not happen, the id is the only thing that can still fetch the bytes —
+     * Meta keeps them ~30 days. Ten photographs were nearly lost for want of
+     * this one column.
+     */
+    media_id: message.mediaId || null,
+    /**
+     * The sender's own name for the file, verbatim.
+     *
+     * 🔴 Null for an `image` — Meta carries a filename only on a `document`.
+     * That is why "send them as files, not photos" is an instruction with a
+     * consequence: the same picture attached the other way arrives nameless,
+     * and nothing about the row says a name was ever lost.
+     */
+    media_filename: message.mediaFilename || null,
+    reply_to_id: replyToId,
+    reply_to_snapshot: replyToSnapshot,
+  })
+
+  // Update conversation timestamp and bump unread count
+  await messagingService.updateMessagingConversations({
+    id: conversationId,
+    last_message_at: new Date(),
+    unread_count: (existing?.unread_count || 0) + 1,
+  })
+
+  return { id: conversationId, metadata, isNew }
+}
+
+/**
+ * Persist an outbound WhatsApp message (bot reply) to the messaging module.
+ */
+async function persistOutboundMessage(
+  scope: any,
+  conversationId: string,
+  content: string,
+  waMessageId?: string
+): Promise<void> {
+  const messagingService = scope.resolve(MESSAGING_MODULE) as any
+
+  await messagingService.createMessagingMessages({
+    conversation_id: conversationId,
+    direction: "outbound",
+    sender_name: "JYT Bot",
+    content,
+    message_type: "text",
+    wa_message_id: waMessageId || null,
+    status: "sent",
+  })
+
+  await messagingService.updateMessagingConversations({
+    id: conversationId,
+    last_message_at: new Date(),
+  })
+
+  // Notification Module audit row was already written by WhatsAppService
+  // sendRequest() — the wrapper at the top of handleIncomingMessage passes
+  // a default audit context to the underlying send.
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Language preference persistence
+//
+// When a partner taps "हिंदी" / "English" on the onboarding language
+// prompt, we used to store the choice only in conversation.metadata.
+// Outbound visual flows (assignment, payment-status, reminders) look at
+// partner.admins[*].preferred_language to pick the template language,
+// and that field stayed NULL — so Hindi-selected partners still got
+// every template in English.
+//
+// Strategy:
+//   1. Find the admin whose phone matches the inbound message.from.
+//   2. If none matches (admins commonly have no phone on file), apply
+//      to every admin on the partner so we don't silently miss.
+//   3. Use updatePartnerAdmins for each match.
+//
+// Failures are non-fatal — the conversation.metadata.language write
+// already gave us the correct handler-side behaviour; this is purely a
+// hardening pass on the outbound side.
+async function persistPartnerAdminLanguage(
+  scope: any,
+  partnerId: string,
+  fromPhone: string,
+  lang: string
+): Promise<void> {
+  try {
+    const partnerService = scope.resolve(PARTNER_MODULE) as any
+    const [partners] = await partnerService.listAndCountPartners(
+      { id: partnerId },
+      { take: 1, relations: ["admins"] }
+    )
+    const partner = partners?.[0]
+    if (!partner) return
+
+    const normalizedFrom = (fromPhone || "").replace(/[^0-9]/g, "")
+    const admins = Array.isArray(partner.admins) ? partner.admins : []
+
+    // Phone-matched admin wins. Fallback: apply to all admins so we
+    // don't depend on phone being set (it commonly isn't).
+    const matched = admins.find((a: any) => {
+      if (!a?.phone) return false
+      const norm = String(a.phone).replace(/[^0-9]/g, "")
+      return !!norm && (norm === normalizedFrom || norm.endsWith(normalizedFrom) || normalizedFrom.endsWith(norm))
+    })
+
+    const targets = matched ? [matched] : admins
+    await Promise.all(
+      targets
+        .filter((a: any) => a && a.id && a.preferred_language !== lang)
+        .map((a: any) =>
+          partnerService.updatePartnerAdmins({ id: a.id, preferred_language: lang })
+        )
+    )
+  } catch (e: any) {
+    console.warn("[whatsapp-handler] Failed to persist partner admin language:", e?.message)
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// W5 — product create Confirm / Cancel button handler
+//
+// W4's notify_partner step sends a buttons message after a DRAFT product
+// is auto-created from the partner's WhatsApp photo + caption. The
+// buttons are wa_pc_confirm:<product_id> / wa_pc_cancel:<product_id>.
+// On tap, we mutate the product directly here — no separate workflow
+// indirection. Edit is deferred to v2 (would need conversation-metadata
+// state tracking for the next text-message intent).
+//
+// Idempotency: if the partner taps Confirm twice the second tap is a
+// no-op with a friendly message. If they tap Cancel after Confirm
+// (product already PUBLISHED), refuse so the live storefront product
+// isn't accidentally deleted.
+/**
+ * The partner's answer to "I've added these to <design> — is that what
+ * they're for?" (sent by jobs/send-media-ack-batches.ts when WE picked the run).
+ *
+ * ✅ Yes keeps the files where they are. ❌ No takes them off the run and
+ * queues them for the one-per-burst "what are these for?" question, so a wrong
+ * guess ends in a question rather than a photo filed against the wrong work.
+ */
+async function handleMediaContextReply(
+  scope: any,
+  whatsapp: WhatsAppService,
+  message: IncomingMessage,
+  partnerId: string,
+  conversationId: string | null
+): Promise<HandlerResult> {
+  const meta = await readConversationMetadata(scope, conversationId)
+  const ctx = meta.pending_media_context as
+    | { run_id: string; design: string | null; message_ids: string[] }
+    | undefined
+  const what = ctx?.design ? `*${ctx.design}*` : "that run"
+
+  if (!ctx?.run_id || !conversationId) {
+    // Answered twice, or the question is gone: nothing to undo.
+    await whatsapp.sendTextMessage(message.from, "👍 Noted.")
+    return { handled: true, action: "media_context_none" }
+  }
+
+  if (message.buttonReplyId === MEDIA_CTX_YES) {
+    await updateConversationMetadata(scope, conversationId, { ...meta, pending_media_context: undefined })
+    await whatsapp.sendTextMessage(message.from, `👍 Thanks — they're on ${what}.`)
+    return { handled: true, action: "media_context_confirmed", runId: ctx.run_id }
+  }
+
+  const messagingService = scope.resolve(MESSAGING_MODULE) as any
+  const rows: any[] = ctx.message_ids.length
+    ? await messagingService.listMessagingMessages({ id: ctx.message_ids }, { take: ctx.message_ids.length }).catch(() => [])
+    : []
+  const urls = rows.map((r) => r?.media_url).filter((u): u is string => typeof u === "string" && !!u)
+  await detachMediaFromRunDesign(scope, { runId: ctx.run_id, partnerId, fileUrls: urls })
+
+  // The inbox must stop showing them against the run as well.
+  for (const r of rows) {
+    if (r?.context_type === "production_run" && r?.context_id === ctx.run_id) {
+      await messagingService
+        .updateMessagingMessages({ id: r.id, context_type: null, context_id: null })
+        .catch(() => {})
+    }
+  }
+
+  let batch = meta.pending_photo_batch as any
+  for (const r of rows) batch = recordPhoto(batch, r.id, new Date(), null)
+  await updateConversationMetadata(scope, conversationId, {
+    ...meta,
+    pending_media_context: undefined,
+    ...(rows.length ? { pending_photo_batch: batch } : {}),
+  })
+
+  await whatsapp.sendTextMessage(
+    message.from,
+    `Okay — I've taken ${rows.length === 1 ? "it" : "them"} off ${what}. I'll ask you what ${rows.length === 1 ? "it's" : "they're"} for in a moment.`
+  )
+  return { handled: true, action: "media_context_rejected", runId: ctx.run_id }
+}
+
+async function handleProductCreateButtonReply(
+  scope: any,
+  whatsapp: any,
+  message: IncomingMessage,
+  partner: { partnerId: string; adminName: string }
+): Promise<HandlerResult> {
+  const raw = (message.buttonReplyId || "").replace(/^wa_pc_/, "")
+  const colon = raw.indexOf(":")
+  const action = colon >= 0 ? raw.slice(0, colon) : raw
+  const productId = colon >= 0 ? raw.slice(colon + 1) : ""
+
+  if (!productId) {
+    await whatsapp.sendTextMessage(
+      message.from,
+      "Sorry — I couldn't tell which product this button is for."
+    )
+    return { handled: true, action: "product_create_button_no_id" }
+  }
+
+  const { Modules } = await import("@medusajs/framework/utils")
+  const productService = scope.resolve(Modules.PRODUCT) as any
+
+  let product: any
+  try {
+    product = await productService.retrieveProduct(productId)
+  } catch {
+    await whatsapp.sendTextMessage(
+      message.from,
+      "That product is no longer available."
+    )
+    return { handled: true, action: "product_create_button_not_found" }
+  }
+
+  // Sent to the PARTNER → link to the partner portal, not the admin app (#707).
+  const portalLink = buildPartnerProductUrl(productId)
+
+  if (action === "confirm") {
+    if (product.status === "published") {
+      await whatsapp.sendTextMessage(
+        message.from,
+        `Already published: *${product.title}*\n${portalLink}`
+      )
+      return { handled: true, action: "product_create_confirm_already_published" }
+    }
+    try {
+      await productService.updateProducts({ id: productId, status: "published" })
+    } catch (e: any) {
+      await whatsapp.sendTextMessage(
+        message.from,
+        `Couldn't publish *${product.title}* — ${e?.message || "unknown error"}. Try again from your portal: ${portalLink}`
+      )
+      return { handled: true, action: "product_create_confirm_failed" }
+    }
+    await whatsapp.sendTextMessage(
+      message.from,
+      `✅ Published: *${product.title}*\n${portalLink}`
+    )
+    return { handled: true, action: "product_create_confirmed" }
+  }
+
+  if (action === "cancel") {
+    if (product.status === "published") {
+      // Don't auto-delete live products. Partner can still delete from
+      // admin if they really mean it.
+      await whatsapp.sendTextMessage(
+        message.from,
+        `*${product.title}* is already published. Open your portal to unpublish or delete:\n${portalLink}`
+      )
+      return { handled: true, action: "product_create_cancel_after_publish" }
+    }
+    try {
+      await productService.deleteProducts([productId])
+    } catch (e: any) {
+      await whatsapp.sendTextMessage(
+        message.from,
+        `Couldn't remove *${product.title}* — ${e?.message || "unknown error"}.`
+      )
+      return { handled: true, action: "product_create_cancel_failed" }
+    }
+    await whatsapp.sendTextMessage(
+      message.from,
+      `🗑️ Cancelled — *${product.title}* removed.`
+    )
+    return { handled: true, action: "product_create_cancelled" }
+  }
+
+  await whatsapp.sendTextMessage(
+    message.from,
+    "Unrecognised action — open your portal to manage this product."
+  )
+  return { handled: true, action: "product_create_button_unknown" }
+}
+
+/**
+ * One consent prompt per burst. Ten photographs produced nine identical
+ * prompts; a window this size collapses any realistic burst into one.
+ */
+const CONSENT_PROMPT_COOLDOWN_MS = 10 * 60 * 1000
+
+/**
+ * Actions worth remembering across the consent gate.
+ *
+ * Deliberately the run-moving ones only. `view`/`status`/`media` are reads or
+ * need a follow-up anyway, and replaying a read days later would answer a
+ * question nobody is still asking.
+ */
+const REPLAYABLE_PRE_CONSENT_ACTIONS = new Set([
+  "accept",
+  "start",
+  "decline",
+])
+
+/**
+ * How long a pre-consent tap still speaks for the partner. Two days: long
+ * enough to cover a tap on Friday and consent on Monday morning, short enough
+ * that nobody is signed up to work they chose a week ago.
+ */
+const PRE_CONSENT_ACTION_TTL_MS = 2 * 24 * 60 * 60 * 1000
+
+/** Why a piece of media is sitting undownloaded. One value today. */
+const MEDIA_PENDING_CONSENT = "awaiting_consent"
+
+/**
+ * Mark an inbound media row as "arrived, deliberately not downloaded".
+ *
+ * Matched on `wa_message_id` rather than "the newest row in this conversation".
+ * 🔑 That newest-row shortcut is what the post-download update uses, and it is
+ * a race: ten photographs arriving in two seconds mean the newest row is
+ * frequently NOT the one being handled, so the update lands on the wrong row or
+ * on none. Meta's message id is the only stable handle.
+ */
+async function markMediaPendingConsent(
+  scope: any,
+  conversationId: string | null,
+  waMessageId?: string
+): Promise<void> {
+  if (!conversationId || !waMessageId) return
+  try {
+    const messagingService = scope.resolve(MESSAGING_MODULE) as any
+    const [row] = await messagingService.listMessagingMessages(
+      { wa_message_id: waMessageId },
+      { take: 1 }
+    )
+    if (!row) return
+    await messagingService.updateMessagingMessages({
+      id: row.id,
+      media_pending_reason: MEDIA_PENDING_CONSENT,
+    })
+  } catch (e: any) {
+    const logger: any = scope.resolve(ContainerRegistrationKeys.LOGGER)
+    logger?.warn?.(
+      `[whatsapp] could not mark media pending for ${waMessageId}: ${e?.message ?? e}`
+    )
+  }
+}
+
+/**
+ * Download everything that was held back while consent was outstanding.
+ *
+ * 🔴 The stale `media_url` on the row is NOT passed to the downloader. That URL
+ * is Meta's, it 401s, and its `ext=` expiry is long past — handing it over
+ * would make every recovery fail while looking like it tried. Passing the
+ * `media_id` alone makes the helper mint a FRESH url, which is the entire
+ * reason the id is stored.
+ *
+ * Returns how many are still outstanding so the caller only clears the
+ * conversation marker when the queue is genuinely empty. A partial recovery
+ * that cleared the flag would strand the remainder silently.
+ */
+async function collectMediaPendingConsent(
+  scope: any,
+  input: { conversationId: string | null; partnerId: string; partnerName: string }
+): Promise<{ collected: number; failed: number; remaining: number }> {
+  const logger: any = scope.resolve(ContainerRegistrationKeys.LOGGER)
+  if (!input.conversationId) return { collected: 0, failed: 0, remaining: 0 }
+
+  const messagingService = scope.resolve(MESSAGING_MODULE) as any
+  let pending: any[] = []
+  try {
+    pending = await messagingService.listMessagingMessages(
+      {
+        conversation_id: input.conversationId,
+        media_pending_reason: MEDIA_PENDING_CONSENT,
+      },
+      { take: 50, order: { created_at: "ASC" } }
+    )
+  } catch (e: any) {
+    logger?.warn?.(`[whatsapp] pending-media lookup failed: ${e?.message ?? e}`)
+    return { collected: 0, failed: 0, remaining: 0 }
+  }
+
+  let collected = 0
+  let failed = 0
+
+  for (const row of pending) {
+    if (!row?.media_id) {
+      // Nothing can be done for this one — it predates the id column. Clear
+      // the marker so it stops being retried on every inbound message, and say
+      // so on the row rather than leaving it looking merely un-processed.
+      await messagingService
+        .updateMessagingMessages({
+          id: row.id,
+          media_pending_reason: "unrecoverable_no_media_id",
+        })
+        .catch(() => {})
+      failed++
+      continue
+    }
+
+    try {
+      const saved = await downloadAndSaveWhatsAppMedia(scope, {
+        mediaId: row.media_id,
+        // mediaUrl deliberately omitted — see the header.
+        mimeType: row.media_mime_type || undefined,
+        partnerId: input.partnerId,
+        partnerName: input.partnerName,
+      })
+
+      if (!saved?.fileUrl) {
+        failed++
+        continue
+      }
+
+      await messagingService.updateMessagingMessages({
+        id: row.id,
+        media_url: saved.fileUrl,
+        media_mime_type: saved.mimeType,
+        media_pending_reason: null,
+      })
+      collected++
+    } catch (e: any) {
+      failed++
+      logger?.warn?.(
+        `[whatsapp] could not collect pending media ${row.media_id}: ${e?.message ?? e}`
+      )
+    }
+  }
+
+  if (collected || failed) {
+    logger?.info?.(
+      `[whatsapp] consent-pending media for ${input.conversationId}: collected ${collected}, failed ${failed}`
+    )
+  }
+
+  return { collected, failed, remaining: Math.max(0, pending.length - collected) }
+}

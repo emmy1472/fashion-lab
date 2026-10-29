@@ -1,0 +1,114 @@
+import { MedusaError } from "@medusajs/framework/utils"
+
+import { queueSpine } from "./queues"
+import { designSpine } from "./spines/design"
+import { productionRunSpine } from "./spines/production-run"
+import { partnerSpine } from "./spines/partner"
+import { socialPlatformSpine } from "./spines/social-platform"
+import { websiteSpine } from "./spines/website"
+import type { Graph, NodeItem, SpineDescriptor } from "./types"
+
+/**
+ * Every spine the graph can centre on.
+ *
+ * Adding one is a single entry here plus its resolver — no new route, no new
+ * admin hook, and the MCP `get_entity_neighbours` tool picks it up for free.
+ * That is the whole point of the registry: the surfaces consume the resolver,
+ * so they cannot drift apart as spines are added.
+ *
+ * Partner joined as the second spine and cost exactly that: one entry here
+ * and a resolver. No route, no hook, no client change — which is the claim the
+ * registry was making all along, now tested by something other than its author.
+ */
+export const SPINES: Record<string, SpineDescriptor> = {
+  [designSpine.key]: designSpine,
+  [partnerSpine.key]: partnerSpine,
+  [websiteSpine.key]: websiteSpine,
+  [socialPlatformSpine.key]: socialPlatformSpine,
+  /*
+   * The production-run spine (#2111 S2). It is the first spine centred on a
+   * unit of WORK rather than on a record someone owns, and the only one whose
+   * most important edges point UPSTREAM — at what the run is waiting for.
+   */
+  [productionRunSpine.key]: productionRunSpine,
+  /*
+   * The queue spine is centred on a POPULATION, not a record: its `id` is the
+   * queue's name. It sits in this same registry on purpose — every surface
+   * downstream (route, hook, canvas, drawer) is spine-agnostic, so a cohort
+   * board needs no route and no client change of its own.
+   */
+  [queueSpine.key]: queueSpine,
+}
+
+export const SPINE_KEYS = Object.keys(SPINES)
+
+/**
+ * Resolve one entity's neighbours.
+ *
+ * 🔴 An unknown spine is a 404 with the valid keys named, not an empty graph.
+ * An empty graph is indistinguishable from "this entity genuinely has no
+ * neighbours", which is precisely the confusion this whole view exists to
+ * remove.
+ */
+export const resolveGraph = async (
+  scope: any,
+  spineKey: string,
+  id: string
+): Promise<Graph> => {
+  const spine = SPINES[spineKey]
+  if (!spine) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      `Unknown graph spine "${spineKey}". Known spines: ${SPINE_KEYS.join(", ")}`
+    )
+  }
+  const graph = await spine.resolve({ scope, id })
+  /*
+   * Attached HERE rather than in each spine's `build()` call, so a spine that
+   * gains an item resolver cannot forget to advertise it — a graph whose
+   * `itemNodes` disagreed with its `items()` would render drawers that fetch
+   * nothing, or nodes whose rows exist and are never asked for.
+   */
+  /*
+   * 🔴 The spine's declaration wins, and the RESOLVER's is the fallback — it
+   * used to be `?? []`, which silently discarded anything a resolver set.
+   * A record spine knows its listable nodes up front and declares them here.
+   * A QUEUE cannot: its nodes are `design:<id>`, one per member of a cohort
+   * that does not exist until the graph is built, so it fills `itemNodes` from
+   * the graph it just resolved. Overwriting that with `[]` left every node in
+   * the queue with a drawer that would never ask for its rows — and, because
+   * "no members" and "not loaded" look identical on screen, it would have
+   * looked like a queue whose designs simply had no candidate products.
+   */
+  return { ...graph, itemNodes: spine.itemNodes ?? graph.itemNodes ?? [] }
+}
+
+/**
+ * The members behind one aggregate node.
+ *
+ * 🔴 An unknown SPINE is a 404, exactly as above — but an unknown NODE is an
+ * empty list, not an error. The two are genuinely different questions. A bad
+ * spine key means the caller asked for something that does not exist; a node
+ * with no item resolver means "this aggregate has no rows worth listing",
+ * which is a legitimate answer for the nodes that are a single record
+ * (`product`, `revision`) or a pure count (`palette`). Raising here would turn
+ * every one of those into a red panel in the drawer.
+ */
+export const resolveGraphItems = async (
+  scope: any,
+  spineKey: string,
+  id: string,
+  nodeKey: string
+): Promise<NodeItem[]> => {
+  const spine = SPINES[spineKey]
+  if (!spine) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      `Unknown graph spine "${spineKey}". Known spines: ${SPINE_KEYS.join(", ")}`
+    )
+  }
+  if (!spine.items) {
+    return []
+  }
+  return spine.items({ scope, id }, nodeKey)
+}

@@ -1,0 +1,21 @@
+{
+  "id": "florent",
+  "name": "Florent flat cap",
+  "code": [
+    "Quentin Felix",
+    "Joost De Cock"
+  ],
+  "description": "A FreeSewing pattern for a flat cap",
+  "design": "Quentin Felix",
+  "difficulty": 3,
+  "tags": [
+    "accessories",
+    "hats"
+  ],
+  "techniques": [
+    "curved-seam"
+  ],
+  "version": "4.2.0",
+  "pkg": "@freesewing/florent",
+  "collection": true
+}

@@ -1,0 +1,24 @@
+---
+title: Yaml
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.yaml.mjs'
+import { YamlExample } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Yaml** component family provides the following components:
+
+- [Yaml](#yaml)
+
+### Yaml
+
+<ComponentDocs docs={jsdoc.jsdocYaml} example={YamlExample} />
+
+</DocusaurusDoc>

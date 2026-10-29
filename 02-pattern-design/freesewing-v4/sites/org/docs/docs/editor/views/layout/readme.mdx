@@ -1,0 +1,70 @@
+---
+title: Pattern Layout (layout view)
+---
+import { PrintIcon, ResetIcon } from '@freesewing/react/components/Icon'
+
+#### Purpose of the layout view
+
+The _layout_ view allows you to customize the way the individual patterns parts
+are laid out on the page(s).
+
+:::tip
+Placing pattern parts on page to use as little paper as possible -- aka
+[the bin packing problem](https://en.wikipedia.org/wiki/Bin_packing_problem) -- is
+one of those challenges where humans are (still) much better at than computers.
+
+Every time you tweak your pattern, FreeSewing needs to re-draft it, calculate
+the new layout, and render it on screen. For this reason, we wrote a packing
+algorithm that prioritizes speed.<br />
+As a result, it is often trivial for a human to come up with a more optimized layout.
+This view lets you accomplish this without requiring any additional software.
+
+If you want more control over your pattern, you can also [export it as SVG](#export)
+and use [Inkscape](https://inkscape.org/) to edit it locally.
+:::
+
+#### Layout of the layout view
+
+<Tabs>
+  <TabItem value="desktop" label="On Desktop">
+    ![A screenshot of the FreeSewing Editor in inspect view, on a
+    desktop](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/c404cef0-c56f-48f0-52fa-1bcf0fc23800/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in inspect view, on a desktop._
+    </div>
+  </TabItem>
+  <TabItem value="tablet" label="On Tablet">
+    ![A screenshot of the FreeSewing Editor in inspect view, on a
+    tablet](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/f6786677-4da1-46d7-d644-067825179e00/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in inspect view, on a tablet._
+    </div>
+  </TabItem>
+  <TabItem value="mobile" label="On Mobile">
+    ![A screenshot of the FreeSewing Editor in inspect view on
+    mobile](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/83492873-d65a-4e87-4a62-abeaeedfbe00/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in inspect view, on mobile._
+    </div>
+  </TabItem>
+</Tabs>
+
+- The layout view has the [ribbon area](#areas) at the top where we will find:
+  - [The **view** menu](#view-menu) (not view-specific, it is the one with the **Pattern Layout** label)
+  - The view-specific menus, including:
+    - The [**layout** menu](#layout-menu) (highlighted in yellow)
+    - The [**layout** icons](#layout-menu) (highlighted in green)
+- In [the **main working area**](#areas), we have:
+  - [The pattern area](#areas) on the left (highlighted in yellow)
+  - [The **aside** area](#areas) on the right, holding:
+    - The [Layout menu](#layout-menu) (highlighted in yellow, same as in [the ribbon area](#areas))
+
+#### Layout icons
+
+The _layout icons_ in the ribbon area hold:
+
+- A **summary** about the number of pages required for the current layout
+- A **Apply Layout** button to apply the current layout
+- A <PrintIcon className="tw:w-5 tw:h-5 tw:inline" /> icon that takes you to the [export view](#export)
+- A <ResetIcon className="tw:w-5 tw:h-5 tw:inline" /> icon the resets the layout changes
+

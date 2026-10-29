@@ -1,0 +1,156 @@
+// @file   dialogsplinepath.h
+// @author Douglas S Caskey
+// @date   26 Jun, 2024
+//
+// @copyright
+// Copyright (C) 2017 - 2024 Seamly, LLC
+// https://github.com/fashionfreedom/seamly2d
+//
+// @brief
+// Seamly2D is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Seamly2D is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Seamly2D. If not, see <http://www.gnu.org/licenses/>.
+
+//-----------------------------------------------------------------------------
+//  @file   dialogsplinepath.h
+//  @author Roman Telezhynskyi <dismine(at)gmail.com>
+//  @date   15 Nov, 2013
+//
+//  @copyright
+//  Copyright (C) 2013 Valentina project.
+//  This source code is part of the Valentina project, a pattern making
+//  program, whose allow create and modeling patterns of clothing.
+//  <https://bitbucket.org/dismine/valentina> All Rights Reserved.
+//
+//  Valentina is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published
+//  by the Free Software Foundation, either version 3 of the License,
+//  or (at your option) any later version.
+//
+//  Valentina is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Valentina.  If not, see <http://www.gnu.org/licenses/>.
+//-----------------------------------------------------------------------------
+
+#ifndef DIALOGSPLINEPATH_H
+#define DIALOGSPLINEPATH_H
+
+#include <qcompilerdetection.h>
+#include <QMetaObject>
+#include <QObject>
+#include <QSet>
+#include <QString>
+#include <QVector>
+#include <QtGlobal>
+
+#include "../vgeometry/vsplinepath.h"
+#include "../vmisc/def.h"
+#include "dialogtool.h"
+
+namespace Ui
+{
+    class DialogSplinePath;
+}
+
+/**
+ * @brief The DialogSplinePath class dialog for ToolSplinePath. Help create spline path and edit option.
+ */
+class DialogSplinePath : public DialogTool
+{
+    Q_OBJECT
+public:
+                 DialogSplinePath(const VContainer *data, const quint32 &toolId, QWidget *parent = nullptr);
+    virtual     ~DialogSplinePath() override;
+
+    VSplinePath  GetPath() const;
+    void         SetPath(const VSplinePath &value);
+
+    QString      getPenStyle() const;
+    void         setPenStyle(const QString &value);
+
+    QString      getLineWeight() const;
+    void         setLineWeight(const QString &value);
+
+    QString      getLineColor() const;
+    void         setLineColor(const QString &value);
+
+public slots:
+    virtual void ChosenObject(quint32 id, const SceneObject &type) override;
+    virtual void ShowDialog(bool click) override;
+    void         PathUpdated(const VSplinePath &path);
+
+protected:
+    virtual void ShowVisualization() override;
+    virtual void SaveData() override;
+    virtual void CheckState() final;
+    virtual void closeEvent(QCloseEvent *event) override;
+
+private slots:
+    void         PointChanged(int row);
+    void         currentPointChanged(int index);
+
+    void         Angle1Changed();
+    void         Angle2Changed();
+    void         Length1Changed();
+    void         Length2Changed();
+
+    void         FXAngle1();
+    void         FXAngle2();
+    void         FXLength1();
+    void         FXLength2();
+
+private:
+    Q_DISABLE_COPY(DialogSplinePath)
+
+    /** @brief ui keeps information about user interface */
+    Ui::DialogSplinePath *ui;
+
+    /** @brief path spline path */
+    VSplinePath   path;
+
+    qint32        newDuplicate;
+
+    /** @brief flagAngle1 true if value of first angle is correct */
+    QVector<bool> flagAngle1;
+    QVector<bool> flagAngle2;
+    QVector<bool> flagLength1;
+    QVector<bool> flagLength2;
+
+    void          EvalAngle1();
+    void          EvalAngle2();
+    void          EvalLength1();
+    void          EvalLength2();
+
+    void          NewItem(const VSplinePoint &point);
+    void          DataPoint(const VSplinePoint &p);
+    void          SavePath();
+    QSet<quint32> AllIds() const;
+    bool          IsPathValid() const;
+    VSplinePath   ExtractPath() const;
+    void          ShowPointIssue(const QString &pName);
+};
+
+//---------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief GetPath return spline path
+ * @return path
+ */
+inline VSplinePath DialogSplinePath::GetPath() const
+{
+    return path;
+}
+
+#endif // DIALOGSPLINEPATH_H

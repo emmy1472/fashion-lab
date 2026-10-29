@@ -1,0 +1,179 @@
+"use server"
+
+import { sdk } from "@lib/config"
+import { sortProducts } from "@lib/util/sort-products"
+import { HttpTypes } from "@medusajs/types"
+import { SortOptions } from "@modules/store/components/refinement-list/sort-products"
+import { getAuthHeaders, getCacheOptions } from "./cookies"
+import { getRegion, retrieveRegion } from "./regions"
+
+export const listProducts = async ({
+  pageParam = 1,
+  queryParams,
+  countryCode,
+  regionId,
+}: {
+  pageParam?: number
+  queryParams?: HttpTypes.FindParams & HttpTypes.StoreProductListParams
+  countryCode?: string
+  regionId?: string
+}): Promise<{
+  response: { products: HttpTypes.StoreProduct[]; count: number }
+  nextPage: number | null
+  queryParams?: HttpTypes.FindParams & HttpTypes.StoreProductListParams
+}> => {
+  if (!countryCode && !regionId) {
+    throw new Error("Country code or region ID is required")
+  }
+
+  const limit = queryParams?.limit || 12
+  const _pageParam = Math.max(pageParam, 1)
+  const offset = _pageParam === 1 ? 0 : (_pageParam - 1) * limit
+
+  let region: HttpTypes.StoreRegion | undefined | null
+
+  if (countryCode) {
+    region = await getRegion(countryCode)
+  } else {
+    region = await retrieveRegion(regionId!)
+  }
+
+  if (!region) {
+    return {
+      response: { products: [], count: 0 },
+      nextPage: null,
+    }
+  }
+
+  const headers = {
+    ...(await getAuthHeaders()),
+  }
+
+  const next = {
+    ...(await getCacheOptions("products")),
+  }
+
+  return sdk.client
+    .fetch<{ products: HttpTypes.StoreProduct[]; count: number }>(
+      `/store/products`,
+      {
+        method: "GET",
+        query: {
+          limit,
+          offset,
+          region_id: region?.id,
+          // #729: keep designs/partners/tasks/raw-materials (v1 task-list
+          // render still depends on tasks). The v2 story bits — people,
+          // energy/consumption AND production runs — all come from the dedicated
+          // /store/custom/designs/:id/production-story route (see
+          // getProductionStory() in lib/data/designs.ts), NOT this product
+          // fetch: `persons`/`consumption_logs` are module links, not ORM
+          // relations on Design, so populating them here throws
+          // "Entity 'Design' does not have property 'persons'".
+          fields:
+            "*variants.calculated_price,+variants.inventory_quantity,*variants.images,+metadata,+tags,+artisan_product_detail.*,+designs.*, +designs.partners.*, +designs.tasks.*, +designs.inventory_items.raw_materials.*, +designs.inventory_items.raw_materials.material_type.*",
+          ...queryParams,
+        },
+        headers,
+        next,
+        cache: "force-cache",
+      }
+    )
+    .then(({ products, count }) => {
+      const nextPage = count > offset + limit ? pageParam + 1 : null
+
+      return {
+        response: {
+          products,
+          count,
+        },
+        nextPage: nextPage,
+        queryParams,
+      }
+    })
+}
+
+/**
+ * #859 — fetch a single UNPUBLISHED artisan product for a private review page
+ * via a signed share token. Hits the token-gated backend preview endpoint
+ * (NOT `/store/products`, which is published-only). Returns null on an invalid
+ * token or missing product so the caller can `notFound()`.
+ */
+export const retrievePreviewProduct = async ({
+  token,
+  countryCode,
+}: {
+  token: string
+  countryCode: string
+}): Promise<HttpTypes.StoreProduct | null> => {
+  const region = await getRegion(countryCode)
+  const headers = { ...(await getAuthHeaders()) }
+
+  return sdk.client
+    .fetch<{ product: HttpTypes.StoreProduct }>(
+      `/store/products/preview/${encodeURIComponent(token)}`,
+      {
+        method: "GET",
+        query: { region_id: region?.id },
+        headers,
+        // Never cache a preview — the artisan is actively editing it.
+        cache: "no-store",
+      }
+    )
+    .then(({ product }) => product ?? null)
+    .catch(() => null)
+}
+
+/**
+ * This will fetch 100 products to the Next.js cache and sort them based on the sortBy parameter.
+ * It will then return the paginated products based on the page and limit parameters.
+ */
+export const listProductsWithSort = async ({
+  page = 0,
+  queryParams,
+  sortBy = "created_at",
+  countryCode,
+}: {
+  page?: number
+  queryParams?: HttpTypes.FindParams & HttpTypes.StoreProductParams
+  sortBy?: SortOptions
+  countryCode: string
+}): Promise<{
+  response: { products: HttpTypes.StoreProduct[]; count: number }
+  nextPage: number | null
+  queryParams?: HttpTypes.FindParams & HttpTypes.StoreProductParams
+}> => {
+  const limit = queryParams?.limit || 12
+
+  const {
+    response: { products },
+  } = await listProducts({
+    pageParam: 0,
+    queryParams: {
+      ...queryParams,
+      limit: 100,
+    },
+    countryCode,
+  })
+
+  const sortedProducts = sortProducts(products, sortBy)
+
+  // Use the actual fetched length — the API's `count` can be stale when
+  // the search index is out of sync with the database.
+  const totalCount = sortedProducts.length
+
+  const pageParam = (page - 1) * limit
+
+  const nextPage = totalCount > pageParam + limit ? pageParam + limit : null
+
+  const paginatedProducts = sortedProducts.slice(pageParam, pageParam + limit)
+
+  return {
+    response: {
+      products: paginatedProducts,
+      count: totalCount,
+    },
+    nextPage,
+    queryParams,
+  }
+}

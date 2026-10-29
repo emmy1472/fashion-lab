@@ -1,0 +1,114 @@
+//---------------------------------------------------------------------------------------------------------------------
+//  @file   intersect_circletangent_dialog.cpp
+//  @author Douglas S Caskey
+//  @date   16 Jul, 2022
+//
+//  @copyright
+//  Copyright (C) 2017 - 2026 Seamly, LLC
+//  https://github.com/fashionfreedom/seamly2d
+//
+//  @brief
+//  Seamly2D is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Seamly2D is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Seamly2D. If not, see <http://www.gnu.org/licenses/>.
+//---------------------------------------------------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------------------------------------------------
+//  @file   dialogendline.cpp
+//  @author Roman Telezhynskyi <dismine(at)gmail.com>
+//  @date   3 Jun, 2015
+//
+//  @copyright
+//  Copyright (C) 2013 Valentina project.
+//  This source code is part of the Valentina project, a pattern making
+//  program, whose allow create and modeling patterns of clothing.
+//  <https://bitbucket.org/dismine/valentina> All Rights Reserved.
+//
+//  Valentina is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published
+//  by the Free Software Foundation, either version 3 of the License,
+//  or (at your option) any later version.
+//
+//  Valentina is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Valentina.  If not, see <http://www.gnu.org/licenses/>.
+//---------------------------------------------------------------------------------------------------------------------
+
+#ifndef INTERSECT_CIRCLETANGENT_DIALOG_H
+#define INTERSECT_CIRCLETANGENT_DIALOG_H
+
+#include "dialogtool.h"
+#include "../ifc/xml/vabstractpattern.h"
+#include "../vmisc/def.h"
+
+#include <qcompilerdetection.h>
+#include <QMetaObject>
+#include <QObject>
+#include <QString>
+#include <QtGlobal>
+
+namespace Ui
+{
+    class IntersectCircleTangentDialog;
+}
+
+class IntersectCircleTangentDialog : public DialogTool
+{
+    Q_OBJECT
+
+public:
+                      IntersectCircleTangentDialog(const VContainer *data, const quint32 &toolId,
+                                                   QWidget *parent = nullptr);
+                     ~IntersectCircleTangentDialog();
+
+    void              SetPointName(const QString &value);
+
+    quint32           GetCircleCenterId() const;
+    void              SetCircleCenterId(const quint32 &value);
+
+    QString           GetCircleRadius() const;
+    void              SetCircleRadius(const QString &value);
+
+    quint32           GetTangentPointId() const;
+    void              SetTangentPointId(const quint32 &value);
+
+    CrossCirclesPoint GetCrossCirclesPoint() const;
+    void              setCirclesCrossPoint(const CrossCirclesPoint &p);
+
+public slots:
+    virtual void      ChosenObject(quint32 id, const SceneObject &type) override;
+    void              PointChanged();
+    void              CircleRadiusChanged();
+    void              FXCircleRadius();
+    void              EvalCircleRadius();
+
+protected:
+    virtual void      ShowVisualization() override;
+    virtual void      SaveData() override; /// @brief SaveData Put dialog data in local variables
+    virtual void      closeEvent(QCloseEvent *event) override;
+    virtual void      CheckState() final;
+
+private:
+                      Q_DISABLE_COPY(IntersectCircleTangentDialog)
+
+    Ui::IntersectCircleTangentDialog *ui;
+
+    bool             flagCircleRadius;
+    QTimer          *timerCircleRadius;
+    QString          circleRadius;
+};
+
+#endif // INTERSECT_CIRCLETANGENT_DIALOG_H

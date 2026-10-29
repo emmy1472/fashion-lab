@@ -1,0 +1,586 @@
+---
+title: '@freesewing/models'
+---
+
+import * as all from '@freesewing/models'
+
+FreeSewing's **models** package bundles measurements for a set of
+_models_ which are used to test FreeSewing's designs.
+
+It is published on NPM as [@freesewing/models
+](https://www.npmjs.com/package/@freesewing/models).\
+The source code for this package is available in [our monorepo on Codeberg
+](https://codeberg.org/freesewing/freesewing) under [packages/models
+](https://codeberg.org/freesewing/freesewing/src/branch/develop/packages/models).
+
+:::note
+This package does not provide a default export.
+:::
+
+## Installation
+
+```sh
+npm install --save @freesewing/models
+```
+
+## About the models
+
+Models have names like `cisFemaleAdult34`, `cisMaleDoll30`,
+and `cisFemaleGiant150`.
+
+These names are constructed according to the 3 aspects that make up the model:
+
+1. Gender: `cisFemale` or `cisMale`
+2. Group: `Adult`, `Doll`, or `Giant`
+3. Size: a number
+   - For Adult models, the size number is the neck circumference in millimeters, Example: `34` for 34 mm.
+   - For Doll and Giant models, the size number is a whole number which is the percentage to scale a base model. Examples:
+     - `30` for a 30% size reduction for a doll
+     - `150` for a 150% size increase for a giant
+
+### Available models
+
+- cisFemaleAdult: sizes 28, 30, 32, 34, 36, 38, 40, 42, 44, and 46
+- cisMaleAdult: sizes 32, 34, 36, 38, 40, 42, 44, 46, 48, and 50
+- cisFemaleDoll: sizes 10, 20, 30, 40, 50, and 60
+- cisMaleDoll: sizes 10, 20, 30, 40, 50, and 60
+- cisFemaleGiant: sizes 150, 200, 250, and 300
+- cisMaleGiant: sizes 150, 200, 250, and 300
+
+## Named Exports
+
+### adult
+
+An object holding all adult models.
+
+```js
+import { adults } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.adult} />
+
+### cisFemaleAdult
+
+An object holding all cisfemale adult models.
+
+```js
+import { cisFemaleAdult } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult} />
+
+### cisFemaleAdult28
+
+An object holding the cisfemale adult size 28 model.
+
+```js
+import { cisFemaleAdult28 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult28} />
+
+### cisFemaleAdult30
+
+An object holding the cisfemale adult size 30 model.
+
+```js
+import { cisFemaleAdult30 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult30} />
+
+### cisFemaleAdult32
+
+An object holding the cisfemale adult size 32 model.
+
+```js
+import { cisFemaleAdult32 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult32} />
+
+### cisFemaleAdult34
+
+An object holding the cisfemale adult size 34 model.
+
+```js
+import { cisFemaleAdult34 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult34} />
+
+### cisFemaleAdult36
+
+An object holding the cisfemale adult size 36 model.
+
+```js
+import { cisFemaleAdult36 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult36} />
+
+### cisFemaleAdult38
+
+An object holding the cisfemale adult size 38 model.
+
+```js
+import { cisFemaleAdult38 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult38} />
+
+### cisFemaleAdult40
+
+An object holding the cisfemale adult size 40 model.
+
+```js
+import { cisFemaleAdult40 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult40} />
+
+### cisFemaleAdult42
+
+An object holding the cisfemale adult size 42 model.
+
+```js
+import { cisFemaleAdult42 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult42} />
+
+### cisFemaleAdult44
+
+An object holding the cisfemale adult size 44 model.
+
+```js
+import { cisFemaleAdult44 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult44} />
+
+### cisFemaleAdult46
+
+An object holding the cisfemale adult size 46 model.
+
+```js
+import { cisFemaleAdult46 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleAdult46} />
+
+### cisFemaleDoll
+
+An object holding all cisfemale doll models.
+
+```js
+import { cisFemaleDoll } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleDoll} />
+
+### cisFemaleDoll10
+
+An object holding the cisfemale doll size 10 model.
+
+```js
+import { cisFemaleDoll10 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleDoll10} />
+
+### cisFemaleDoll20
+
+An object holding the cisfemale doll size 20 model.
+
+```js
+import { cisFemaleDoll20 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleDoll20} />
+
+### cisFemaleDoll30
+
+An object holding the cisfemale doll size 30 model.
+
+```js
+import { cisFemaleDoll30 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleDoll30} />
+
+### cisFemaleDoll40
+
+An object holding the cisfemale doll size 40 model.
+
+```js
+import { cisFemaleDoll40 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleDoll40} />
+
+### cisFemaleDoll50
+
+An object holding the cisfemale doll size 50 model.
+
+```js
+import { cisFemaleDoll50 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleDoll50} />
+
+### cisFemaleDoll60
+
+An object holding the cisfemale doll size 60 model.
+
+```js
+import { cisFemaleDoll60 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleDoll60} />
+
+### cisFemaleGiant
+
+An object holding all cisfemale giant models.
+
+```js
+import { cisFemaleGiant } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleGiant} />
+
+### cisFemaleGiant150
+
+An object holding the cisfemale giant size 150 model.
+
+```js
+import { cisFemaleGiant150 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleGiant150} />
+
+### cisFemaleGiant200
+
+An object holding the cisfemale giant size 200 model.
+
+```js
+import { cisFemaleGiant200 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleGiant200} />
+
+### cisFemaleGiant250
+
+An object holding the cisfemale giant size 250 model.
+
+```js
+import { cisFemaleGiant250 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleGiant250} />
+
+### cisFemaleGiant300
+
+An object holding the cisfemale giant size 300 model.
+
+```js
+import { cisFemaleGiant300 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisFemaleGiant300} />
+
+### cisMaleAdult
+
+An object holding all cismale adult models.
+
+```js
+import { cisMaleAdult } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult} />
+
+### cisMaleAdult32
+
+An object holding the cismale adult size 32 model.
+
+```js
+import { cisMaleAdult32 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult32} />
+
+### cisMaleAdult34
+
+An object holding the cismale adult size 34 model.
+
+```js
+import { cisMaleAdult34 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult34} />
+
+### cisMaleAdult36
+
+An object holding the cismale adult size 36 model.
+
+```js
+import { cisMaleAdult36 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult36} />
+
+### cisMaleAdult38
+
+An object holding the cismale adult size 38 model.
+
+```js
+import { cisMaleAdult38 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult38} />
+
+### cisMaleAdult40
+
+An object holding the cismale adult size 40 model.
+
+```js
+import { cisMaleAdult40 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult40} />
+
+### cisMaleAdult42
+
+An object holding the cismale adult size 42 model.
+
+```js
+import { cisMaleAdult42 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult42} />
+
+### cisMaleAdult44
+
+An object holding the cismale adult size 44 model.
+
+```js
+import { cisMaleAdult44 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult44} />
+
+### cisMaleAdult46
+
+An object holding the cismale adult size 46 model.
+
+```js
+import { cisMaleAdult46 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult46} />
+
+### cisMaleAdult48
+
+An object holding the cismale adult size 48 model.
+
+```js
+import { cisMaleAdult48 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult48} />
+
+### cisMaleAdult50
+
+An object holding the cismale adult size 50 model.
+
+```js
+import { cisMaleAdult50 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleAdult50} />
+
+### cisMaleDoll
+
+An object holding all cismale doll models.
+
+```js
+import { cisMaleDoll } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleDoll} />
+
+### cisMaleDoll10
+
+An object holding the cismale doll size 10 model.
+
+```js
+import { cisMaleDoll10 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleDoll10} />
+
+### cisMaleDoll20
+
+An object holding the cismale doll size 20 model.
+
+```js
+import { cisMaleDoll20 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleDoll20} />
+
+### cisMaleDoll30
+
+An object holding the cismale doll size 30 model.
+
+```js
+import { cisMaleDoll30 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleDoll30} />
+
+### cisMaleDoll40
+
+An object holding the cismale doll size 40 model.
+
+```js
+import { cisMaleDoll40 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleDoll40} />
+
+### cisMaleDoll50
+
+An object holding the cismale doll size 50 model.
+
+```js
+import { cisMaleDoll50 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleDoll50} />
+
+### cisMaleDoll60
+
+An object holding the cismale doll size 60 model.
+
+```js
+import { cisMaleDoll60 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleDoll60} />
+
+### cisMaleGiant
+
+An object holding all models.
+
+```js
+import { cisMaleGiant } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleGiant} />
+
+### cisMaleGiant150
+
+An object holding the cismale giant size 150 model.
+
+```js
+import { cisMaleGiant150 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleGiant150} />
+
+### cisMaleGiant200
+
+An object holding the cismale giant size 200 model.
+
+```js
+import { cisMaleGiant200 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleGiant200} />
+
+### cisMaleGiant250
+
+An object holding the cismale giant size 250 model.
+
+```js
+import { cisMaleGiant250 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleGiant250} />
+
+### cisMaleGiant300
+
+An object holding the cismale giant size 300 model.
+
+```js
+import { cisMaleGiant300 } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.cisMaleGiant300} />
+
+### doll
+
+An object holding all doll models.
+
+```js
+import { doll } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.doll} />
+
+### giant
+
+An object holding all giant models.
+
+```js
+import { giant } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.giant} />
+
+### groups
+
+An array with the different types of model groups.
+
+```js
+import { groups } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.groups} />
+
+### measurements
+
+Holds an array of (the IDs of) all measurements used by FreeSewing designs.
+
+```js
+import { measurements } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.measurements} />
+
+### sizes
+
+Holds an object with the various available sizes, grouped by model type.
+
+```js
+import { sizes } from '@freesewing/models'
+```
+
+<ConsoleButton data={all.sizes} />
+
+## Notes
+
+These model measurement values were arbitrarily chosen by FreeSewing.
+They do **not** correspond to any existing statistical data or
+official size charts.
+You should not expect that these models will produce garments that fit
+the same as clothing store sizes.
+
+To create our models, measurement values for a base cisFemale
+and cisMale model were first chosen.
+Then, for all other models their measurement values were generated from
+the base values using a mathematical formula which scales and adjusts
+the values.
+The mathematical formula is designed to produce approximate measurements
+which are realistic enough to be useful.

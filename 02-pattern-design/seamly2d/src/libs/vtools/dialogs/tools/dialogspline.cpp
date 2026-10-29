@@ -1,0 +1,769 @@
+//-----------------------------------------------------------------------------
+//  @file   dialogspline.cpp
+//  @author Douglas S Caskey
+//  @date   14 Aug, 2024
+//
+//  @copyright
+//  Copyright (C) 2017 - 2024 Seamly, LLC
+//  https://github.com/fashionfreedom/seamly2d
+//
+//  @brief
+//  Seamly2D is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Seamly2D is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Seamly2D. If not, see <http://www.gnu.org/licenses/>.
+//-----------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------
+//  @file   dialogspline.cpp
+//  @author Roman Telezhynskyi <dismine(at)gmail.com>
+//  @date   15 Nov, 2013
+//
+//  @copyright
+//  Copyright (C) 2013 Valentina project.
+//  This source code is part of the Valentina project, a pattern making
+//  program, whose allow create and modeling patterns of clothing.
+//  <https://bitbucket.org/dismine/valentina> All Rights Reserved.
+//
+//  Valentina is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published
+//  by the Free Software Foundation, either version 3 of the License,
+//  or (at your option) any later version.
+//
+//  Valentina is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Valentina.  If not, see <http://www.gnu.org/licenses/>.
+//-----------------------------------------------------------------------------
+
+#include "dialogspline.h"
+
+#include <QColor>
+#include <QComboBox>
+#include <QDialog>
+#include <QHash>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QPointer>
+#include <QPushButton>
+#include <QSet>
+#include <QTimer>
+#include <QToolButton>
+#include <Qt>
+#include <new>
+
+#include "../../tools/vabstracttool.h"
+#include "../../visualization/visualization.h"
+#include "../ifc/ifcdef.h"
+#include "../../visualization/path/vistoolspline.h"
+#include "../ifc/xml/vdomdocument.h"
+#include "../support/edit_formula_dialog.h"
+#include "../vgeometry/vpointf.h"
+#include "../vgeometry/vspline.h"
+#include "../vmisc/vabstractapplication.h"
+#include "../vmisc/vcommonsettings.h"
+#include "../vpatterndb/vcontainer.h"
+#include "../vwidgets/vmaingraphicsscene.h"
+#include "ui_dialogspline.h"
+#include "vtranslatevars.h"
+
+//---------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief DialogSpline create dialog
+ * @param data container with data
+ * @param parent parent widget
+ */
+DialogSpline::DialogSpline(const VContainer *data, const quint32 &toolId, QWidget *parent)
+    : DialogTool(data, toolId, parent)
+    , ui(new Ui::DialogSpline)
+    , spl()
+    , newDuplicate(-1)
+    , timerAngle1(new QTimer(this))
+    , timerAngle2(new QTimer(this))
+    , timerLength1(new QTimer(this))
+    , timerLength2(new QTimer(this))
+    , timerCurveLength(new QTimer(this))
+    , flagAngle1(false)
+    , flagAngle2(false)
+    , flagLength1(false)
+    , flagLength2(false)
+    , flagCurveLength(true)
+{
+    ui->setupUi(this);
+    setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+    setWindowIcon(QIcon(":/toolicon/32x32/spline.png"));
+
+    // Set the position that the dialog opens based on user preference.
+    setDialogPosition();
+
+    plainTextEditFormula = ui->plainTextEditAngle1F;
+
+    ui->plainTextEditAngle1F->installEventFilter(this);
+    ui->plainTextEditAngle1F->setToolTip(makeAngleTooltip());
+    ui->plainTextEditAngle2F->installEventFilter(this);
+    ui->plainTextEditAngle2F->setToolTip(makeAngleTooltip());
+    ui->plainTextEditLength1F->installEventFilter(this);
+    ui->plainTextEditLength2F->installEventFilter(this);
+
+    connect(timerAngle1, &QTimer::timeout, this, &DialogSpline::EvalAngle1);
+    connect(timerAngle2, &QTimer::timeout, this, &DialogSpline::EvalAngle2);
+    connect(timerLength1, &QTimer::timeout, this, &DialogSpline::EvalLength1);
+    connect(timerLength2, &QTimer::timeout, this, &DialogSpline::EvalLength2);
+    connect(timerCurveLength, &QTimer::timeout, this, &DialogSpline::EvalCurveLength);
+
+    initializeOkCancelApply(ui);
+
+    fillComboBoxPoints(ui->comboBoxP1);
+    fillComboBoxPoints(ui->comboBoxP4);
+
+    int index = ui->lineType_ComboBox->findData(LineTypeNone);
+    if (index != -1)
+    {
+        ui->lineType_ComboBox->removeItem(index);
+    }
+
+    index = ui->lineColor_ComboBox->findData(qApp->getCurrentDocument()->getDefaultLineColor());
+    if (index != -1)
+    {
+        ui->lineColor_ComboBox->setCurrentIndex(index);
+    }
+
+    index = ui->lineWeight_ComboBox->findData(qApp->getCurrentDocument()->getDefaultLineWeight());
+    if (index != -1)
+    {
+        ui->lineWeight_ComboBox->setCurrentIndex(index);
+    }
+
+    index = ui->lineType_ComboBox->findData(qApp->getCurrentDocument()->getDefaultLineType());
+    if (index != -1)
+    {
+        ui->lineType_ComboBox->setCurrentIndex(index);
+    }
+
+    CheckState();
+
+    connect(ui->comboBoxP1, &QComboBox::currentTextChanged, this, &DialogSpline::PointNameChanged);
+    connect(ui->comboBoxP4, &QComboBox::currentTextChanged, this, &DialogSpline::PointNameChanged);
+
+    connect(ui->toolButtonExprAngle1, &QPushButton::clicked, this, &DialogSpline::FXAngle1);
+    connect(ui->toolButtonExprAngle2, &QPushButton::clicked, this, &DialogSpline::FXAngle2);
+    connect(ui->toolButtonExprLength1, &QPushButton::clicked, this, &DialogSpline::FXLength1);
+    connect(ui->toolButtonExprLength2, &QPushButton::clicked, this, &DialogSpline::FXLength2);
+    connect(ui->toolButtonExprCurveLength, &QPushButton::clicked, this, &DialogSpline::FXCurveLength);
+
+    connect(ui->plainTextEditAngle1F, &QPlainTextEdit::textChanged, this, &DialogSpline::Angle1Changed);
+    connect(ui->plainTextEditAngle2F, &QPlainTextEdit::textChanged, this, &DialogSpline::Angle2Changed);
+    connect(ui->plainTextEditLength1F, &QPlainTextEdit::textChanged, this, &DialogSpline::Length1Changed);
+    connect(ui->plainTextEditLength2F, &QPlainTextEdit::textChanged, this, &DialogSpline::Length2Changed);
+
+    connect(ui->comboBoxLengthMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &DialogSpline::updateCurveLengthEnabled);
+    connect(ui->plainTextEditCurveLength, &QPlainTextEdit::textChanged, this, &DialogSpline::CurveLengthChanged);
+    updateCurveLengthEnabled();
+
+    vis = new VisToolSpline(data);
+    auto path = qobject_cast<VisToolSpline *>(vis);
+    SCASSERT(path != nullptr)
+
+    auto scene = qobject_cast<VMainGraphicsScene *>(qApp->getCurrentScene());
+    SCASSERT(scene != nullptr)
+    connect(scene, &VMainGraphicsScene::MouseLeftPressed,  path, &VisToolSpline::MouseLeftPressed);
+    connect(scene, &VMainGraphicsScene::MouseLeftReleased, path, &VisToolSpline::MouseLeftReleased);
+
+    ui->plainTextEditLength1F->setFocus();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+DialogSpline::~DialogSpline()
+{
+    delete ui;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief ChosenObject gets id and type of selected object. Save right data and ignore wrong.
+ * @param id id of point or detail
+ * @param type type of object
+ */
+void DialogSpline::ChosenObject(quint32 id, const SceneObject &type)
+{
+    if (prepare == false)// After first choose we ignore all objects
+    {
+        if (type == SceneObject::Point)
+        {
+            auto *path = qobject_cast<VisToolSpline *>(vis);
+            SCASSERT(path != nullptr)
+
+            switch (number)
+            {
+                case 0:
+                    if (SetObject(id, ui->comboBoxP1, tr("Select last point of curve")))
+                    {
+                        ++number;
+                        path->VisualMode(id);
+                    }
+                    break;
+                case 1:
+                {
+                    if (getCurrentObjectId(ui->comboBoxP1) != id)
+                    {
+                        if (SetObject(id, ui->comboBoxP4, ""))
+                        {
+                            ++number;
+
+                            path->setObject4Id(id);
+                            path->RefreshGeometry();
+                            prepare = true;
+                        }
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::SaveData()
+{
+    const quint32 d = spl.GetDuplicate();//Save previous value
+    spl = CurrentSpline();
+
+    newDuplicate <= -1 ? spl.SetDuplicate(d) : spl.SetDuplicate(static_cast<quint32>(newDuplicate));
+
+    auto path = qobject_cast<VisToolSpline *>(vis);
+    SCASSERT(path != nullptr)
+
+    path->setObject1Id(GetP1()->id());
+    path->setObject4Id(GetP4()->id());
+    path->SetAngle1(spl.GetStartAngle());
+    path->SetAngle2(spl.GetEndAngle());
+    path->SetKAsm1(spl.GetKasm1());
+    path->SetKAsm2(spl.GetKasm2());
+    path->SetKCurve(spl.GetKcurve());
+    path->SetMode(Mode::Show);
+    path->RefreshGeometry();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::closeEvent(QCloseEvent *event)
+{
+    ui->plainTextEditAngle1F->blockSignals(true);
+    ui->plainTextEditAngle2F->blockSignals(true);
+    ui->plainTextEditLength1F->blockSignals(true);
+    ui->plainTextEditLength2F->blockSignals(true);
+    ui->plainTextEditCurveLength->blockSignals(true);
+    DialogTool::closeEvent(event);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::Angle1Changed()
+{
+    labelEditFormula = ui->labelEditAngle1;
+    labelResultCalculation = ui->labelResultAngle1;
+    formulaValueChanged(flagAngle1, ui->plainTextEditAngle1F, timerAngle1, degreeSymbol);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::Angle2Changed()
+{
+    labelEditFormula = ui->labelEditAngle2;
+    labelResultCalculation = ui->labelResultAngle2;
+    formulaValueChanged(flagAngle2, ui->plainTextEditAngle2F, timerAngle2, degreeSymbol);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::Length1Changed()
+{
+    labelEditFormula = ui->labelEditLength1;
+    labelResultCalculation = ui->labelResultLength1;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    formulaValueChanged(flagLength1, ui->plainTextEditLength1F, timerLength1, postfix);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::Length2Changed()
+{
+    labelEditFormula = ui->labelEditLength2;
+    labelResultCalculation = ui->labelResultLength2;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    formulaValueChanged(flagLength2, ui->plainTextEditLength2F, timerLength2, postfix);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::FXAngle1()
+{
+    auto dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit first control point angle"));
+    QString angle1F = qApp->translateVariables()->TryFormulaFromUser(ui->plainTextEditAngle1F->toPlainText(),
+                                                         qApp->Settings()->getOsSeparator());
+    dialog->SetFormula(angle1F);
+    dialog->setPostfix(degreeSymbol);
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        angle1F = qApp->translateVariables()->FormulaToUser(dialog->GetFormula(), qApp->Settings()->getOsSeparator());
+        ui->plainTextEditAngle1F->setPlainText(angle1F);
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::FXAngle2()
+{
+    auto dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit second control point angle"));
+    QString angle2F = qApp->translateVariables()->TryFormulaFromUser(ui->plainTextEditAngle2F->toPlainText(),
+                                                         qApp->Settings()->getOsSeparator());
+    dialog->SetFormula(angle2F);
+    dialog->setPostfix(degreeSymbol);
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        angle2F = qApp->translateVariables()->FormulaToUser(dialog->GetFormula(), qApp->Settings()->getOsSeparator());
+        ui->plainTextEditAngle2F->setPlainText(angle2F);
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::FXLength1()
+{
+    auto dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit first control point length"));
+    QString length1F = qApp->translateVariables()->TryFormulaFromUser(ui->plainTextEditLength1F->toPlainText(),
+                                                          qApp->Settings()->getOsSeparator());
+    dialog->SetFormula(length1F);
+    dialog->setPostfix(UnitsToStr(qApp->patternUnit(), true));
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        length1F = qApp->translateVariables()->FormulaToUser(dialog->GetFormula(), qApp->Settings()->getOsSeparator());
+        ui->plainTextEditLength1F->setPlainText(length1F);
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::FXLength2()
+{
+    auto dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit second control point length"));
+    QString length2F = qApp->translateVariables()->TryFormulaFromUser(ui->plainTextEditLength2F->toPlainText(),
+                                                          qApp->Settings()->getOsSeparator());
+    dialog->SetFormula(length2F);
+    dialog->setPostfix(UnitsToStr(qApp->patternUnit(), true));
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        length2F = qApp->translateVariables()->FormulaToUser(dialog->GetFormula(), qApp->Settings()->getOsSeparator());
+        ui->plainTextEditLength2F->setPlainText(length2F);
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::FXCurveLength()
+{
+    auto dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit curve length"));
+    QString lengthF = qApp->translateVariables()->TryFormulaFromUser(ui->plainTextEditCurveLength->toPlainText(),
+                                                         qApp->Settings()->getOsSeparator());
+    dialog->SetFormula(lengthF);
+    dialog->setPostfix(UnitsToStr(qApp->patternUnit(), true));
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        lengthF = qApp->translateVariables()->FormulaToUser(dialog->GetFormula(), qApp->Settings()->getOsSeparator());
+        ui->plainTextEditCurveLength->setPlainText(lengthF);
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+const QSharedPointer<VPointF> DialogSpline::GetP1() const
+{
+    return data->GeometricObject<VPointF>(getCurrentObjectId(ui->comboBoxP1));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+const QSharedPointer<VPointF> DialogSpline::GetP4() const
+{
+    return data->GeometricObject<VPointF>(getCurrentObjectId(ui->comboBoxP4));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::EvalAngle1()
+{
+    labelEditFormula = ui->labelEditAngle1;
+    Eval(ui->plainTextEditAngle1F->toPlainText(), flagAngle1, ui->labelResultAngle1, degreeSymbol, false);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::EvalAngle2()
+{
+    labelEditFormula = ui->labelEditAngle2;
+    Eval(ui->plainTextEditAngle2F->toPlainText(), flagAngle2, ui->labelResultAngle2, degreeSymbol, false);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::EvalLength1()
+{
+    labelEditFormula = ui->labelEditLength1;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    const qreal length1 = Eval(ui->plainTextEditLength1F->toPlainText(), flagLength1, ui->labelResultLength1, postfix,
+                               false);
+
+    if (length1 < 0)
+    {
+        flagLength1 = false;
+        ChangeColor(labelEditFormula, Qt::red);
+        ui->labelResultLength1->setText(tr("Error") + " (" + postfix + ")");
+        ui->labelResultLength1->setToolTip(tr("Length can't be negative"));
+
+        DialogSpline::CheckState();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::EvalLength2()
+{
+    labelEditFormula = ui->labelEditLength2;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    const qreal length2 = Eval(ui->plainTextEditLength2F->toPlainText(), flagLength2, ui->labelResultLength2, postfix,
+                               false);
+
+    if (length2 < 0)
+    {
+        flagLength2 = false;
+        ChangeColor(labelEditFormula, Qt::red);
+        ui->labelResultLength2->setText(tr("Error") + " (" + postfix + ")");
+        ui->labelResultLength2->setToolTip(tr("Length can't be negative"));
+
+        DialogSpline::CheckState();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+VSpline DialogSpline::CurrentSpline() const
+{
+    QString angle1F = ui->plainTextEditAngle1F->toPlainText();
+    angle1F.replace("\n", " ");
+
+    QString angle2F = ui->plainTextEditAngle2F->toPlainText();
+    angle2F.replace("\n", " ");
+
+    QString length1F = ui->plainTextEditLength1F->toPlainText();
+    length1F.replace("\n", " ");
+
+    QString length2F = ui->plainTextEditLength2F->toPlainText();
+    length2F.replace("\n", " ");
+
+    const QHash<QString, QSharedPointer<VInternalVariable> > *vars = data->DataVariables();
+
+    const qreal angle1 = Visualization::FindVal(angle1F, vars);
+    const qreal angle2 = Visualization::FindVal(angle2F, vars);
+    const qreal length1 = Visualization::FindLength(length1F, vars);
+    const qreal length2 = Visualization::FindLength(length2F, vars);
+
+    const bool separator = qApp->Settings()->getOsSeparator();
+
+    angle1F = qApp->translateVariables()->TryFormulaFromUser(angle1F, separator);
+    angle2F = qApp->translateVariables()->TryFormulaFromUser(angle2F, separator);
+    length1F = qApp->translateVariables()->TryFormulaFromUser(length1F, separator);
+    length2F = qApp->translateVariables()->TryFormulaFromUser(length2F, separator);
+
+    VSpline spline(*GetP1(), *GetP4(), angle1, angle1F, angle2, angle2F, length1, length1F,  length2, length2F);
+
+    return spline;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::PointNameChanged()
+{
+    QSet<quint32> set;
+    set.insert(getCurrentObjectId(ui->comboBoxP1));
+    set.insert(getCurrentObjectId(ui->comboBoxP4));
+
+    QColor color = okColor;
+    if (getCurrentObjectId(ui->comboBoxP1) == getCurrentObjectId(ui->comboBoxP4))
+    {
+        flagError = false;
+        color = errorColor;
+
+        ui->lineEditSplineName->setText(tr("Invalid spline"));
+    }
+    else
+    {
+        flagError = true;
+        color = okColor;
+
+        if (getCurrentObjectId(ui->comboBoxP1) == spl.GetP1().id() &&
+            getCurrentObjectId(ui->comboBoxP4) == spl.GetP4().id())
+        {
+            newDuplicate = -1;
+            ui->lineEditSplineName->setText(qApp->translateVariables()->VarToUser(spl.name()));
+        }
+        else
+        {
+            VSpline spline(*GetP1(), *GetP4(), spl.GetStartAngle(), spl.GetEndAngle(), spl.GetKasm1(), spl.GetKasm2(),
+                           spl.GetKcurve());
+
+            if (not data->IsUnique(spline.name()))
+            {
+                newDuplicate = static_cast<qint32>(DNumber(spline.name()));
+                spline.SetDuplicate(static_cast<quint32>(newDuplicate));
+            }
+            ui->lineEditSplineName->setText(qApp->translateVariables()->VarToUser(spline.name()));
+        }
+    }
+    ChangeColor(ui->labelName, color);
+    ChangeColor(ui->labelFirstPoint, color);
+    ChangeColor(ui->labelSecondPoint, color);
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::ShowDialog(bool click)
+{
+    if (prepare && click)
+    {
+        auto *path = qobject_cast<VisToolSpline *>(vis);
+        SCASSERT(path != nullptr)
+
+        spl = VSpline(*GetP1(), path->GetP2(), path->GetP3(), *GetP4());
+
+        const QString angle1F = qApp->translateVariables()->FormulaToUser(spl.GetStartAngleFormula(),
+                                                              qApp->Settings()->getOsSeparator());
+        const QString angle2F = qApp->translateVariables()->FormulaToUser(spl.GetEndAngleFormula(),
+                                                              qApp->Settings()->getOsSeparator());
+
+        ui->plainTextEditAngle1F->setPlainText(angle1F);
+        ui->plainTextEditAngle2F->setPlainText(angle2F);
+        ui->plainTextEditLength1F->setPlainText(qApp->translateVariables()->FormulaToUser(spl.GetC1LengthFormula(),
+                                                                              qApp->Settings()->getOsSeparator()));
+        ui->plainTextEditLength2F->setPlainText(qApp->translateVariables()->FormulaToUser(spl.GetC2LengthFormula(),
+                                                                              qApp->Settings()->getOsSeparator()));
+
+        if (not data->IsUnique(spl.name()))
+        {
+            spl.SetDuplicate(DNumber(spl.name()));
+        }
+
+        ui->lineEditSplineName->setText(qApp->translateVariables()->VarToUser(spl.name()));
+
+        DialogAccepted();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::CheckState()
+{
+    SCASSERT(ok_Button != nullptr)
+    ok_Button->setEnabled(flagAngle1 && flagAngle2 && flagLength1 && flagLength2 && flagCurveLength && flagError);
+    // In case dialog does not have an apply button
+    if (apply_Button != nullptr)
+    {
+        apply_Button->setEnabled(ok_Button->isEnabled());
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::ShowVisualization()
+{
+    AddVisualization<VisToolSpline>();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+VSpline DialogSpline::GetSpline() const
+{
+    return spl;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+bool DialogSpline::GetAutoSmooth() const
+{
+    return ui->comboBoxAutoSmooth->currentIndex() == 1;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::SetAutoSmooth(bool value)
+{
+    ui->comboBoxAutoSmooth->setCurrentIndex(value ? 1 : 0);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+int DialogSpline::GetLengthMode() const
+{
+    return ui->comboBoxLengthMode->currentIndex();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::SetLengthMode(int value)
+{
+    ui->comboBoxLengthMode->setCurrentIndex(value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString DialogSpline::GetTargetLength() const
+{
+    return ui->plainTextEditCurveLength->toPlainText().trimmed();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::SetTargetLength(const QString &formula)
+{
+    if (formula.isEmpty())
+    {
+        return;
+    }
+    const QString f = qApp->translateVariables()->FormulaToUser(formula, qApp->Settings()->getOsSeparator());
+    ui->plainTextEditCurveLength->blockSignals(true);
+    ui->plainTextEditCurveLength->setPlainText(f);
+    ui->plainTextEditCurveLength->blockSignals(false);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::CurveLengthChanged()
+{
+    if (ui->comboBoxLengthMode->currentIndex() == 0)
+    {
+        ui->comboBoxLengthMode->setCurrentIndex(3);
+    }
+    labelEditFormula = ui->labelEditCurveLength;
+    labelResultCalculation = ui->labelResultCurveLength;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    formulaValueChanged(flagCurveLength, ui->plainTextEditCurveLength, timerCurveLength, postfix);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::EvalCurveLength()
+{
+    labelEditFormula = ui->labelEditCurveLength;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    const qreal length = Eval(ui->plainTextEditCurveLength->toPlainText(), flagCurveLength,
+                              ui->labelResultCurveLength, postfix, false);
+
+    if (length < 0)
+    {
+        flagCurveLength = false;
+        ChangeColor(labelEditFormula, Qt::red);
+        ui->labelResultCurveLength->setText(tr("Error") + " (" + postfix + ")");
+        ui->labelResultCurveLength->setToolTip(tr("Length can't be negative"));
+
+        DialogSpline::CheckState();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::updateCurveLengthEnabled()
+{
+    if (ui->comboBoxLengthMode->currentIndex() == 0
+        && ui->plainTextEditCurveLength->toPlainText().trimmed().isEmpty())
+    {
+        flagCurveLength = true;
+    }
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::SetSpline(const VSpline &spline)
+{
+    spl = spline;
+
+    setCurrentPointId(ui->comboBoxP1, spl.GetP1().id());
+    setCurrentPointId(ui->comboBoxP4, spl.GetP4().id());
+
+    const QString angle1F = qApp->translateVariables()->FormulaToUser(spl.GetStartAngleFormula(),
+                                                          qApp->Settings()->getOsSeparator());
+    const QString angle2F = qApp->translateVariables()->FormulaToUser(spl.GetEndAngleFormula(),
+                                                          qApp->Settings()->getOsSeparator());
+
+    ui->plainTextEditAngle1F->setPlainText(angle1F);
+    ui->plainTextEditAngle2F->setPlainText(angle2F);
+
+    const QString length1F = qApp->translateVariables()->FormulaToUser(spl.GetC1LengthFormula(),
+                                                           qApp->Settings()->getOsSeparator());
+    const QString length2F = qApp->translateVariables()->FormulaToUser(spl.GetC2LengthFormula(),
+                                                           qApp->Settings()->getOsSeparator());
+
+    ui->plainTextEditLength1F->setPlainText(length1F);
+    ui->plainTextEditLength2F->setPlainText(length2F);
+    ui->lineEditSplineName->setText(qApp->translateVariables()->VarToUser(spl.name()));
+
+    const QString curLen = QString::number(qApp->fromPixel(spl.GetLength()));
+    const QString unit = UnitsToStr(qApp->patternUnit(), true);
+    ui->plainTextEditCurveLength->blockSignals(true);
+    ui->plainTextEditCurveLength->setPlainText(curLen);
+    ui->plainTextEditCurveLength->blockSignals(false);
+    ui->labelResultCurveLength->setText(curLen + QLatin1Char(' ') + unit);
+
+    auto path = qobject_cast<VisToolSpline *>(vis);
+    SCASSERT(path != nullptr)
+
+    path->setObject1Id(spl.GetP1().id());
+    path->setObject4Id(spl.GetP4().id());
+    path->SetAngle1(spl.GetStartAngle());
+    path->SetAngle2(spl.GetEndAngle());
+    path->SetKAsm1(spl.GetKasm1());
+    path->SetKAsm2(spl.GetKasm2());
+    path->SetKCurve(spl.GetKcurve());
+    path->setShowPoints(static_cast<QPointF>(spl.GetP1()),
+                        static_cast<QPointF>(spl.GetP2()),
+                        static_cast<QPointF>(spl.GetP3()),
+                        static_cast<QPointF>(spl.GetP4()));
+    path->SetMode(Mode::Show);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString DialogSpline::getPenStyle() const
+{
+    return getComboBoxCurrentData(ui->lineType_ComboBox, LineTypeSolidLine);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::setPenStyle(const QString &value)
+{
+    changeCurrentData(ui->lineType_ComboBox, value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString DialogSpline::getLineColor() const
+{
+    return getComboBoxCurrentData(ui->lineColor_ComboBox, ColorBlack);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void DialogSpline::setLineColor(const QString &value)
+{
+    changeCurrentData(ui->lineColor_ComboBox, value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief getLineWeight return weight of the lines
+ * @return type
+ */
+QString DialogSpline::getLineWeight() const
+{
+        return getComboBoxCurrentData(ui->lineWeight_ComboBox, DefaultLineWeight);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/**
+ * @brief setLineWeight set weight of the lines
+ * @param value type
+ */
+void DialogSpline::setLineWeight(const QString &value)
+{
+    changeCurrentData(ui->lineWeight_ComboBox, value);
+    vis->setLineWeight(value);
+}

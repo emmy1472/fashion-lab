@@ -1,0 +1,466 @@
+# The Medusa API server.
+# Public-facing via ALB; auto-scales 1→5 tasks on CPU/memory pressure.
+#
+# Image is pulled from ECR. The CI workflow mirrors the latest
+# ghcr.io/jaal-yantra-textiles/v2 image into ECR before each deploy.
+
+name: medusa-server
+type: Load Balanced Web Service
+
+http:
+  path: '/'
+  alias: v3.jaalyantra.com
+  healthcheck:
+    path: '/health'
+    healthy_threshold: 2
+    # 5 → 10 and 30s → 15s, together and deliberately: the product is what
+    # matters, and it is UNCHANGED at 10 × 15s = 150s of mid-run slack, so a
+    # slow workflow tick still cannot kill an otherwise-healthy task (the
+    # reason 3 → 5 happened in the first place).
+    #
+    # 🔑 What halves is how long a HEALTHY new task waits to be discovered:
+    # 2 × 30s = up to 60s became 2 × 15s = up to 30s. Measured on the 22 Aug
+    # deploy, each task was serving 35-60s after start and the rollout then sat
+    # for ~2 more minutes — a third of a six-minute deploy is the ALB simply
+    # not having looked yet. Doubling the polls is free; the tasks answer
+    # /health in single-digit ms.
+    unhealthy_threshold: 10
+    interval: 15s
+    timeout: 5s
+    grace_period: 240s      # 90s → 240s. Medusa logs "Server is ready" before
+                            # finishing module linking + workflow engine resume.
+                            # Per Railway behavior, full readiness takes 3-4 min;
+                            # 240s grace + the 150s threshold window above =
+                            # a 390s kill window, unchanged by the 15s retune.
+
+image:
+  # ECR location wins; the CI workflow updates :latest before `svc deploy`.
+  # For local-only experiments, swap this for a build block (commented).
+  location: 369351873445.dkr.ecr.us-east-1.amazonaws.com/jyt-medusa:latest
+  # build:
+  #   dockerfile: ../../../apps/backend/Dockerfile
+  #   context: ../../../
+  port: 9000
+
+cpu: 512        # 0.5 vCPU
+memory: 4096    # 4 GB. Was 2048 (bumped 2026-05-20 alongside the RDS
+                # max_connections bump to 200). Raised to 4096 on 2026-08-20
+                # after two OOM kills in one day (exit 137, 11:38 + 23:42 UTC):
+                # memory went 57% → 99% of the 2 GB inside a single minute.
+                # 512 CPU / 4096 MB is a valid Fargate combination.
+                #
+                # Headroom is the SECOND line of defence, not the fix. The
+                # cause was an unbounded FX price fanout (one workflow run per
+                # price, all launched at once) — now bounded AND moved to the
+                # worker. Without those, 4 GB just buys a bigger burst before
+                # the same kill.
+
+# Autoscaling, re-enabled 2026-08-20 (was `count: 1`, disabled pending the
+# task #18 boot-stall investigation).
+#
+# The MIN of 2 is the part that matters for availability, and it is why this
+# changed. At count: 1 a single task death is a full outage — that is exactly
+# what the 23:42 OOM was: ~2 minutes of hard 503 on v3.jaalyantra.com while
+# ECS rescheduled. At min 2 the ALB simply stops routing to the dead target.
+#
+# Be honest about what the scaling rules do and do not cover: ECS target
+# tracking reacts over MINUTES. It would not have prevented either OOM, both of
+# which went from steady-state to dead inside 60 seconds. These thresholds are
+# for sustained load; the redundancy is for sudden death.
+#
+# Connection math (the original reason autoscaling was switched off): observed
+# prod usage is 4-10 connections steady, 35 at its worst — against
+# max_connections 200. 4 server tasks + the worker + a rolling deploy's extra
+# task stays far inside that.
+count:
+  range: 2-4
+  cooldown:
+    # Scale OUT fast, scale IN slowly: adding a task is cheap and reversible,
+    # while dropping one under load is how you get a retry storm.
+    in: 300s
+    out: 60s
+  cpu_percentage: 70
+  memory_percentage: 75
+
+# Public subnets for Phase 0 (saves $32/mo NAT Gateway).
+# Tighten to private+NAT in Phase 1 hardening.
+network:
+  vpc:
+    placement: public
+
+# Non-secret config + role flag.
+variables:
+  NODE_ENV: production
+  MEDUSA_WORKER_MODE: server
+
+  # #2117 — the free-form partner assistant. OFF by default, and this turns it
+  # ON for prod.
+  #
+  # 🔴 Until now this was unset, which meant every non-command message a partner
+  # sent was SILENTLY SAVED and never answered. A partner writing "Hello Saransh
+  # kaise ho" got nothing back — not an error, not a fallback, just silence in a
+  # channel they were told to use. The small-talk, identity and language work
+  # (#2135, #2137, #2130) was all deployed and unreachable behind this flag.
+  #
+  # The model is an admin-configured External Platform tagged
+  # `ai_whatsapp_partner_chat` (z.ai GLM, free tier), so rotating the provider
+  # or model is a UI action — no redeploy. With no platform the resolver still
+  # degrades to a free model rather than failing.
+  WHATSAPP_FREEFORM_CHAT_ENABLED: "true"
+  # The platform's own replies — acknowledgements, refusals, the "ready for your
+  # photo" line — written in the language the partner chose rather than English
+  # constants (#2213, #2216). Same switch for both, deliberately: it is one
+  # behaviour, "we reply in sentences", and one flag is easier to reason about
+  # under load than two.
+  #
+  # 🔴 The English constant is still the floor. Flag off, model absent, slow
+  # (>3.5s) or a reply that fails the id/number checks all send the exact string
+  # that shipped before — so turning this on cannot produce silence, and cannot
+  # produce a message naming a run that does not exist.
+  WHATSAPP_NATURAL_RUN_ACKS_ENABLED: "true"
+  # Node has to be TOLD the container limit. Without this it sizes its heap
+  # from the HOST's memory, never approaches its own ceiling, and gets
+  # SIGKILLed by the cgroup instead — which is precisely why both 2026-08-19
+  # kills produced a bare "Killed" + exit 137 with no stack trace, no heap
+  # dump, and nothing to debug from. With it, an over-allocating request throws
+  # a catchable JS heap error that names the allocation site, and the process
+  # GCs harder before it gets there.
+  #
+  # 3072 of the task's 4096 leaves ~1 GB for what V8 does not count as
+  # old-space: native modules, Buffers, stream machinery, RSS overhead. Setting
+  # this at or near the task memory puts you straight back to a kernel kill.
+  NODE_OPTIONS: --max-old-space-size=3072
+  # #2264 S2 — work-order reads come from the `work_order` module, not the
+  # core-order mirror. Flipped 2026-09-25 after `work-order-parity` passed on
+  # prod (105/105 match, admin lists identical). The mirror is still written, so
+  # rollback is deleting this line and redeploying.
+  WORK_ORDER_READS: "true"
+  # The admin MCP proxies every tool call to an admin route. With this unset it
+  # called back through the PUBLIC host (v3.jaalyantra.com → Cloudflare → ALB),
+  # and Cloudflare sometimes answered a bare 403 before the request reached the
+  # app (2026-09-25/26: three create_material_transfer calls and one GET). The
+  # MCP runs inside this task, so loop back to its own port instead. Only the
+  # admin surface is pointed here; no MCP tool builds URLs from the Host header
+  # (the two admin routes that do are webhook-setup routes, not tools).
+  # Rollback: delete this line and redeploy.
+  ADMIN_MCP_LOOPBACK_URL: http://127.0.0.1:9000
+  # #707/#712 — base URL for partner-portal product links in WhatsApp confirmation
+  # messages. Read by buildPartnerProductUrl (src/workflows/whatsapp/partner-product-url.ts),
+  # which falls back to a hardcoded default if unset; this makes the prod value explicit.
+  # Non-secret, so it lives here (not under secrets:).
+  PARTNER_APP_URL: https://partner.jaalyantra.com
+  # #452 — scopes the public feedback artwork picker to a curated art album
+  # instead of the general media pool. Read by resolveArtworkSourceId
+  # (src/workflows/feedback/lib/artwork-feedback.ts); unset → general "everything
+  # in the media randomiser" pool. This album resolves to the 11 curated images
+  # on prod. Non-secret (just an album id), so it lives here (not under secrets:).
+  FEEDBACK_ARTWORK_ALBUM_ID: 01KS74M4JABCFKHB4WTF90KQYS
+  # #859/#861 — sales-channel id of the core storefront ("JYT Medu Store") that
+  # approved artisan products are cross-listed onto. There is NO "core store"
+  # entity; the channel id IS the identity. Read by resolve-core-sales-channel.ts
+  # (the cross-list subscriber runs on the WORKER — set there too). Non-secret.
+  # Unset → falls back to the nondeterministic is_default storefront pick.
+  CORE_SALES_CHANNEL_ID: sc_01JNQG1YX5549246DFCKKFTE0W
+  # #1031/#1087 — serve /web/census/* via PROXY to the always-on durable reader
+  # node (census-node.service on the OCI handloom-mirror VM, :8791), reached over
+  # the same Cloudflare Tunnel as the CRM node below. PII-free public core → NO
+  # bearer token.
+  #
+  # Why not embedded (CENSUS_P2P_ENABLED): the in-process Hyperswarm peer holds no
+  # persistent store, so every Fargate task roll re-downloads the ~10M-block core
+  # from scratch. Post-deploy, /web/census/weavers range-scans a half-replicated
+  # core and hangs until the peer converges (observed: /weavers timing out while
+  # /stats — front-of-tree agg keys — still served). The durable node keeps a
+  # fully-converged store across deploys → O(page) reads immediately, no cold start.
+  #
+  # Loader is non-fatal: an unreachable URL just 503s /web/census/*, never breaks
+  # boot. To revert to embedded: unset CENSUS_READER_URL, set CENSUS_P2P_ENABLED=
+  # "true" (proxy wins if both set — see p2p-reader.ts:26).
+  CENSUS_READER_URL: https://census-node.jaalyantra.com
+  # #1082 — CRM on Hyperbee/Autobase (Topology-A). Points the CRM module's DAL
+  # loader (src/modules/crm/loaders/hyperbee-dal.ts) at the always-on Autobase
+  # node co-located on the OCI handloom-mirror VM, reached over a Cloudflare
+  # Tunnel (no inbound VM ports; TLS at the CF edge). Setting this flips the
+  # loader into PROXY mode — Medusa stays stateless (no native hypercore stack in
+  # the API tasks) and forwards CRM CRUD to the node. Unset → module no-ops
+  # (non-fatal). The bearer is CRM_NODE_TOKEN (secret, below). Non-secret URL, so
+  # it lives here.
+  CRM_NODE_URL: https://crm-node.jaalyantra.com
+
+# Secrets: rotating values come from Secrets Manager.
+# Non-rotating config (CORS, URLs, etc.) comes from SSM Parameter Store — listed
+# in the SSM section below; ECS resolves both at task start.
+secrets:
+  # Partner push (FCM, Firebase project luna-d094c): the service account the
+  # notification-push provider signs its OAuth token with. SecureString, and it
+  # MUST carry the copilot-application=jyt / copilot-environment=prod tags or
+  # the execution role cannot read it and no task starts. Both services: pushes
+  # are sent from subscribers and jobs (worker) as well as routes (server).
+  FCM_SERVICE_ACCOUNT_JSON: /jyt/prod/FCM_SERVICE_ACCOUNT_JSON
+  ADMIN_CORS: /jyt/prod/ADMIN_CORS
+  # #1092 — retire the legacy V4 admin chat (routes 410 → new MCP assistant).
+  ADMIN_V4_CHAT_DEPRECATED: /jyt/prod/ADMIN_V4_CHAT_DEPRECATED
+  # #1092 — expose the platform-destructive admin MCP tools (delete_product).
+  # Each call still requires confirm:true AND a human reason.
+  ADMIN_MCP_ENABLE_DANGEROUS: /jyt/prod/ADMIN_MCP_ENABLE_DANGEROUS
+  ADMIN_OPENAPI_CATALOG_TOKEN: /jyt/prod/ADMIN_OPENAPI_CATALOG_TOKEN
+  ADMIN_OPENAPI_CATALOG_URL: /jyt/prod/ADMIN_OPENAPI_CATALOG_URL
+  ADMIN_RAG_EMBED_PROVIDER: /jyt/prod/ADMIN_RAG_EMBED_PROVIDER
+  ADMIN_RAG_INDEX_VERSION: /jyt/prod/ADMIN_RAG_INDEX_VERSION
+  # #559 — feature flag: route the bulk pageview firehose through the in-house
+  # Redis ingest buffer (drain-analytics-buffer job persists). Heartbeats stay
+  # synchronous so the live-visitor count is real-time. "1" = on; flip the SSM
+  # value + redeploy to toggle (ECS resolves secrets at task start).
+  ANALYTICS_BATCH_INGEST: /jyt/prod/ANALYTICS_BATCH_INGEST
+  # #344 — shared secret for the edge analytics worker's HMAC-signed batch ingest
+  # (POST /web/analytics/ingest-batch). MUST equal the worker's ANALYTICS_INGEST_SECRET.
+  ANALYTICS_INGEST_SECRET: /jyt/prod/ANALYTICS_INGEST_SECRET
+  AUTH_CORS: /jyt/prod/AUTH_CORS
+  AUTH_MFA_ENCRYPTION_KEY: /jyt/prod/AUTH_MFA_ENCRYPTION_KEY
+  # Blue Dart fulfillment provider (#1285).
+  #
+  # BLUE_DART_PROVIDER_ENABLED is the ON/OFF SWITCH — "true" registers the
+  # provider, anything else withdraws it. Same shape as STRIPE_CONNECT_ENABLED.
+  # Without it the provider does not appear in Fulfillment Providers at all,
+  # which is exactly what happened after #1297: the code was live and the
+  # provider still never showed, because nothing here was set.
+  # ⚠️ Medusa does NOT delete a withdrawn provider's row — it flips
+  # is_enabled=false and leaves it (verified locally both ways).
+  #
+  # The credentials below are a FALLBACK, not the design. They are needed
+  # because a fulfillment provider is built with the fulfillment MODULE's
+  # container, which cannot resolve other modules under module isolation — so it
+  # cannot read the encrypted category:shipping SocialPlatform record that
+  # resolveShippingProvider uses for every other Blue Dart call. See
+  # resolveAdapter() in bluedart/service.ts, which logs which path it took.
+  #
+  # api_type / version / origin_area are deliberately NOT wired: the client
+  # defaults them to "S" / "1.3" / "DHM", matching the values in use.
+  BLUE_DART_PROVIDER_ENABLED: /jyt/prod/BLUE_DART_PROVIDER_ENABLED
+  BLUE_DART_CLIENT_ID: /jyt/prod/BLUE_DART_CLIENT_ID
+  BLUE_DART_CLIENT_SECRET: /jyt/prod/BLUE_DART_CLIENT_SECRET
+  BLUE_DART_CUSTOMER_CODE: /jyt/prod/BLUE_DART_CUSTOMER_CODE
+  BLUE_DART_LICENCE_KEY: /jyt/prod/BLUE_DART_LICENCE_KEY
+  BLUE_DART_LOGIN_ID: /jyt/prod/BLUE_DART_LOGIN_ID
+  CLOUDFLARE_API_TOKEN: /jyt/prod/CLOUDFLARE_API_TOKEN
+  CLOUDFLARE_ZONE_ID: /jyt/prod/CLOUDFLARE_ZONE_ID
+  COOKIE_SECRET: /jyt/prod/COOKIE_SECRET
+  # #1082 — bearer for the CRM Autobase node (crm-node.jaalyantra.com). Pairs with
+  # CRM_NODE_URL (variables, above). Store the SSM SecureString BEFORE the first
+  # deploy that carries CRM_NODE_URL, else task start fails resolving this secret.
+  CRM_NODE_TOKEN: /jyt/prod/CRM_NODE_TOKEN
+  # Census unmask — bearer for the reader node's token-gated /census/unmask/:id
+  # (decrypts the sensitive core; the HANDLOOM_ENCRYPTION_KEY itself never leaves
+  # the OCI node). Same value as CENSUS_UNMASK_TOKEN on the OCI census-node.service
+  # env. Store the SSM SecureString before the first deploy that uses unmask.
+  CENSUS_UNMASK_TOKEN: /jyt/prod/CENSUS_UNMASK_TOKEN
+  DATABASE_URL: /jyt/prod/DATABASE_URL
+  # DTDC domestic (India) — @jytextiles/medusa-plugin-dtdc-shipping.
+  # 🔴 DTDC_API_KEY is the GATE: medusa-config registers the provider only when
+  # it is set, so removing it silently unregisters the carrier rather than
+  # failing. DTDC_SANDBOX=false selects the LIVE hosts (pxapi.dtdc.in /
+  # blktracksvc.dtdc.com) over the demo ones.
+  DTDC_API_KEY: /jyt/prod/DTDC_API_KEY
+  DTDC_CUSTOMER_CODE: /jyt/prod/DTDC_CUSTOMER_CODE
+  DTDC_DEFAULT_COMMODITY_ID: /jyt/prod/DTDC_DEFAULT_COMMODITY_ID
+  DTDC_DEFAULT_SERVICE_TYPE: /jyt/prod/DTDC_DEFAULT_SERVICE_TYPE
+  DTDC_SANDBOX: /jyt/prod/DTDC_SANDBOX
+  DTDC_TRACKING_ACCESS_TOKEN: /jyt/prod/DTDC_TRACKING_ACCESS_TOKEN
+  DTDC_TRACKING_PASSWORD: /jyt/prod/DTDC_TRACKING_PASSWORD
+  DTDC_TRACKING_USERNAME: /jyt/prod/DTDC_TRACKING_USERNAME
+  DELHIVERY_API_TOKEN: /jyt/prod/DELHIVERY_API_TOKEN
+
+  # Packlink (EU origin) — registers the provider in medusa-config.prod.ts.
+  # 🔴 This flag is the WHOLE gate: without it `packlink_packlink` is not in the
+  # container at all, so it cannot be attached to a shipping option no matter
+  # what is configured in the UI.
+  # The API KEY and the ORIGIN are deliberately NOT here — they live on a
+  # `socials` platform record (category "shipping", provider "packlink"), which
+  # the provider prefers over these env options, so they rotate in the UI
+  # without a deploy and each partner can hold their own account.
+  PACKLINK_ENABLED: /jyt/prod/PACKLINK_ENABLED
+  ENCRYPTION_KEY: /jyt/prod/ENCRYPTION_KEY
+  ENCRYPTION_KEY_VERSION: /jyt/prod/ENCRYPTION_KEY_VERSION
+  # Etsy OAuth (medusa-plugin-etsy-sync). Without these, the connect URL is built
+  # with an empty client_id and falls back to the localhost redirect_uri.
+  ETSY_KEYSTRING: /jyt/prod/ETSY_KEYSTRING
+  ETSY_REDIRECT_URI: /jyt/prod/ETSY_REDIRECT_URI
+  ETSY_SHARED_SECRET: /jyt/prod/ETSY_SHARED_SECRET
+  ETSY_WEBHOOK_SECRET: /jyt/prod/ETSY_WEBHOOK_SECRET
+  # Faire OAuth (medusa-plugin-faire-store-sync). Without these, the connect URL is
+  # built with an empty applicationId and falls back to the localhost redirect_uri.
+  FAIRE_APP_ID: /jyt/prod/FAIRE_APP_ID
+  FAIRE_APP_SECRET: /jyt/prod/FAIRE_APP_SECRET
+  FAIRE_REDIRECT_URI: /jyt/prod/FAIRE_REDIRECT_URI
+  FACEBOOK_CLIENT_ID: /jyt/prod/FACEBOOK_CLIENT_ID
+  FACEBOOK_CLIENT_SECRET: /jyt/prod/FACEBOOK_CLIENT_SECRET
+  FACEBOOK_REDIRECT_URI: /jyt/prod/FACEBOOK_REDIRECT_URI
+  FACEBOOK_WEBHOOK_VERIFY_TOKEN: /jyt/prod/FACEBOOK_WEBHOOK_VERIFY_TOKEN
+  FAL_KEY: /jyt/prod/FAL_KEY
+  FRONTEND_URL: /jyt/prod/FRONTEND_URL
+  # 🔴 The buyer-facing SHOP host, and deliberately NOT FRONTEND_URL, which is the
+  # corporate site (jaalyantra.com). Read by the post-delivery feedback link
+  # (STORE_URL -> FRONTEND_URL -> "") and by the Google Merchant landing-url base.
+  # Without this mapping the SSM parameter exists and the container never sees it.
+  STORE_URL: /jyt/prod/STORE_URL
+  GOOGLE_REDIRECT_URI: /jyt/prod/GOOGLE_REDIRECT_URI
+  JWT_SECRET: /jyt/prod/JWT_SECRET
+  # #1059 EmailKit — mass blog/newsletter broadcasts via Kit (kit.com). Gated by
+  # EMAILKIT_ENABLED; KIT_WEBHOOK_SECRET auths /webhooks/kit (?token=).
+  EMAILKIT_ENABLED: /jyt/prod/EMAILKIT_ENABLED
+  KIT_API_KEY: /jyt/prod/KIT_API_KEY
+  KIT_BLOG_TAG_ID: /jyt/prod/KIT_BLOG_TAG_ID
+  KIT_WEBHOOK_SECRET: /jyt/prod/KIT_WEBHOOK_SECRET
+  MAILEROO_API_KEY: /jyt/prod/MAILEROO_API_KEY
+  MAILEROO_FROM_DOMAIN: /jyt/prod/MAILEROO_FROM_DOMAIN
+  MAILEROO_FROM_EMAIL: /jyt/prod/MAILEROO_FROM_EMAIL
+  MAILEROO_FROM_NAME: /jyt/prod/MAILEROO_FROM_NAME
+  MAILJET_API_KEY: /jyt/prod/MAILJET_API_KEY
+  MAILJET_FROM_EMAIL: /jyt/prod/MAILJET_FROM_EMAIL
+  MAILJET_FROM_NAME: /jyt/prod/MAILJET_FROM_NAME
+  MAILJET_SECRET_KEY: /jyt/prod/MAILJET_SECRET_KEY
+  # #839 — gates POST /webhooks/mailjet/events (Mailjet doesn't sign payloads;
+  # the ?token= query param is the only auth). Unset → endpoint runs open.
+  MAILJET_WEBHOOK_SECRET: /jyt/prod/MAILJET_WEBHOOK_SECRET
+  MASTRA_ENABLE_EMBEDDINGS: /jyt/prod/MASTRA_ENABLE_EMBEDDINGS
+  MEDUSA_BACKEND_URL: /jyt/prod/MEDUSA_BACKEND_URL
+  MEDUSA_FF_CACHING: /jyt/prod/MEDUSA_FF_CACHING
+  MEDUSA_FF_INDEX_ENGINE: /jyt/prod/MEDUSA_FF_INDEX_ENGINE
+  MEDUSA_FF_VIEW_CONFIGURATIONS: /jyt/prod/MEDUSA_FF_VIEW_CONFIGURATIONS
+  MISTRAL_API_KEY: /jyt/prod/MISTRAL_API_KEY
+  OPENAI_API_KEY: /jyt/prod/OPENAI_API_KEY
+  OPENROUTER_API_KEY: /jyt/prod/OPENROUTER_API_KEY
+  PARTNER_CORS: /jyt/prod/PARTNER_CORS
+  # Go-live switch for partner email verification (native Medusa 2.16+ flow).
+  # "true" = a partner's login returns verification_required until they confirm
+  # their email via /verify-email. Non-secret, but env-specific so it's sourced
+  # from SSM (read at boot — a redeploy is required after flipping the value).
+  # Also run the `seed-email-templates` Data Plumbing job so the
+  # partner-email-verification template exists. See PR #858.
+  PARTNER_EMAIL_VERIFICATION: /jyt/prod/PARTNER_EMAIL_VERIFICATION
+  # 🔴 DISABLED — these four SSM parameters DO NOT EXIST, and naming a secret
+  # here that SSM does not hold stops EVERY task from starting:
+  #   ResourceInitializationError: unable to pull secrets ... AccessDeniedException
+  # It is not a degraded feature, it is a dead service. Added by #2071 on
+  # 2026-09-15; the last green deploy was 12:20 and the next one 11 minutes
+  # later was the first of EIGHT consecutive failures, so production ran ~15
+  # hours behind main with nothing announcing it.
+  #
+  # The code tolerates their absence — the connect URL is simply built with an
+  # empty client_id — so commenting out is strictly better than a dead task.
+  #
+  # To re-enable: create all four in SSM FIRST (values documented in
+  # deploy/aws/secrets.example.env), confirm with
+  #   aws ssm describe-parameters --parameter-filters Key=Name,Values=/jyt/prod/PINTEREST_CLIENT_ID
+  # and only then uncomment. A secret listed here is a hard dependency of boot.
+  # PINTEREST_CLIENT_ID: /jyt/prod/PINTEREST_CLIENT_ID
+  # PINTEREST_CLIENT_SECRET: /jyt/prod/PINTEREST_CLIENT_SECRET
+  # PINTEREST_REDIRECT_URI: /jyt/prod/PINTEREST_REDIRECT_URI
+  # PINTEREST_SCOPE: /jyt/prod/PINTEREST_SCOPE
+  # PayU OneAPI (OAuth) — used by the MCP create_payment_link write tool.
+  PAYU_CLIENT_ID: /jyt/prod/PAYU_CLIENT_ID
+  PAYU_CLIENT_SECRET: /jyt/prod/PAYU_CLIENT_SECRET
+  PAYU_MERCHANT_ID: /jyt/prod/PAYU_MERCHANT_ID
+  # PayU classic (hash key/salt) — UPI intent + webhook verify_payment.
+  PAYU_MERCHANT_KEY: /jyt/prod/PAYU_MERCHANT_KEY
+  PAYU_MERCHANT_SALT: /jyt/prod/PAYU_MERCHANT_SALT
+  PAYU_MODE: /jyt/prod/PAYU_MODE
+  PAYU_ONEAPI_MODE: /jyt/prod/PAYU_ONEAPI_MODE
+  REDIS_URL: /jyt/prod/REDIS_URL
+  # #576 slice C — recipient for storefront region-request admin emails. Read by
+  # api/store/contact-region-request; unset → the route logs + skips (no error).
+  REGION_REQUEST_NOTIFY_EMAIL: /jyt/prod/REGION_REQUEST_NOTIFY_EMAIL
+  RESEND_API_KEY: /jyt/prod/RESEND_API_KEY
+  RESEND_FROM_EMAIL: /jyt/prod/RESEND_FROM_EMAIL
+  ROOT_DOMAIN: /jyt/prod/ROOT_DOMAIN
+  S3_ACCESS_KEY_ID: /jyt/prod/S3_ACCESS_KEY_ID
+  S3_BUCKET: /jyt/prod/S3_BUCKET
+  S3_ENDPOINT: /jyt/prod/S3_ENDPOINT
+  S3_FILE_URL: /jyt/prod/S3_FILE_URL
+  S3_PREFIX: /jyt/prod/S3_PREFIX
+  S3_REGION: /jyt/prod/S3_REGION
+  S3_SECRET_ACCESS_KEY: /jyt/prod/S3_SECRET_ACCESS_KEY
+  SENTRY_DSN: /jyt/prod/SENTRY_DSN
+  # #2009 — nominal declared value (INR, major units) for the contents line
+  # SYNTHESISED when a samples/swatch inventory order ships with no lines yet.
+  # A sample order's own total is legitimately 0, and 0 is not a legal customs
+  # value. Read by create-inventory-order-shipment.ts (readEnvDeclaredValue) and
+  # passed to the pure builder; outranked by an order's metadata.declared_value.
+  # Unset → the compiled-in DEFAULT_SAMPLE_DECLARED_VALUE, deliberately the same
+  # 500, so an unset parameter cannot silently change what customs reads.
+  SAMPLE_SHIPMENT_DECLARED_VALUE: /jyt/prod/SAMPLE_SHIPMENT_DECLARED_VALUE
+  # #888 — gates POST /webhooks/shipping/track (carrier tracking pushes;
+  # Shiprocket has no HMAC, it replays a dashboard-configured header). Unset →
+  # endpoint runs open with a warning.
+  SHIPPING_WEBHOOK_SECRET: /jyt/prod/SHIPPING_WEBHOOK_SECRET
+  # Shiprocket fulfillment provider (#436). The env-gated block in
+  # medusa-config.prod.ts registers the provider whenever SHIPROCKET_EMAIL is
+  # set — that alone surfaces it in Fulfillment Providers. The actual Shiprocket
+  # API calls (label/pickup/track) go through resolveShippingProvider, which
+  # reads creds from the `category:shipping` SocialPlatform record, so the
+  # password/pickup are intentionally NOT wired as env here.
+  SHIPROCKET_EMAIL: /jyt/prod/SHIPROCKET_EMAIL
+  # ShipGlobal fulfillment provider — the SAME arrangement as Shiprocket above,
+  # for the same reason. `medusa-config.prod.ts` registers the provider whenever
+  # SHIPGLOBAL_USERNAME is present IN THE CONTAINER ENV, and only that surfaces
+  # it in Fulfillment Providers.
+  #
+  # 🔴 A working carrier rate was NOT evidence the provider was registered.
+  # Quotes have been rating through ShipGlobal for weeks — a Sunda quote priced
+  # A$44.97 of freight off a live ShipGlobal rate — because
+  # `resolveShippingProvider` reads the `Shipping Global` platform record, which
+  # is a completely separate door. The provider itself was absent from
+  # /admin/fulfillment-providers the whole time, so no shipping option could be
+  # attached to it.
+  #
+  # The password stays OUT of here deliberately: the resolver reads it (and the
+  # service override) from the encrypted `category:shipping` SocialPlatform
+  # record, which is already configured and already working.
+  SHIPGLOBAL_USERNAME: /jyt/prod/SHIPGLOBAL_USERNAME
+  STOREFRONT_REVALIDATE_SECRET: /jyt/prod/STOREFRONT_REVALIDATE_SECRET
+  STORE_CORS: /jyt/prod/STORE_CORS
+  # Enables the Store MCP cart/checkout/PayU *write* tools (POST /mcp + /store/mcp).
+  # Off by default in code; "true" here exposes them. See src/api/mcp/README.md.
+  STORE_MCP_ENABLE_WRITE: /jyt/prod/STORE_MCP_ENABLE_WRITE
+  STRIPE_API_KEY: /jyt/prod/STRIPE_API_KEY
+  # Go-live switch for the Stripe Connect *checkout routing* provider (Half B).
+  # "false" = the pp_stripe-connect provider is NOT registered (dormant). Flip the
+  # SSM value to "true" + redeploy to register it, then add it to the target
+  # region's payment providers. Half A onboarding does NOT need this.
+  STRIPE_CONNECT_ENABLED: /jyt/prod/STRIPE_CONNECT_ENABLED
+  # Signing secret for the Stripe *Connect* webhook (POST /webhooks/stripe/connect),
+  # which keeps partner_payment_config Connect status in sync (account.updated).
+  # Distinct from STRIPE_WEBHOOK_SECRET (the store/cart payment webhook) — it's the
+  # signing secret of the Connect endpoint registered in the Stripe dashboard.
+  STRIPE_CONNECT_WEBHOOK_SECRET: /jyt/prod/STRIPE_CONNECT_WEBHOOK_SECRET
+  # Public client-side key (pk_…) for the self-hosted Stripe card page
+  # (GET /stripe/pay/:cart_id). Non-secret, but env-specific so it's sourced from
+  # SSM like the other Stripe params. Without it the hosted page won't render.
+  STRIPE_PUBLISHABLE_KEY: /jyt/prod/STRIPE_PUBLISHABLE_KEY
+  STRIPE_WEBHOOK_SECRET: /jyt/prod/STRIPE_WEBHOOK_SECRET
+  VERCEL_STOREFRONT_REPO: /jyt/prod/VERCEL_STOREFRONT_REPO
+  VERCEL_TEAM_ID: /jyt/prod/VERCEL_TEAM_ID
+  VERCEL_TOKEN: /jyt/prod/VERCEL_TOKEN
+  VISUAL_FLOW_FAILURE_EMAIL: /jyt/prod/VISUAL_FLOW_FAILURE_EMAIL
+  WEB_CORS: /jyt/prod/WEB_CORS
+  WHATSAPP_ACCESS_TOKEN: /jyt/prod/WHATSAPP_ACCESS_TOKEN
+  WHATSAPP_INITIATION_TEMPLATE: /jyt/prod/WHATSAPP_INITIATION_TEMPLATE
+  WHATSAPP_INITIATION_TEMPLATE_LANG: /jyt/prod/WHATSAPP_INITIATION_TEMPLATE_LANG
+  WHATSAPP_PHONE_NUMBER_ID: /jyt/prod/WHATSAPP_PHONE_NUMBER_ID
+  WHATSAPP_REMINDER_HEADER_EXAMPLE_URL: /jyt/prod/WHATSAPP_REMINDER_HEADER_EXAMPLE_URL
+  WHATSAPP_WEBHOOK_VERIFY_TOKEN: /jyt/prod/WHATSAPP_WEBHOOK_VERIFY_TOKEN
+  X_CLIENT_ID: /jyt/prod/X_CLIENT_ID
+  X_CLIENT_SECRET: /jyt/prod/X_CLIENT_SECRET
+  X_REDIRECT_URI: /jyt/prod/X_REDIRECT_URI
+  X_SCOPE: /jyt/prod/X_SCOPE
+
+# Logging — 14-day retention to keep CW costs down.
+logging:
+  retention: 14
+
+# Storage: ephemeral. Medusa writes uploads directly to R2; nothing
+# important touches local disk.
+
+# Per-environment overrides go here if we ever need them.
+environments:
+  prod: {}

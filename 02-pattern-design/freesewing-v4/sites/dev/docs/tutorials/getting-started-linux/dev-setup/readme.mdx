@@ -1,0 +1,140 @@
+---
+title: Setting up the FreeSewing development environment
+sidebar_position: 40
+---
+
+FreeSewing provides the studio, a development environment to help you design and develop patterns.
+
+There are two ways to run this studio:
+
+- [**Repository studio**](#monorepo-studio): Use this if you intend to
+  contribute your work to FreeSewing
+- [**Stand-alone studio**](#stand-alone-studio): Use this if you want
+  to do your own thing, and not contribute to FreeSewing
+
+## Repository studio
+
+:::note
+This is the recommended way for (aspiring) FreeSewing contributors
+:::
+
+### TL;DR
+
+```bash
+git clone https://codeberg.org/freesewing/freesewing.git
+cd freesewing
+npm run kickstart
+```
+
+:::tip
+Even better: [clone your own
+fork](https://codeberg.org/freesewing/freesewing/fork)
+
+```bash
+git clone https://codeberg.org/your-username/freesewing.git
+cd freesewing
+npm run kickstart
+```
+
+:::
+
+This sets up the monorepo. If you would like to create a new design or plugin, run the
+following command:
+
+```sh
+npm run add
+```
+
+### Step by step
+
+:::note
+These docs assume you have git installed.
+But if you're running Linux, you have git, right?
+:::
+
+#### Fork our repository
+
+You'll want to fork our repository. This way you have your own copy where you can make
+all the changes you want. To do so, visit https://codeberg.org/freesewing/freesewing/fork
+
+#### Clone the forked repository
+
+Now that you have your very own fork, it's time to clone it locally.
+
+```bash
+git clone <url to your fork>
+```
+
+Make sure to use the URL to your own fork, typically `https://codeberg.org/your-username/freesewing.git` but
+obviously with your real username rather than `your-username`.
+
+#### Install dependencies
+
+Enter the directory that was created, and run the `npm run kickstart` command:
+
+```bash
+cd freesewing
+npm run kickstart
+```
+
+Now you're ready to [start the development environment](/tutorials/getting-started-linux/dev-start).
+
+### Creating a new design or plugin
+
+If you would like to create a new design or plugin, run the following command:
+
+```sh
+npm run add
+```
+
+After you've answered [some questions](#questions), it create a new
+sub-folder for your design in the `designs` folder.
+
+Now you're ready to [start the development
+environment](/tutorials/getting-started-linux/dev-start).
+
+## Stand-alone development
+
+With Node.js installed, all you need to do to setup the stand-alone development environment is run this command:
+
+```bash
+npx @freesewing/studio
+```
+
+After you enter the folder name to create, it will take a while to set
+everything up. When it's done, you will have a new folder with the development
+environment inside.
+
+### Creating a new design
+
+If you would like to create a new design, enter the folder that was just created and run the following command:
+
+```sh
+npm run add
+```
+
+After you've answered [some questions](#questions), it create a new
+sub-folder for your design in the `designs` folder.
+
+Now you're ready to [start the development
+environment](/tutorials/getting-started-linux/dev-start).
+
+:::note
+
+### Questions
+
+#### What design name to use
+
+Please stick to a single word name using \[a-z] to avoid problems.
+
+#### What template to use
+
+Use `From scratch` unless you want to start from our of our blocks:
+
+- Use `Extend Brian` to start from [Brian](https://freesewing.eu/designs/brian)
+- Use `Extend Bent` to start from [Bent](https://freesewing.eu/designs/bent)
+- Use `Extend Bella` to start from [Bella](https://freesewing.eu/designs/bella)
+- Use `Extend Breanna` to start from [Breanna](https://freesewing.eu/designs/breanna)
+- Use `Extend Titan` to start from [Titan](https://freesewing.eu/designs/titan)
+
+:::

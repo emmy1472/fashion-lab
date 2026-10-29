@@ -1,0 +1,560 @@
+import {
+  Adjustments,
+  BuildingStorefront,
+  CogSixTooth,
+  CurrencyDollar,
+  DocumentSeries,
+  EllipsisHorizontal,
+  EyeMini,
+  EyeSlashMini,
+  FolderOpen,
+  House,
+  MagnifyingGlass,
+  OpenRectArrowOut,
+  PencilSquare,
+  ShoppingCart,
+  Sparkles,
+  Tag,
+  TimelineVertical,
+  Users,
+} from "@medusajs/icons"
+import { Avatar, Divider, DropdownMenu, Kbd, Text, clx } from "@medusajs/ui"
+import { useMemo, useState } from "react"
+import { useTranslation } from "react-i18next"
+import type { TFunction } from "i18next"
+
+import {
+  SIDEBAR_ZONE,
+  DESIGNER_COMMERCE_ROUTE_IDS,
+  getSidebarPreset,
+  usePartnerLayoutConfiguration,
+  useSetPartnerLayoutConfiguration,
+  type LayoutPreference,
+  type SidebarPreset,
+} from "../../../hooks/api/layout-preferences"
+import { LayoutCustomizer } from "./layout-customizer"
+
+import { usePartnerStores } from "../../../hooks/api/partner-stores"
+import { useMe } from "../../../hooks/api/users"
+import { Skeleton } from "../../common/skeleton"
+import { INavItem, NavItem } from "../../layout/nav-item"
+import { Shell } from "../../layout/shell"
+
+import { Link, useNavigate } from "react-router-dom"
+import { useLogout } from "../../../hooks/api"
+import { queryClient } from "../../../lib/query-client"
+import {
+  resolveWorkspaceType,
+  type WorkspaceType,
+} from "../../../lib/workspace-type"
+import { UserMenu } from "../user-menu"
+import { useDocumentDirection } from "../../../hooks/use-document-direction"
+import { useSearch } from "../../../providers/search-provider"
+
+export const MainLayout = () => {
+  return (
+    <Shell>
+      <MainSidebar />
+    </Shell>
+  )
+}
+
+const MainSidebar = () => {
+  return (
+    <aside className="flex flex-1 flex-col justify-between overflow-y-auto">
+      <div className="flex flex-1 flex-col">
+        <div className="bg-ui-bg-subtle sticky top-0">
+          <Header />
+          <div className="px-3">
+            <Divider variant="dashed" />
+          </div>
+        </div>
+        <div className="flex flex-1 flex-col justify-between">
+          <div className="flex flex-1 flex-col">
+            <CoreRouteSection />
+          </div>
+          <UtilitySection />
+        </div>
+        <div className="bg-ui-bg-subtle sticky bottom-0">
+          <UserSection />
+        </div>
+      </div>
+    </aside>
+  )
+}
+
+const Logout = () => {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+
+  const { mutateAsync: logoutMutation } = useLogout()
+
+  const handleLogout = async () => {
+    await logoutMutation(undefined, {
+      onSuccess: () => {
+        /**
+         * When the user logs out, we want to clear the query cache
+         */
+        queryClient.clear()
+        navigate("/login")
+      },
+    })
+  }
+
+  return (
+    <DropdownMenu.Item onClick={handleLogout}>
+      <div className="flex items-center gap-x-2">
+        <OpenRectArrowOut className="text-ui-fg-subtle" />
+        <span>{t("app.menus.actions.logout")}</span>
+      </div>
+    </DropdownMenu.Item>
+  )
+}
+
+const Header = () => {
+  const { t } = useTranslation()
+  const { stores, isPending, isError, error } = usePartnerStores()
+  const { user } = useMe()
+  const direction = useDocumentDirection()
+  const activeStore = stores?.[0]
+  const partnerName = user?.partner?.name || user?.first_name
+  const partnerHandle = user?.partner?.handle
+  const name = activeStore?.name || partnerName || "Partner Space"
+  const secondary = partnerHandle ? `@${partnerHandle}` : t("app.nav.main.store")
+  const fallback = name?.slice(0, 1).toUpperCase()
+
+  const isLoaded = !isPending && !!name && !!fallback
+
+  if (isError) {
+    throw error
+  }
+
+  return (
+    <div className="w-full p-3">
+    <DropdownMenu
+          dir={direction}>
+        <DropdownMenu.Trigger
+          disabled={!isLoaded}
+          className={clx(
+            "bg-ui-bg-subtle transition-fg grid w-full grid-cols-[24px_1fr_15px] items-center gap-x-3 rounded-md p-0.5 pe-2 outline-none",
+            "hover:bg-ui-bg-subtle-hover",
+            "data-[state=open]:bg-ui-bg-subtle-hover",
+            "focus-visible:shadow-borders-focus"
+          )}
+        >
+          {fallback ? (
+            <Avatar variant="squared" size="xsmall" fallback={fallback} />
+          ) : (
+            <Skeleton className="h-6 w-6 rounded-md" />
+          )}
+          <div className="block overflow-hidden text-start">
+            {name ? (
+              <Text
+                size="small"
+                weight="plus"
+                leading="compact"
+                className="truncate"
+              >
+                {name}
+              </Text>
+            ) : (
+              <Skeleton className="h-[9px] w-[120px]" />
+            )}
+          </div>
+          <EllipsisHorizontal className="text-ui-fg-muted" />
+        </DropdownMenu.Trigger>
+        {isLoaded && (
+          <DropdownMenu.Content className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-0">
+            <div className="flex items-center gap-x-3 px-2 py-1">
+              <Avatar variant="squared" size="small" fallback={fallback} />
+              <div className="flex flex-col overflow-hidden">
+                <Text
+                  size="small"
+                  weight="plus"
+                  leading="compact"
+                  className="truncate"
+                >
+                  {name}
+                </Text>
+                <Text
+                  size="xsmall"
+                  leading="compact"
+                  className="text-ui-fg-subtle"
+                >
+                  {secondary}
+                </Text>
+              </div>
+            </div>
+            <DropdownMenu.Separator />
+            <DropdownMenu.Item className="gap-x-2" asChild>
+              <Link to="/settings/store">
+                <BuildingStorefront className="text-ui-fg-subtle" />
+                {t("app.nav.main.store")}
+              </Link>
+            </DropdownMenu.Item>
+            <DropdownMenu.Separator />
+            <Logout />
+          </DropdownMenu.Content>
+        )}
+      </DropdownMenu>
+    </div>
+  )
+}
+
+// The persona type lives in lib/workspace-type.ts alongside the resolver that
+// decides it (#2061). Re-exported here because the sidebar builders are the
+// original home of the type and are imported by name across the app.
+export type { WorkspaceType }
+
+/**
+ * The sub-items under Orders, in one place (#1389 S3).
+ *
+ * 🔑 This list existed THREE times — once per workspace persona — and Quotes
+ * was added to two of them. The one it was missed on is the DEFAULT branch,
+ * i.e. the sidebar most partners actually get, so the quote list shipped,
+ * shipped again in the nav, and still could not be reached by the people it
+ * was built for. Three copies of a menu is how that happens; one function is
+ * how it stops.
+ */
+const ordersNavItems = (t: TFunction): Array<{ label: string; to: string }> => [
+  { label: "All", to: "/orders/all" },
+  { label: "Design", to: "/orders/design" },
+  { label: "Inventory", to: "/orders/inventory" },
+  // #2286 — goods delivered TO this partner, confirmed on arrival.
+  { label: "Incoming deliveries", to: "/orders/incoming" },
+  // A sibling of the other order kinds because a quote becomes one.
+  // `String()`: this `t` overload types a defaulted lookup as `unknown`, which
+  // CI's changed-file type check rejects against the nav item's `label: string`.
+  { label: String(t("app.nav.main.quotes", "Quotes")), to: "/orders/quotes" },
+]
+
+export const buildCoreRoutes = (
+  workspaceType: WorkspaceType | undefined,
+  t: TFunction
+): Omit<INavItem, "pathname">[] => {
+  // #338/#958 — Designer persona. A lean, design-first sidebar: the authoring
+  // + production loop up top, with the full commerce surface present but
+  // hidden by default (see DESIGNER_COMMERCE_ROUTE_IDS) and revealed on demand.
+  if (workspaceType === "designer") {
+    return [
+      { icon: <House />, label: t("app.nav.main.home"), to: "/" },
+      { icon: <Sparkles />, label: t("app.nav.main.assistant"), to: "/assistant" },
+      {
+        icon: <PencilSquare />,
+        label: t("app.nav.main.designs"),
+        to: "/designs",
+        items: [
+          { label: t("app.nav.main.tasks"), to: "/tasks" },
+          // #1531 — the sourcing ask, before any order exists.
+          { label: t("app.nav.main.inquiries"), to: "/inquiries" },
+        ],
+      },
+      {
+        icon: <ShoppingCart />,
+        label: t("app.nav.main.orders"),
+        to: "/orders",
+        items: ordersNavItems(t),
+      },
+      { icon: <CurrencyDollar />, label: t("app.nav.main.paymentSubmissions"), to: "/payment-submissions" },
+      { icon: <FolderOpen />, label: t("app.nav.main.sharedFolders"), to: "/shared-folders" },
+      // Commerce group — hidden by default for designers (DESIGNER_COMMERCE_ROUTE_IDS).
+      {
+        icon: <Tag />,
+        label: t("app.nav.main.products"),
+        to: "/products",
+        items: [
+          { label: t("app.nav.main.categories"), to: "/categories" },
+          { label: t("app.nav.main.collections"), to: "/collections" },
+          { label: t("app.nav.main.productTypes"), to: "/product-types" },
+          { label: t("app.nav.main.stock"), to: "/products/inventory" },
+        ],
+      },
+      { icon: <Users />, label: t("app.nav.main.customers"), to: "/customers" },
+      {
+        icon: <DocumentSeries />,
+        label: t("app.nav.main.webStore"),
+        to: "/content",
+        items: [
+          { label: t("app.nav.main.content"), to: "/content" },
+          { label: t("app.nav.main.theme"), to: "/webstore/theme" },
+          { label: t("app.nav.main.analytics"), to: "/webstore/analytics" },
+        ],
+      },
+    ]
+  }
+
+  if (workspaceType === "seller") {
+    return [
+      { icon: <House />, label: t("app.nav.main.home"), to: "/" },
+      { icon: <Sparkles />, label: t("app.nav.main.assistant"), to: "/assistant" },
+      { icon: <FolderOpen />, label: t("app.nav.main.sharedFolders"), to: "/shared-folders" },
+      {
+        icon: <Tag />,
+        label: t("app.nav.main.products"),
+        to: "/products",
+        items: [
+          { label: t("app.nav.main.categories"), to: "/categories" },
+          { label: t("app.nav.main.collections"), to: "/collections" },
+          { label: t("app.nav.main.productTypes"), to: "/product-types" },
+          { label: t("app.nav.main.stock"), to: "/products/inventory" },
+        ],
+      },
+      {
+        icon: <ShoppingCart />,
+        label: t("app.nav.main.orders"),
+        to: "/orders",
+        // #342 Chunk 5: the unified order-kind views (formerly an in-page tab
+        // strip) now live as nested routes under Orders. The parent `/orders`
+        // is Retail; these are the work-order kinds.
+        items: ordersNavItems(t),
+      },
+      { icon: <Users />, label: t("app.nav.main.customers"), to: "/customers" },
+      {
+        icon: <DocumentSeries />,
+        label: t("app.nav.main.webStore"),
+        to: "/content",
+        items: [
+          { label: t("app.nav.main.content"), to: "/content" },
+          { label: t("app.nav.main.theme"), to: "/webstore/theme" },
+          { label: t("app.nav.main.analytics"), to: "/webstore/analytics" },
+        ],
+      },
+    ]
+  }
+
+  if (workspaceType === "individual") {
+    return [
+      { icon: <House />, label: t("app.nav.main.home"), to: "/" },
+      { icon: <Sparkles />, label: t("app.nav.main.assistant"), to: "/assistant" },
+      { icon: <TimelineVertical />, label: t("app.nav.main.tasks"), to: "/tasks" },
+      { icon: <FolderOpen />, label: t("app.nav.main.sharedFolders"), to: "/shared-folders" },
+      { icon: <CurrencyDollar />, label: t("app.nav.main.paymentSubmissions"), to: "/payment-submissions" },
+    ]
+  }
+
+  return [
+    { icon: <House />, label: t("app.nav.main.home"), to: "/" },
+    { icon: <Sparkles />, label: t("app.nav.main.assistant"), to: "/assistant" },
+    {
+      icon: <ShoppingCart />,
+      label: t("app.nav.main.orders"),
+      to: "/orders",
+      // #342 Chunk 5: the unified order-kind views (formerly an in-page tab
+      // strip) now live as nested routes under Orders. The parent `/orders`
+      // is Retail; these are the work-order kinds.
+      items: ordersNavItems(t),
+    },
+    {
+      icon: <PencilSquare />,
+      label: t("app.nav.main.designs"),
+      to: "/designs",
+      // #342 — production runs (design work-orders) now live under the unified
+      // "Orders › Design" view; the design library keeps only authoring nav.
+      items: [
+        { label: t("app.nav.main.tasks"), to: "/tasks" },
+        // #1531 — the sourcing ask, before any order exists.
+        { label: t("app.nav.main.inquiries"), to: "/inquiries" },
+      ],
+    },
+    { icon: <CurrencyDollar />, label: t("app.nav.main.paymentSubmissions"), to: "/payment-submissions" },
+    { icon: <FolderOpen />, label: t("app.nav.main.sharedFolders"), to: "/shared-folders" },
+    {
+      icon: <Tag />,
+      label: t("app.nav.main.products"),
+      to: "/products",
+      items: [
+        { label: t("app.nav.main.categories"), to: "/categories" },
+        { label: t("app.nav.main.collections"), to: "/collections" },
+        { label: t("app.nav.main.productTypes"), to: "/product-types" },
+        { label: t("app.nav.main.stock"), to: "/products/inventory" },
+      ],
+    },
+    { icon: <Users />, label: t("app.nav.main.customers"), to: "/customers" },
+    {
+      icon: <DocumentSeries />,
+      label: t("app.nav.main.webStore"),
+      to: "/content",
+      items: [
+        { label: t("app.nav.main.content"), to: "/content" },
+        { label: t("app.nav.main.theme"), to: "/webstore/theme" },
+        { label: t("app.nav.main.analytics"), to: "/webstore/analytics" },
+      ],
+    },
+  ]
+}
+
+const useCoreRoutes = (
+  workspaceType?: WorkspaceType
+): Omit<INavItem, "pathname">[] => {
+  const { t } = useTranslation()
+  return buildCoreRoutes(workspaceType, t)
+}
+
+const Searchbar = () => {
+  const { toggleSearch } = useSearch()
+  const { t } = useTranslation()
+
+  return (
+    <button
+      type="button"
+      onClick={toggleSearch}
+      className={clx(
+        "bg-ui-bg-subtle transition-fg hover:bg-ui-bg-subtle-hover text-ui-fg-muted mx-3 flex items-center justify-between gap-x-2 rounded-md px-2 py-1.5 outline-none",
+        "focus-visible:shadow-borders-focus"
+      )}
+    >
+      <div className="flex items-center gap-x-2">
+        <MagnifyingGlass />
+        <Text size="small" leading="compact" className="text-ui-fg-subtle">
+          {t("general.search")}
+        </Text>
+      </div>
+      <div className="flex items-center gap-x-1">
+        <Kbd>⌘</Kbd>
+        <Kbd>K</Kbd>
+      </div>
+    </button>
+  )
+}
+
+
+const CoreRouteSection = () => {
+  const { t } = useTranslation()
+  const { user } = useMe()
+  // #2061 — the typed column decides the persona; the legacy
+  // `metadata.use_type` blob no longer gets a vote. See lib/workspace-type.ts.
+  const workspaceType = resolveWorkspaceType(user?.partner)
+  const coreRoutes = useCoreRoutes(workspaceType)
+
+  // #338 — the partner's saved sidebar personalization (hide/reorder). Errors
+  // are non-fatal: the sidebar renders from persona defaults if the fetch fails.
+  const { personal_configuration } = usePartnerLayoutConfiguration(SIDEBAR_ZONE)
+  const { mutate: saveLayout, isPending: isSavingLayout } =
+    useSetPartnerLayoutConfiguration(SIDEBAR_ZONE)
+
+  const widgets = personal_configuration?.configuration?.widgets ?? {}
+
+  // The persona's pre-saved layout preset — the bootstrap default before any
+  // personal config. Apply precedence: personal override → persona preset →
+  // natural (source) order/visible.
+  const preset = useMemo<SidebarPreset>(
+    () => getSidebarPreset(workspaceType),
+    [workspaceType]
+  )
+
+  // Visible routes with saved ordering applied.
+  const visibleRoutes = useMemo(() => {
+    const hidden = (to: string) =>
+      widgets[to]?.hidden ?? preset[to]?.hidden ?? false
+    return coreRoutes
+      .map((route, index) => ({ route, index }))
+      .filter(({ route }) => !hidden(route.to))
+      .sort((a, b) => {
+        const oa = widgets[a.route.to]?.order ?? preset[a.route.to]?.order ?? a.index
+        const ob = widgets[b.route.to]?.order ?? preset[b.route.to]?.order ?? b.index
+        return oa - ob
+      })
+      .map(({ route }) => route)
+  }, [coreRoutes, widgets, preset])
+
+  // Commerce toggle (designer persona only): reveal or collapse the commerce
+  // group, persisting the choice as explicit overrides on the current widgets.
+  const anyCommerceHidden = DESIGNER_COMMERCE_ROUTE_IDS.some(
+    (id) => widgets[id]?.hidden ?? preset[id]?.hidden ?? false
+  )
+  const toggleCommerce = () => {
+    const nextHidden = !anyCommerceHidden
+    const nextWidgets: LayoutPreference["widgets"] = { ...widgets }
+    for (const id of DESIGNER_COMMERCE_ROUTE_IDS) {
+      nextWidgets[id] = { ...(nextWidgets[id] ?? {}), hidden: nextHidden }
+    }
+    saveLayout({ configuration: { widgets: nextWidgets } })
+  }
+
+  // #338 — full sidebar edit mode (drag-reorder + hide/show any item).
+  const [editMode, setEditMode] = useState(false)
+  if (editMode) {
+    return (
+      <div className="px-3 py-3">
+        <LayoutCustomizer
+          zone={SIDEBAR_ZONE}
+          items={coreRoutes.map((r) => ({
+            id: r.to,
+            label: r.label,
+            icon: r.icon,
+          }))}
+          widgets={widgets}
+          preset={preset}
+          onClose={() => setEditMode(false)}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <nav className="flex flex-col gap-y-1 py-3">
+      <Searchbar />
+      {visibleRoutes.map((route) => {
+        return <NavItem key={route.to} {...route} />
+      })}
+      {workspaceType === "designer" && (
+        <button
+          type="button"
+          onClick={toggleCommerce}
+          disabled={isSavingLayout}
+          className={clx(
+            "text-ui-fg-muted transition-fg hover:bg-ui-bg-subtle-hover mx-3 mt-1 flex items-center gap-x-2 rounded-md px-2 py-1.5 outline-none",
+            "focus-visible:shadow-borders-focus disabled:opacity-60"
+          )}
+        >
+          {anyCommerceHidden ? <EyeMini /> : <EyeSlashMini />}
+          <Text size="small" leading="compact" className="text-ui-fg-subtle">
+            {anyCommerceHidden
+              ? t("app.nav.main.showCommerce")
+              : t("app.nav.main.hideCommerce")}
+          </Text>
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => setEditMode(true)}
+        className={clx(
+          "text-ui-fg-muted transition-fg hover:bg-ui-bg-subtle-hover mx-3 mt-1 flex items-center gap-x-2 rounded-md px-2 py-1.5 outline-none",
+          "focus-visible:shadow-borders-focus"
+        )}
+      >
+        <Adjustments />
+        <Text size="small" leading="compact" className="text-ui-fg-subtle">
+          {t("app.nav.customize.trigger")}
+        </Text>
+      </button>
+    </nav>
+  )
+}
+
+const UtilitySection = () => {
+  const { t } = useTranslation()
+  return (
+    <div className="pb-3">
+      <nav className="flex flex-col gap-y-1 py-3">
+        <NavItem
+          icon={<CogSixTooth />}
+          label={t("app.nav.settings.header")}
+          to="/settings"
+          type="core"
+        />
+      </nav>
+    </div>
+  )
+}
+
+const UserSection = () => {
+  return (
+    <div>
+      <div className="px-3">
+        <Divider variant="dashed" />
+      </div>
+      <UserMenu />
+    </div>
+  )
+}

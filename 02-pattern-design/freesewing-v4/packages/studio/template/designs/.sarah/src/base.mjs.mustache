@@ -1,0 +1,12 @@
+import { base as sarahBase } from '@freesewing/sarah'
+
+export const base = {
+  from: sarahBase,
+  name: '{{ name }}.base',
+  hide: { from: true },
+  measurements: [],
+  options: {},
+  draft: ({ part }) => {
+    return part
+  },
+}

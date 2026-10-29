@@ -1,0 +1,29 @@
+---
+title: Svg.defs
+---
+
+The `Svg.defs` property holds a [Defs object](/reference/api/defs) that holds
+the contents of [the defs
+section](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/defs) of the
+SVG document.
+
+## Signature
+
+```js
+Defs svg.defs = {
+  list = {
+    buttonhole: `<g id="buttonhole" transform="scale(1)">
+      <path class="mark" d="M -1,-5 L 1,-5 L 1,5 L -1,5 z"></path>
+    </g>`,
+  },
+}
+```
+
+Result:
+```
+<defs>
+  <g id="buttonhole" transform="scale(1)">
+    <path class="mark" d="M -1,-5 L 1,-5 L 1,5 L -1,5 z"></path>
+  </g>
+</defs>
+```

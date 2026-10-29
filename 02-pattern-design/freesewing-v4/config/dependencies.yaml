@@ -1,0 +1,288 @@
+_types:
+  designs:
+    peer:
+      '@freesewing/core': &freesewing '{{version}}'
+    dev:
+      'mocha': &mocha '10.4.0'
+      'chai': &chai '5.1.1'
+      '@freesewing/models': *freesewing
+      '@freesewing/plugin-timing': *freesewing
+  plugins:
+    peer:
+      '@freesewing/core': *freesewing
+    dev:
+      'mocha': *mocha
+      'chai': *chai
+#
+# Designs
+#
+aaron:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+bee:
+  peer:
+    '@freesewing/bella': *freesewing
+bent:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+breanna:
+  peer:
+    '@freesewing/brian': *freesewing
+brian:
+  peer:
+    '@freesewing/plugin-bust': *freesewing
+carlita:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/bent': *freesewing
+    '@freesewing/carlton': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+carlton:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/bent': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+charlie:
+  peer:
+    '@freesewing/titan': *freesewing
+    '@freesewing/snapseries': *freesewing
+diana:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+examples:
+  peer:
+    '@freesewing/plugin-gore': *freesewing
+holmes:
+  _:
+    '@freesewing/plugin-gore': *freesewing
+  peer:
+    '@freesewing/plugin-bust': *freesewing
+huey:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+hugo:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+jaeger:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/bent': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+jett:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+lily:
+  peer:
+    '@freesewing/titan': *freesewing
+    '@freesewing/paco': *freesewing
+noble:
+  peer:
+    '@freesewing/bella': *freesewing
+paco:
+  peer:
+    '@freesewing/titan': *freesewing
+    '@freesewing/snapseries': *freesewing
+plugintest:
+  peer:
+    '@freesewing/plugin-annotations': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+    '@freesewing/plugin-flip': *freesewing
+    '@freesewing/plugin-gore': *freesewing
+    '@freesewing/plugin-i18n': *freesewing
+    '@freesewing/plugin-measurements': *freesewing
+    '@freesewing/plugin-mirror': *freesewing
+    '@freesewing/plugin-round': *freesewing
+    '@freesewing/plugin-sprinkle': *freesewing
+    '@freesewing/plugin-svgattr': *freesewing
+    '@freesewing/plugin-theme': *freesewing
+sabrina:
+  peer:
+    '@freesewing/snapseries': *freesewing
+sandy:
+  _:
+    '@freesewing/plugin-ringsector': *freesewing
+  peer:
+    '@freesewing/snapseries': *freesewing
+shin:
+  peer:
+    '@freesewing/snapseries': *freesewing
+simon:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+    '@freesewing/plugin-flip': *freesewing
+simone:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/simon': *freesewing
+    '@freesewing/plugin-flip': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+sven:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+tamiko:
+  peer:
+    '@freesewing/plugin-bust': *freesewing
+teagan:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+titan:
+  peer:
+    '@freesewing/snapseries': *freesewing
+trayvon:
+  peer:
+    '@freesewing/snapseries': *freesewing
+wahid:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+yuri:
+  peer:
+    '@freesewing/brian': *freesewing
+    '@freesewing/plugin-bust': *freesewing
+
+#
+# Plugins
+#
+core-plugins:
+  _:
+    '@freesewing/plugin-annotations': *freesewing
+    '@freesewing/plugin-measurements': *freesewing
+    '@freesewing/plugin-mirror': *freesewing
+    '@freesewing/plugin-round': *freesewing
+    '@freesewing/plugin-sprinkle': *freesewing
+    '@freesewing/plugin-bin-pack': *freesewing
+
+#
+# Packages
+#
+core:
+  _:
+    '@freesewing/core-plugins': *freesewing
+    'bezier-js': '6.1.4'
+    'hooks': '0.3.2'
+    'lodash.get': &_get '4.4.2'
+    'lodash.set': &_set '4.3.2'
+    'lodash.unset': &_unset '4.5.2'
+    'lodash.clonedeep': '^4.5.0'
+  dev:
+    'eslint': &eslint '8.57.0'
+    'nyc': '17.1.0'
+    'mocha': *mocha
+    'chai': *chai
+    'sinon': &sinon '^18.0.0'
+collection:
+  _:
+    # Designs
+    '@freesewing/aaron': *freesewing
+    '@freesewing/albert': *freesewing
+    '@freesewing/bee': *freesewing
+    '@freesewing/bella': *freesewing
+    '@freesewing/benjamin': *freesewing
+    '@freesewing/bent': *freesewing
+    '@freesewing/bibi': *freesewing
+    '@freesewing/bob': *freesewing
+    '@freesewing/bonny': *freesewing
+    '@freesewing/breanna': *freesewing
+    '@freesewing/brian': *freesewing
+    '@freesewing/bruce': *freesewing
+    '@freesewing/carlita': *freesewing
+    '@freesewing/carlton': *freesewing
+    '@freesewing/cathrin': *freesewing
+    '@freesewing/charlie': *freesewing
+    '@freesewing/cornelius': *freesewing
+    '@freesewing/diana': *freesewing
+    '@freesewing/florence': *freesewing
+    '@freesewing/florent': *freesewing
+    '@freesewing/gozer': *freesewing
+    '@freesewing/hi': *freesewing
+    '@freesewing/holmes': *freesewing
+    '@freesewing/hortensia': *freesewing
+    '@freesewing/huey': *freesewing
+    '@freesewing/hugo': *freesewing
+    '@freesewing/jaeger': *freesewing
+    '@freesewing/jane': *freesewing
+    '@freesewing/lily': *freesewing
+    '@freesewing/lucy': *freesewing
+    '@freesewing/lumina': *freesewing
+    '@freesewing/lumira': *freesewing
+    '@freesewing/lunetius': *freesewing
+    '@freesewing/noble': *freesewing
+    '@freesewing/octoplushy': *freesewing
+    '@freesewing/onyx': *freesewing
+    '@freesewing/opal': *freesewing
+    '@freesewing/otis': *freesewing
+    '@freesewing/paco': *freesewing
+    '@freesewing/penelope': *freesewing
+    '@freesewing/sandy': *freesewing
+    '@freesewing/shelly': *freesewing
+    '@freesewing/shin': *freesewing
+    '@freesewing/simon': *freesewing
+    '@freesewing/simone': *freesewing
+    '@freesewing/skully': *freesewing
+    '@freesewing/sven': *freesewing
+    '@freesewing/tamiko': *freesewing
+    '@freesewing/teagan': *freesewing
+    '@freesewing/tiberius': *freesewing
+    '@freesewing/titan': *freesewing
+    '@freesewing/trayvon': *freesewing
+    '@freesewing/tristan': *freesewing
+    '@freesewing/uma': *freesewing
+    '@freesewing/umbra': *freesewing
+    '@freesewing/wahid': *freesewing
+    '@freesewing/walburga': *freesewing
+    '@freesewing/waralee': *freesewing
+    '@freesewing/yuri': *freesewing
+    # Plugins
+    '@freesewing/plugin-bust': *freesewing
+    '@freesewing/plugin-flip': *freesewing
+    '@freesewing/core-plugins': *freesewing
+    # Other
+    '@freesewing/core': *freesewing
+    '@freesewing/snapseries': *freesewing
+studio:
+  _:
+    chalk: "^5.2.0"
+    execa: "^9.5.2"
+    glob: "^11.0.1"
+    ora: "^8.2.0"
+    prompts: "^2.4.2"
+react:
+  _:
+    "@codemirror/lang-yaml": "^6.1.2"
+    "@uiw/react-codemirror": "^4.23.8"
+    "@uiw/codemirror-themes-all": "^4.23.12"
+    d3-drag: "3.0.0"
+    d3-selection: "3.0.0"
+    diff: "^7.0.0"
+    echarts: "^5.6.0"
+    echarts-for-react: "^3.0.2"
+    file-saver: "^2.0.5"
+    "highlight.js": "^11.11.1"
+    html-react-parser: "^5.2.2"
+    jotai: "^2.12.1"
+    jotai-location: "^0.5.5"
+    luxon: "^3.5.0"
+    mustache: "^4.2.0"
+    pdfkit: "^0.16.0"
+    react-diff-viewer-continued: "^4.0.5"
+    react-dropzone: "^14.3.5"
+    react-zoom-pan-pinch: "^3.7.0"
+    svg-to-pdfkit: "^0.1.8"
+    use-local-storage-state: "^19.5.0"
+    web-worker: "^1.5.0"
+    yaml: "^2.7.0"
+  peer:
+    react: &react "^19.0.0"
+utils:
+  _:
+    lodash: "^4.17.21"
+    tlds: "^1.255.0"

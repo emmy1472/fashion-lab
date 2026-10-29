@@ -1,0 +1,66 @@
+---
+title: Edit settings by hand (editSettings view)
+---
+import { OkIcon, ResetIcon, FilterIcon, ShowcaseIcon } from '@freesewing/react/components/Icon'
+
+#### Purpose of the editSettings view
+
+The _editSettings_ view allows you to manually tweak all of the inputs of your pattern, accept the design.
+That includes:
+
+- The measurements
+- The design options
+- The core settings
+
+:::warning
+This is an advanced feature that does provide any guardrails.
+:::
+
+#### Layout of the editSettings view
+
+This view only has the [view menu](#view-menu) in the [ribbon area](#areas).
+
+The rest of the [main working area](#areas) is taken up by a YAML editor that allows you to make changes.
+
+:::tip
+We use [YAML](https://en.wikipedia.org/wiki/YAML) here as a format to edit the
+settings. If you are not familiar, hopefully the syntax is self-explanatory.
+If not, there's plenty of information online about how it works.
+:::
+
+<Tabs>
+  <TabItem value="desktop" label="On Desktop">
+    ![A screenshot of the FreeSewing Editor in docs view, on a
+    desktop](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/9fc57e07-ea5b-4f41-ad35-add527304700/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in docs view, on a desktop._
+    </div>
+  </TabItem>
+  <TabItem value="tablet" label="On Tablet">
+    ![A screenshot of the FreeSewing Editor in docs view, on a
+    tablet](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/cd026ef0-535c-4b15-bba3-69fc9cda5800/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in docs view, on a tablet._
+    </div>
+  </TabItem>
+  <TabItem value="mobile" label="On Mobile">
+    ![A screenshot of the FreeSewing Editor in docs view on
+    mobile](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/ca22a664-e882-4cc4-47b9-3b99364a0c00/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in docs view, on mobile._
+    </div>
+  </TabItem>
+</Tabs>
+
+#### Saving or reverting changes
+
+Changes you make here are not immediate. Instead, once you introduce a change,
+and number of extra buttons will appear below the YAML editor:
+
+| Button | Description |
+| ------ | ----------- |
+| <button className="tw:flex tw:flex-row tw:gap-2 tw:daisy-btn tw:daisy-btn-primary tw:daisy-btn-outline">Show Changes</button> | Shows the unsaved changes you have made<br /><small>This button won't show until you make a change</small> |
+| <button className="tw:flex tw:flex-row tw:gap-2 tw:daisy-btn tw:daisy-btn-primary"><OkIcon /> Save Settings</button> | Applies the changes you have made (this does not save your pattern)<br /><small>This button won't show until you make a change</small> |
+| <button className="tw:flex tw:flex-row tw:gap-2 tw:daisy-btn tw:daisy-btn-error tw:daisy-btn-outline"><ResetIcon /> Revert Settings</button> | Discard any changes you have made<br /><small>This button won't show until you make a change</small> |
+
+

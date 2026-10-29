@@ -1,0 +1,236 @@
+# The Medusa background process — subscribers, scheduled jobs, workflow engine.
+# Singleton (1 task fixed), no public route, on Fargate Spot for ~70% cost savings.
+# Same image as medusa-server; MEDUSA_WORKER_MODE=worker selects the role.
+
+name: medusa-worker
+type: Backend Service
+
+image:
+  location: 369351873445.dkr.ecr.us-east-1.amazonaws.com/jyt-medusa:latest
+  # No `port:` — this service doesn't accept inbound HTTP.
+
+cpu: 512        # 0.5 vCPU
+memory: 2048    # 2 GB. Was 1024. Raised 2026-08-20 because the FX price
+                # fanout MOVED HERE — routes now emit fx.fanout_requested and
+                # src/subscribers/fx-fanout-prices.ts does the work, so the
+                # burst that OOM-killed the API container twice now lands on
+                # this service. Moving an unbounded job onto a SMALLER box just
+                # relocates the outage; the fanout is bounded
+                # (FANOUT_MAX_CONCURRENCY) and this has room for that bound.
+
+# Fixed singleton on Fargate Spot.
+# Running 2+ would double-execute scheduled jobs and subscribers.
+count:
+  spot: 1
+
+network:
+  vpc:
+    placement: public
+
+variables:
+  NODE_ENV: production
+  MEDUSA_WORKER_MODE: worker
+
+  # #2117 — the free-form partner assistant. OFF by default, and this turns it
+  # ON for prod.
+  #
+  # 🔴 Until now this was unset, which meant every non-command message a partner
+  # sent was SILENTLY SAVED and never answered. A partner writing "Hello Saransh
+  # kaise ho" got nothing back — not an error, not a fallback, just silence in a
+  # channel they were told to use. The small-talk, identity and language work
+  # (#2135, #2137, #2130) was all deployed and unreachable behind this flag.
+  #
+  # The model is an admin-configured External Platform tagged
+  # `ai_whatsapp_partner_chat` (z.ai GLM, free tier), so rotating the provider
+  # or model is a UI action — no redeploy. With no platform the resolver still
+  # degrades to a free model rather than failing.
+  WHATSAPP_FREEFORM_CHAT_ENABLED: "true"
+  # The platform's own replies — acknowledgements, refusals, the "ready for your
+  # photo" line — written in the language the partner chose rather than English
+  # constants (#2213, #2216). Same switch for both, deliberately: it is one
+  # behaviour, "we reply in sentences", and one flag is easier to reason about
+  # under load than two.
+  #
+  # 🔴 The English constant is still the floor. Flag off, model absent, slow
+  # (>3.5s) or a reply that fails the id/number checks all send the exact string
+  # that shipped before — so turning this on cannot produce silence, and cannot
+  # produce a message naming a run that does not exist.
+  WHATSAPP_NATURAL_RUN_ACKS_ENABLED: "true"
+  DISABLE_MEDUSA_ADMIN: "true"
+  # Same reasoning as the server manifest: without an explicit heap ceiling
+  # Node sizes old-space from the HOST and is SIGKILLed by the cgroup with no
+  # stack trace. 1536 of 2048 leaves headroom for non-heap memory.
+  NODE_OPTIONS: --max-old-space-size=1536
+  # #2264 S2 — work-order reads come from the `work_order` module, not the
+  # core-order mirror. Flipped 2026-09-25 after `work-order-parity` passed on
+  # prod (105/105 match, admin lists identical). The mirror is still written, so
+  # rollback is deleting this line and redeploying.
+  WORK_ORDER_READS: "true"
+  # #707/#712 — base URL for partner-portal product links in WhatsApp confirmation
+  # messages. The worker runs the subscribers (visual-flow-event-trigger →
+  # createDraftProductFromExtractionWorkflow) that build these links via
+  # buildPartnerProductUrl, so it needs the same explicit value as the server.
+  PARTNER_APP_URL: https://partner.jaalyantra.com
+  # #859/#861 — the artisan cross-list subscriber (artisan-product-cross-list.ts)
+  # runs HERE (worker mode) and reads this to resolve the core storefront's sales
+  # channel. Must mirror the server manifest value. Non-secret (just a channel id).
+  CORE_SALES_CHANNEL_ID: sc_01JNQG1YX5549246DFCKKFTE0W
+
+# Worker needs DB + Redis + R2 (for export/report jobs that write files).
+# Does NOT need JWT/COOKIE/CORS (no HTTP surface).
+secrets:
+  # Partner push (FCM, Firebase project luna-d094c): the service account the
+  # notification-push provider signs its OAuth token with. SecureString, and it
+  # MUST carry the copilot-application=jyt / copilot-environment=prod tags or
+  # the execution role cannot read it and no task starts. Both services: pushes
+  # are sent from subscribers and jobs (worker) as well as routes (server).
+  FCM_SERVICE_ACCOUNT_JSON: /jyt/prod/FCM_SERVICE_ACCOUNT_JSON
+  # #559 — the drain-analytics-buffer scheduled job runs HERE (worker mode), not on
+  # medusa-server (server mode skips scheduled jobs). The flag MUST be set on the
+  # worker too or the drain early-returns and the Redis buffer never persists.
+  ANALYTICS_BATCH_INGEST: /jyt/prod/ANALYTICS_BATCH_INGEST
+  # Blue Dart fulfillment provider (#1285) — see the fuller note in
+  # medusa-server/manifest.yml. Mirrored onto the worker because prod runs SPLIT
+  # server + worker off the same medusa-config.prod.ts; a provider registered on
+  # only one of the two is a "works on the server, missing on the worker" bug.
+  BLUE_DART_PROVIDER_ENABLED: /jyt/prod/BLUE_DART_PROVIDER_ENABLED
+  BLUE_DART_CLIENT_ID: /jyt/prod/BLUE_DART_CLIENT_ID
+  BLUE_DART_CLIENT_SECRET: /jyt/prod/BLUE_DART_CLIENT_SECRET
+  BLUE_DART_CUSTOMER_CODE: /jyt/prod/BLUE_DART_CUSTOMER_CODE
+  BLUE_DART_LICENCE_KEY: /jyt/prod/BLUE_DART_LICENCE_KEY
+  BLUE_DART_LOGIN_ID: /jyt/prod/BLUE_DART_LOGIN_ID
+  CLOUDFLARE_API_TOKEN: /jyt/prod/CLOUDFLARE_API_TOKEN
+  CLOUDFLARE_ZONE_ID: /jyt/prod/CLOUDFLARE_ZONE_ID
+  DATABASE_URL: /jyt/prod/DATABASE_URL
+  # DTDC domestic (India) — @jytextiles/medusa-plugin-dtdc-shipping.
+  # 🔴 DTDC_API_KEY is the GATE: medusa-config registers the provider only when
+  # it is set, so removing it silently unregisters the carrier rather than
+  # failing. DTDC_SANDBOX=false selects the LIVE hosts (pxapi.dtdc.in /
+  # blktracksvc.dtdc.com) over the demo ones.
+  DTDC_API_KEY: /jyt/prod/DTDC_API_KEY
+  DTDC_CUSTOMER_CODE: /jyt/prod/DTDC_CUSTOMER_CODE
+  DTDC_DEFAULT_COMMODITY_ID: /jyt/prod/DTDC_DEFAULT_COMMODITY_ID
+  DTDC_DEFAULT_SERVICE_TYPE: /jyt/prod/DTDC_DEFAULT_SERVICE_TYPE
+  DTDC_SANDBOX: /jyt/prod/DTDC_SANDBOX
+  DTDC_TRACKING_ACCESS_TOKEN: /jyt/prod/DTDC_TRACKING_ACCESS_TOKEN
+  DTDC_TRACKING_PASSWORD: /jyt/prod/DTDC_TRACKING_PASSWORD
+  DTDC_TRACKING_USERNAME: /jyt/prod/DTDC_TRACKING_USERNAME
+  DELHIVERY_API_TOKEN: /jyt/prod/DELHIVERY_API_TOKEN
+
+  # Packlink (EU origin) — registers the provider in medusa-config.prod.ts.
+  # 🔴 This flag is the WHOLE gate: without it `packlink_packlink` is not in the
+  # container at all, so it cannot be attached to a shipping option no matter
+  # what is configured in the UI.
+  # The API KEY and the ORIGIN are deliberately NOT here — they live on a
+  # `socials` platform record (category "shipping", provider "packlink"), which
+  # the provider prefers over these env options, so they rotate in the UI
+  # without a deploy and each partner can hold their own account.
+  PACKLINK_ENABLED: /jyt/prod/PACKLINK_ENABLED
+  ENCRYPTION_KEY: /jyt/prod/ENCRYPTION_KEY
+  ENCRYPTION_KEY_VERSION: /jyt/prod/ENCRYPTION_KEY_VERSION
+  # Etsy OAuth (medusa-plugin-etsy-sync) — sync jobs run on the worker.
+  ETSY_KEYSTRING: /jyt/prod/ETSY_KEYSTRING
+  ETSY_REDIRECT_URI: /jyt/prod/ETSY_REDIRECT_URI
+  ETSY_SHARED_SECRET: /jyt/prod/ETSY_SHARED_SECRET
+  ETSY_WEBHOOK_SECRET: /jyt/prod/ETSY_WEBHOOK_SECRET
+  # Faire OAuth (medusa-plugin-faire-store-sync) — poll/sync jobs run on the worker.
+  FAIRE_APP_ID: /jyt/prod/FAIRE_APP_ID
+  FAIRE_APP_SECRET: /jyt/prod/FAIRE_APP_SECRET
+  FAIRE_REDIRECT_URI: /jyt/prod/FAIRE_REDIRECT_URI
+  FACEBOOK_CLIENT_ID: /jyt/prod/FACEBOOK_CLIENT_ID
+  FACEBOOK_CLIENT_SECRET: /jyt/prod/FACEBOOK_CLIENT_SECRET
+  FACEBOOK_WEBHOOK_VERIFY_TOKEN: /jyt/prod/FACEBOOK_WEBHOOK_VERIFY_TOKEN
+  FAL_KEY: /jyt/prod/FAL_KEY
+  # 🔴 DISABLED — these four SSM parameters DO NOT EXIST, and naming a secret
+  # here that SSM does not hold stops EVERY task from starting:
+  #   ResourceInitializationError: unable to pull secrets ... AccessDeniedException
+  # It is not a degraded feature, it is a dead service. Added by #2071 on
+  # 2026-09-15; the last green deploy was 12:20 and the next one 11 minutes
+  # later was the first of EIGHT consecutive failures, so production ran ~15
+  # hours behind main with nothing announcing it.
+  #
+  # The code tolerates their absence — the connect URL is simply built with an
+  # empty client_id — so commenting out is strictly better than a dead task.
+  #
+  # To re-enable: create all four in SSM FIRST (values documented in
+  # deploy/aws/secrets.example.env), confirm with
+  #   aws ssm describe-parameters --parameter-filters Key=Name,Values=/jyt/prod/PINTEREST_CLIENT_ID
+  # and only then uncomment. A secret listed here is a hard dependency of boot.
+  # PINTEREST_CLIENT_ID: /jyt/prod/PINTEREST_CLIENT_ID
+  # PINTEREST_CLIENT_SECRET: /jyt/prod/PINTEREST_CLIENT_SECRET
+  # PINTEREST_REDIRECT_URI: /jyt/prod/PINTEREST_REDIRECT_URI
+  # PINTEREST_SCOPE: /jyt/prod/PINTEREST_SCOPE
+  # #1059 EmailKit — the blog broadcast workflow (sync + create broadcast) may
+  # run on the worker, so it needs the Kit creds + flag too.
+  EMAILKIT_ENABLED: /jyt/prod/EMAILKIT_ENABLED
+  KIT_API_KEY: /jyt/prod/KIT_API_KEY
+  KIT_BLOG_TAG_ID: /jyt/prod/KIT_BLOG_TAG_ID
+  KIT_WEBHOOK_SECRET: /jyt/prod/KIT_WEBHOOK_SECRET
+  MAILEROO_API_KEY: /jyt/prod/MAILEROO_API_KEY
+  MAILEROO_FROM_DOMAIN: /jyt/prod/MAILEROO_FROM_DOMAIN
+  MAILEROO_FROM_EMAIL: /jyt/prod/MAILEROO_FROM_EMAIL
+  MAILEROO_FROM_NAME: /jyt/prod/MAILEROO_FROM_NAME
+  MAILJET_API_KEY: /jyt/prod/MAILJET_API_KEY
+  MAILJET_FROM_EMAIL: /jyt/prod/MAILJET_FROM_EMAIL
+  MAILJET_FROM_NAME: /jyt/prod/MAILJET_FROM_NAME
+  MAILJET_SECRET_KEY: /jyt/prod/MAILJET_SECRET_KEY
+  MASTRA_ENABLE_EMBEDDINGS: /jyt/prod/MASTRA_ENABLE_EMBEDDINGS
+  MEDUSA_BACKEND_URL: /jyt/prod/MEDUSA_BACKEND_URL
+  MEDUSA_FF_CACHING: /jyt/prod/MEDUSA_FF_CACHING
+  MEDUSA_FF_INDEX_ENGINE: /jyt/prod/MEDUSA_FF_INDEX_ENGINE
+  MEDUSA_FF_VIEW_CONFIGURATIONS: /jyt/prod/MEDUSA_FF_VIEW_CONFIGURATIONS
+  MISTRAL_API_KEY: /jyt/prod/MISTRAL_API_KEY
+  OPENAI_API_KEY: /jyt/prod/OPENAI_API_KEY
+  OPENROUTER_API_KEY: /jyt/prod/OPENROUTER_API_KEY
+  PAYU_MERCHANT_KEY: /jyt/prod/PAYU_MERCHANT_KEY
+  PAYU_MERCHANT_SALT: /jyt/prod/PAYU_MERCHANT_SALT
+  PAYU_MODE: /jyt/prod/PAYU_MODE
+  REDIS_URL: /jyt/prod/REDIS_URL
+  RESEND_API_KEY: /jyt/prod/RESEND_API_KEY
+  RESEND_FROM_EMAIL: /jyt/prod/RESEND_FROM_EMAIL
+  S3_ACCESS_KEY_ID: /jyt/prod/S3_ACCESS_KEY_ID
+  S3_BUCKET: /jyt/prod/S3_BUCKET
+  S3_ENDPOINT: /jyt/prod/S3_ENDPOINT
+  S3_FILE_URL: /jyt/prod/S3_FILE_URL
+  S3_PREFIX: /jyt/prod/S3_PREFIX
+  S3_REGION: /jyt/prod/S3_REGION
+  S3_SECRET_ACCESS_KEY: /jyt/prod/S3_SECRET_ACCESS_KEY
+  # 🔴 The buyer-facing SHOP host. The worker runs the delivery subscriber that
+  # builds the post-delivery feedback link, and it carries NEITHER STORE_URL nor
+  # FRONTEND_URL today, so that link resolves to "" here.
+  STORE_URL: /jyt/prod/STORE_URL
+  SENTRY_DSN: /jyt/prod/SENTRY_DSN
+  # Shiprocket fulfillment provider (#436) — parity with the server so the
+  # env-gated provider block in medusa-config.prod.ts loads in the worker too.
+  # Email-only: the API path reads creds from the SocialPlatform record.
+  SHIPROCKET_EMAIL: /jyt/prod/SHIPROCKET_EMAIL
+  # ShipGlobal — same parity, same reason as Shiprocket above. A provider block
+  # that loads on the server but not the worker makes the same workflow step
+  # behave differently depending on which task picks it up.
+  SHIPGLOBAL_USERNAME: /jyt/prod/SHIPGLOBAL_USERNAME
+  STRIPE_API_KEY: /jyt/prod/STRIPE_API_KEY
+  STRIPE_WEBHOOK_SECRET: /jyt/prod/STRIPE_WEBHOOK_SECRET
+  VERCEL_STOREFRONT_REPO: /jyt/prod/VERCEL_STOREFRONT_REPO
+  VERCEL_TEAM_ID: /jyt/prod/VERCEL_TEAM_ID
+  VERCEL_TOKEN: /jyt/prod/VERCEL_TOKEN
+  VISUAL_FLOW_FAILURE_EMAIL: /jyt/prod/VISUAL_FLOW_FAILURE_EMAIL
+  WHATSAPP_ACCESS_TOKEN: /jyt/prod/WHATSAPP_ACCESS_TOKEN
+  WHATSAPP_INITIATION_TEMPLATE: /jyt/prod/WHATSAPP_INITIATION_TEMPLATE
+  WHATSAPP_INITIATION_TEMPLATE_LANG: /jyt/prod/WHATSAPP_INITIATION_TEMPLATE_LANG
+  WHATSAPP_PHONE_NUMBER_ID: /jyt/prod/WHATSAPP_PHONE_NUMBER_ID
+  WHATSAPP_REMINDER_HEADER_EXAMPLE_URL: /jyt/prod/WHATSAPP_REMINDER_HEADER_EXAMPLE_URL
+  WHATSAPP_WEBHOOK_VERIFY_TOKEN: /jyt/prod/WHATSAPP_WEBHOOK_VERIFY_TOKEN
+  X_CLIENT_ID: /jyt/prod/X_CLIENT_ID
+  X_CLIENT_SECRET: /jyt/prod/X_CLIENT_SECRET
+  X_SCOPE: /jyt/prod/X_SCOPE
+
+logging:
+  retention: 14
+
+# Graceful shutdown: Spot interruptions give 2 minutes. Medusa's worker
+# process should drain in-flight subscriber callbacks then exit. Stop timeout
+# of 120s (default) is enough; bump if we see truncated jobs.
+# stop_timeout: 120s
+
+environments:
+  prod: {}

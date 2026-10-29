@@ -1,0 +1,30 @@
+---
+title: plugin-path-utils
+---
+
+Published as [@freesewing/plugin-path-utils][1], this plugin provides the
+[hem](/reference/macros/hem), [join](/reference/macros/join),
+[offset](/reference/macros/offset), and [sa](/reference/macros/sa) macros,
+whose main purpose is to make it easier to construct seam allowance paths.
+
+## Installation
+
+```sh
+npm install @freesewing/plugin-path-utils
+```
+
+## Usage
+
+Either [add it as a part plugins](/reference/api/part/config/plugins) in your
+design, or [add it to a pattern instance with
+Pattern.use()](/reference/api/pattern/use).
+
+To import the plugin for use:
+
+```js
+import { pathUtilsPlugin } from '@freesewing/plugin-path-utils'
+// or
+import { pluginPathUtils } from '@freesewing/plugin-path-utils'
+```
+
+[1]: https://www.npmjs.com/package/@freesewing/plugin-path-utils

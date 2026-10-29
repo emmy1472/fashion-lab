@@ -1,0 +1,8 @@
+# Never commit real secret values.
+secrets.local.env
+secrets.*.env
+!secrets.example.env
+
+# Copilot's workspace marker (deploy/aws/copilot/.workspace) IS committed
+# so the CI runner can resolve the application name. The file contains only
+# `application: jyt` — no secrets.

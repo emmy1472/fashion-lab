@@ -1,0 +1,116 @@
+{
+  "t": "Titan trouser block",
+  "d": "Titan is a dartless trouser block.",
+  "p": {
+    "back": "Back",
+    "front": "Front"
+  },
+  "s": {
+    "crossSeamFitFailedBack.t": "Back cross seam compromised",
+    "crossSeamFitFailedBack.d": "No solution was found to fit the cross seam in the back part. As a compromise, we've used the best available solution instead.\n\nPlease verify your measurements before contacting support.",
+    "crossSeamFitFailedFront.t": "Front cross seam compromised",
+    "crossSeamFitFailedFront.d": "No solution was found to fit the cross seam in the front part. As a compromise, we've used the best available solution instead.\n\nPlease verify your measurements before contacting support.",
+    "lowFrontHeight.t": "Front waist too low",
+    "lowFrontHeight.d": "The front cross seam curve was adjusted as the front waistband was unexpectedly low.\n\nThe generated pattern is likely not correct. Please verify your measurements before contacting support.",
+    "lowBackHeight.t": "Back waist too low",
+    "lowBackHeight.d": "The back cross seam curve was adjusted as the back waistband was unexpectedly low.\n\nThe generated pattern is likely not correct. Please verify your measurements before contacting support."
+  },
+  "o": {
+    "kneeEase": {
+      "t": "Knee ease",
+      "d": "Controls the amount of ease at the knee"
+    },
+    "waistHeight": {
+      "t": "Waist height",
+      "d": "Controls the height of the waist, 100% = waist height, 0% = hip height"
+    },
+    "lengthBonus": {
+      "t": "Length bonus",
+      "d": "Controls the length of the trousers"
+    },
+    "crotchDrop": {
+      "t": "Crotch drop",
+      "d": "Lowers the crotch for a more relaxed fit"
+    },
+    "fitKnee": {
+      "t": "Fit the knee",
+      "d": "Fits the legs from based on the knee circumference, rather than seat circumference"
+    },
+    "fitKneeNo": {
+      "t": "Do not fit the knee",
+      "d": "Disregard the knee measurements and draft a pattern that tapers from upper leg to ankle"
+    },
+    "fitKneeYes": {
+      "t": "Do fit the knee",
+      "d": "Use the knee measurement to draft a pattern that tapers from upper leg to knee, to then continue straight down below the knee."
+    },
+    "legBalance": {
+      "t": "Leg balance",
+      "d": "Controls the ratio between front and back panel of the leg"
+    },
+    "crossSeamCurveStart": {
+      "t": "Start of the cross seam curve",
+      "d": "Controls how far into the cross seam we start to curve"
+    },
+    "crossSeamCurveBend": {
+      "t": "Cross seam bend",
+      "d": "Controls the curvature of the cross seam"
+    },
+    "crossSeamCurveAngle": {
+      "t": "Cross seam angle",
+      "d": "Controls the angle of the cross seam"
+    },
+    "crotchSeamCurveStart": {
+      "t": "Start of the crotch seam curve",
+      "d": "Controls how far into the crotch seam we start to curve"
+    },
+    "crotchSeamCurveBend": {
+      "t": "Crotch seam bend",
+      "d": "Controls the curvature of the crotch seam"
+    },
+    "crotchSeamCurveAngle": {
+      "t": "Crotch seam angle",
+      "d": "Controls the angle of the crotch seam"
+    },
+    "seatEase": {
+      "t": "Seat ease",
+      "d": "Controls the amount of ease at your seat"
+    },
+    "waistBalance": {
+      "t": "Waist balance",
+      "d": "Controls the horizontal position of the waist relative to the seat"
+    },
+    "waistbandWidth": {
+      "t": "Waistband width",
+      "d": "The width of the waistband"
+    },
+    "waistEase": {
+      "t": "Waist ease",
+      "d": "Controls the amount of ease at your waist"
+    },
+    "waistAngle":  {
+      "t": "Waistband angle",
+      "d": "Change the angle of the waistband when viewed from the side"
+    },
+    "useWaistAngleFor": {
+      "t": "Use waistband angle for",
+      "d": "Apply the waistband angle to the front, back or both"
+    },
+    "useWaistAngleFor.both": {
+      "t": "Both",
+      "d": "Apply the waistband angle to the front and back"
+    },
+     "useWaistAngleFor.backOnly": {
+      "t": "Back",
+      "d": "Apply the waistband angle only to the back"
+    },
+     "useWaistAngleFor.frontOnly": {
+      "t": "Front",
+      "d": "Apply the waistband angle only to the front"
+    },
+    "grainlinePosition": {
+      "t": "Grainline position",
+      "d": "Controls the horizontal position of the leg relative to the seat"
+    }
+  }
+}

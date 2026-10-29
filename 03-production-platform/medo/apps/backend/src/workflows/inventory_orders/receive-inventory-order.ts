@@ -1,0 +1,597 @@
+import {
+  createStep,
+  createWorkflow,
+  StepResponse,
+  WorkflowResponse,
+  transform,
+  when,
+} from "@medusajs/framework/workflows-sdk"
+import {
+  ContainerRegistrationKeys,
+  MedusaError,
+} from "@medusajs/framework/utils"
+import type { MedusaContainer } from "@medusajs/framework/types"
+import type { Link } from "@medusajs/modules-sdk"
+import {
+  createInventoryLevelsWorkflow,
+  updateInventoryLevelsWorkflow,
+} from "@medusajs/medusa/core-flows"
+
+import { FULLFILLED_ORDERS_MODULE } from "../../modules/fullfilled_orders"
+import { ORDER_INVENTORY_MODULE } from "../../modules/inventory_orders"
+import { resolveExistingLevelsStep } from "./partner-complete-inventory-order"
+import {
+  planInventoryOrderReceipt,
+  postingsFromPlannedLines,
+  type PlannedReceiptLine,
+} from "./lib/plan-inventory-order-receipt"
+import { resolveInventoryOrderDestination } from "./lib/order-destination"
+import {
+  isFullyReceived,
+  loadInventoryOrderFinishEvidence,
+} from "./lib/order-finished"
+import { signalPartnerWorkflowFinished } from "./lib/signal-partner-workflow"
+import { planShortfalls, sumDispatchedByLine } from "./lib/dispatch-ledger"
+import { createTasksFromTemplatesWorkflow } from "./create-tasks-from-templates"
+
+/**
+ * ADMIN RECEIPT — record that goods actually turned up, and put them on the
+ * books (#2115, #2111).
+ *
+ * This is the door that did not exist. `partner-complete-inventory-order` posts
+ * stock, but only from `Processing`/`Partial` and only when the PARTNER submits
+ * delivered lines. An order the carrier marked `Delivered` — the pashminas at
+ * Kiyo — could be received through no door at all, and its level stayed at zero
+ * with nothing having errored.
+ *
+ * 🔴 The destination is the ORDER's destination, which for a consignment order
+ * is a PARTNER's location. That is deliberate and is half of #2111: material we
+ * procured, stocked where the partner will cut it, and deducted there when it
+ * becomes a garment. The other half is the consumption gate in
+ * `consumption-logs/lib/apply-to-inventory.ts`, and the two ship together —
+ * receipt alone would stock material that could never come off again.
+ *
+ * Idempotency is cumulative, not a flag: the plan measures against
+ * `line_fulfillments` and refuses over-receipt, so calling this twice on a
+ * fully-received order receives nothing rather than posting twice.
+ */
+
+export type ReceiveInventoryOrderInput = {
+  orderId: string
+  /**
+   * Omit to receive everything still outstanding. Repeat an `order_line_id`
+   * with different `stock_location_id`s to split one delivery across two
+   * destinations (#2144).
+   */
+  lines?: Array<{
+    order_line_id: string
+    quantity: number
+    stock_location_id?: string | null
+  }> | null
+  /** Override the order's destination location. */
+  stock_location_id?: string | null
+  notes?: string | null
+  received_by?: string | null
+  /**
+   * #2286 — set when the RECEIVING PARTNER confirms the delivery from their
+   * portal; the audit row then names them rather than an admin.
+   */
+  received_by_partner_id?: string | null
+}
+
+const planReceiptStep = createStep(
+  "receive-inventory-order-plan",
+  async (input: ReceiveInventoryOrderInput, { container }) => {
+    const query: any = container.resolve(ContainerRegistrationKeys.QUERY)
+
+    const { data: orders } = await query.graph({
+      entity: "inventory_orders",
+      fields: [
+        "id",
+        "status",
+        "metadata",
+        "orderlines.id",
+        "orderlines.quantity",
+        "orderlines.inventory_items.id",
+        "orderlines.inventory_items.stock_locations.id",
+        // The cumulative record of what has already been received. This is what
+        // makes a second call a no-op instead of a second posting.
+        "orderlines.line_fulfillments.quantity_delta",
+        // The order's own destination — a partner's location on a consignment
+        // order, and the whole point of the exercise.
+        "stock_locations.id",
+      ],
+      filters: { id: input.orderId },
+    })
+
+    const order = orders?.[0]
+    if (!order) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_FOUND,
+        `Inventory order ${input.orderId} not found`
+      )
+    }
+
+    const lines = ((order as any).orderlines ?? [])
+      .filter(Boolean)
+      .map((ol: any) => ({
+        id: String(ol.id),
+        quantity: ol.quantity ?? 0,
+        received: ((ol.line_fulfillments || []) as any[]).reduce(
+          (s, f) => s + (Number(f?.quantity_delta) || 0),
+          0
+        ),
+        inventory_item_id: (ol.inventory_items || [])[0]?.id ?? null,
+        item_location_ids: ((ol.inventory_items || [])[0]?.stock_locations || [])
+          .map((sl: any) => sl?.id)
+          .filter(Boolean),
+      }))
+
+    const plan = planInventoryOrderReceipt({
+      order_id: input.orderId,
+      status: (order as any).status,
+      // #2286 — the flagged `to_location` end of the route, not
+      // `stock_locations[0]`, which can be the SOURCE (the supplier's own
+      // warehouse) on any order that has one.
+      destination_location_id: await resolveInventoryOrderDestination(
+        container,
+        input.orderId
+      ),
+      location_id: input.stock_location_id ?? null,
+      lines,
+      requested: input.lines ?? null,
+    })
+
+    if (!plan.ok) {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, plan.error)
+    }
+
+    return new StepResponse({
+      lines: plan.lines,
+      destination_location_id: plan.destination_location_id,
+      destination_location_ids: plan.destination_location_ids,
+      postings: postingsFromPlannedLines(plan.lines),
+    })
+  }
+)
+
+/**
+ * Write one `line_fulfillment` per received line and link it to the order.
+ *
+ * Shaped exactly like the partner path's equivalent, and deliberately so: both
+ * doors have to write the SAME cumulative record, or each would be blind to
+ * what the other received and they would post the same goods twice.
+ */
+const recordReceiptFulfillmentsStep = createStep(
+  "receive-inventory-order-record-fulfillments",
+  async (
+    input: {
+      orderId: string
+      lines: PlannedReceiptLine[]
+      notes?: string | null
+      received_by?: string | null
+    },
+    { container, context }
+  ) => {
+    const service: any = container.resolve(FULLFILLED_ORDERS_MODULE)
+    const remoteLink = container.resolve(
+      ContainerRegistrationKeys.LINK
+    ) as unknown as Link
+
+    const createdIds: string[] = []
+    for (const l of input.lines) {
+      const entry = await service.createLine_fulfillments({
+        quantity_delta: l.quantity,
+        event_type: "received",
+        transaction_id: context.transactionId,
+        notes: input.notes ?? undefined,
+        metadata: {
+          workflow_type: "admin_receipt",
+          source: "receive-inventory-order",
+          received_by: input.received_by ?? null,
+          received_at: new Date().toISOString(),
+          location_id: l.location_id,
+        },
+      })
+      createdIds.push(entry.id)
+
+      await remoteLink.create([
+        {
+          [ORDER_INVENTORY_MODULE]: { inventory_order_line_id: l.order_line_id },
+          [FULLFILLED_ORDERS_MODULE]: { line_fulfillment_id: entry.id },
+        },
+        {
+          [ORDER_INVENTORY_MODULE]: { inventory_orders_id: input.orderId },
+          [FULLFILLED_ORDERS_MODULE]: { line_fulfillment_id: entry.id },
+        },
+      ])
+    }
+
+    return new StepResponse({ count: createdIds.length, ids: createdIds }, {
+      ids: createdIds,
+    })
+  },
+  async (rb: any, { container }) => {
+    if (!rb?.ids?.length) {
+      return
+    }
+    const service: any = container.resolve(FULLFILLED_ORDERS_MODULE)
+    for (const id of rb.ids as string[]) {
+      try {
+        await service.deleteLine_fulfillments(id)
+      } catch {
+        // best effort: the level rollback is the one that matters
+      }
+    }
+  }
+)
+
+/** An audit line on the order itself, so the receipt is visible in the timeline. */
+const recordReceiptActivityStep = createStep(
+  "receive-inventory-order-record-activity",
+  async (
+    input: {
+      orderId: string
+      postings: Array<{ inventory_item_id: string; location_id: string; quantity: number }>
+      notes?: string | null
+      received_by?: string | null
+      received_by_partner_id?: string | null
+    },
+    { container }
+  ) => {
+    const service: any = container.resolve(ORDER_INVENTORY_MODULE)
+    if (typeof service?.createInventoryOrderActivities !== "function") {
+      return new StepResponse(null)
+    }
+    // Shape mirrors `buildInventoryOrderActivity` exactly — `activity_type` is a
+    // four-value ENUM (a new value here would be rejected at write time), so the
+    // specific event goes in the free-text `kind`.
+    const row = await service.createInventoryOrderActivities({
+      inventory_order_id: input.orderId,
+      activity_type: "lifecycle_event",
+      kind: "goods_received",
+      actor_type: input.received_by_partner_id ? "partner" : "admin",
+      actor_id: input.received_by ?? null,
+      partner_id: input.received_by_partner_id ?? null,
+      channel: null,
+      message_id: null,
+      template_name: null,
+      recipient: null,
+      summary: `Goods received onto stock: ${input.postings
+        .map((p) => `${p.quantity} × ${p.inventory_item_id} @ ${p.location_id}`)
+        .join(", ")}`,
+      payload: {
+        source: "receive-inventory-order",
+        postings: input.postings,
+        notes: input.notes ?? null,
+      },
+      occurred_at: new Date(),
+    })
+    return new StepResponse(row, row?.id)
+  },
+  async (rowId: string | undefined, { container }) => {
+    if (!rowId) {
+      return
+    }
+    const service: any = container.resolve(ORDER_INVENTORY_MODULE)
+    try {
+      await service.deleteInventoryOrderActivities(rowId)
+    } catch {
+      // best effort
+    }
+  }
+)
+
+/**
+ * #2324 — once a receipt covers every line, finish the partner workflow that is
+ * still waiting on this order (`await-order-start` / `await-order-completion`).
+ * Left waiting, it times out after 23 days and its compensation used to
+ * un-link the partner.
+ *
+ * Last step, no compensation, never throws: an order with no in-flight
+ * transaction is the common case and must not fail the receipt.
+ */
+const signalPartnerWorkflowAfterReceiptStep = createStep(
+  "receive-inventory-order-signal-partner-workflow",
+  async (input: { orderId: string }, { container }) => {
+    try {
+      const evidence = await loadInventoryOrderFinishEvidence(container, input.orderId)
+      if (!evidence || !isFullyReceived(evidence.lines)) {
+        return new StepResponse({ signalled: false, reason: "not fully received" })
+      }
+      const result = await signalPartnerWorkflowFinished(
+        container,
+        input.orderId,
+        "receive-inventory-order"
+      )
+      return new StepResponse({
+        signalled: result.outcomes.some((o) => o.ok),
+        reason: null,
+      })
+    } catch (e: any) {
+      return new StepResponse({ signalled: false, reason: e?.message ?? String(e) })
+    }
+  }
+)
+
+
+/**
+ * #2289 S3 — the receiver's count against what the supplier dispatched.
+ *
+ * A counted line that is still below its dispatch is SHORT: the receiver
+ * counted what arrived, so the rest is missing. That is recorded (it leaves the
+ * "awaiting count" list and the supplier sees it) and our admin team gets one
+ * task per receipt. Goods recorded short that turn up in a later count resolve
+ * their shortfall automatically.
+ *
+ * Lines the receiver did not count are not short, only not counted yet. A
+ * receipt with no `lines` receives everything outstanding, so it is never short.
+ *
+ * The task is best-effort: a shortfall without a task is still the record; a
+ * failed receipt because a task could not be created would lose the count.
+ */
+const recordShortfallsStep = createStep(
+  "receive-inventory-order-record-shortfalls",
+  async (
+    input: {
+      orderId: string
+      countedLineIds: string[]
+      received_by?: string | null
+      received_by_partner_id?: string | null
+    },
+    { container }
+  ) => {
+    const query: any = container.resolve(ContainerRegistrationKeys.QUERY)
+    const fulfilled: any = container.resolve(FULLFILLED_ORDERS_MODULE)
+    const logger: any = container.resolve(ContainerRegistrationKeys.LOGGER)
+
+    const [{ data: orders }, dispatches, shortfalls] = await Promise.all([
+      query.graph({
+        entity: "inventory_orders",
+        fields: [
+          "id",
+          "orderlines.id",
+          "orderlines.quantity",
+          "orderlines.line_fulfillments.quantity_delta",
+          "orderlines.inventory_items.title",
+        ],
+        filters: { id: input.orderId },
+      }),
+      fulfilled.listInventoryDispatches({ inventory_order_id: input.orderId }, { take: null }),
+      fulfilled.listInventoryShortfalls({ inventory_order_id: input.orderId }, { take: null, order: { created_at: "ASC" } }),
+    ])
+    const lines = ((orders?.[0]?.orderlines ?? []) as any[]).filter(Boolean)
+    if (!dispatches.length || !lines.length) {
+      return new StepResponse({ created: [] as string[], resolved: [] as any[] }, { created: [] as string[], resolved: [] as any[] })
+    }
+
+    const plan = planShortfalls(
+      lines,
+      sumDispatchedByLine(dispatches),
+      shortfalls,
+      new Set(input.countedLineIds)
+    )
+    const openShortfalls = (shortfalls as any[]).filter((x) => x.status === "open")
+
+    // Resolve first: goods that turned up after all.
+    const resolvedBefore: any[] = []
+    for (const r of plan.resolve) {
+      let left = r.quantity
+      for (const row of openShortfalls.filter((x: any) => x.inventory_order_line_id === r.line_id)) {
+        if (left <= 0.01) break
+        resolvedBefore.push({ id: row.id, quantity: row.quantity, status: row.status, resolved_at: row.resolved_at, resolution_note: row.resolution_note })
+        const qty = Number(row.quantity) || 0
+        if (qty <= left + 0.01) {
+          await fulfilled.updateInventoryShortfalls({
+            id: row.id,
+            status: "resolved",
+            resolved_at: new Date(),
+            resolution_note: "Arrived later and was counted on a receipt.",
+          })
+          left -= qty
+        } else {
+          await fulfilled.updateInventoryShortfalls({ id: row.id, quantity: Math.round((qty - left) * 1000) / 1000 })
+          left = 0
+        }
+      }
+    }
+
+    if (!plan.record.length) {
+      return new StepResponse({ created: [] as string[], resolved: resolvedBefore }, { created: [] as string[], resolved: resolvedBefore })
+    }
+
+    const created = await fulfilled.createInventoryShortfalls(
+      plan.record.map((r) => ({
+        inventory_order_id: input.orderId,
+        inventory_order_line_id: r.line_id,
+        quantity: r.quantity,
+        dispatched_quantity: r.dispatched,
+        received_quantity: r.received,
+        status: "open",
+        counted_by_partner_id: input.received_by_partner_id ?? null,
+        counted_by: input.received_by ?? null,
+      }))
+    )
+    const createdRows = (Array.isArray(created) ? created : [created]) as any[]
+    const createdIds = createdRows.map((c) => String(c.id))
+
+    try {
+      const titleOf = (lineId: string) => {
+        const ol = lines.find((l: any) => String(l.id) === lineId)
+        const item = Array.isArray(ol?.inventory_items) ? ol.inventory_items[0] : ol?.inventory_items
+        return item?.title ?? lineId
+      }
+      const summary = plan.record
+        .map((r) => `${titleOf(r.line_id)}: dispatched ${r.dispatched}, counted ${r.received}, short ${r.quantity}`)
+        .join("; ")
+      const { result } = await createTasksFromTemplatesWorkflow(container).run({
+        input: {
+          inventoryOrderId: input.orderId,
+          type: "task",
+          title: "Short delivery: received less than the supplier sent",
+          description: `${summary}. Follow up with the supplier: re-send, credit, or write off.`,
+          priority: "high",
+          metadata: {
+            type: "receipt_shortfall",
+            source: "receive-inventory-order",
+            shortfall_ids: createdIds,
+            counted_by_partner_id: input.received_by_partner_id ?? null,
+          },
+        } as any,
+      })
+      const tasks = (result as any)?.[1]
+      const taskId = Array.isArray(tasks) ? tasks[0]?.id : tasks?.id ?? tasks?.tasks?.[0]?.id
+      if (taskId) {
+        await fulfilled.updateInventoryShortfalls(createdIds.map((id) => ({ id, task_id: String(taskId) })))
+      }
+    } catch (e) {
+      logger?.warn?.(`[receive-inventory-order] shortfall task not created for ${input.orderId}: ${(e as Error).message}`)
+    }
+
+    return new StepResponse({ created: createdIds, resolved: resolvedBefore }, { created: createdIds, resolved: resolvedBefore })
+  },
+  async (rb, { container }) => {
+    if (!rb) return
+    const fulfilled: any = container.resolve(FULLFILLED_ORDERS_MODULE)
+    try {
+      if (rb.created?.length) await fulfilled.deleteInventoryShortfalls(rb.created)
+      for (const r of rb.resolved || []) {
+        await fulfilled.updateInventoryShortfalls(r)
+      }
+    } catch {}
+  }
+)
+
+export const receiveInventoryOrderWorkflow = createWorkflow(
+  "receive-inventory-order",
+  (input: ReceiveInventoryOrderInput) => {
+    const plan = planReceiptStep(input)
+
+    recordReceiptFulfillmentsStep({
+      orderId: input.orderId,
+      lines: plan.lines,
+      notes: input.notes,
+      received_by: input.received_by,
+    })
+
+    // The posting itself, in the same shape as the partner path: resolve which
+    // levels exist, create the ones that do not, then add to the rest.
+    //
+    // Deliberately NOT extracted into a shared helper with
+    // `partner-complete-inventory-order`. That path had `approval gates the
+    // goods posting` (#891) land on it days ago and is what actually moves real
+    // goods today; the duplication here is the price of not reshaping it while
+    // proving a new door works.
+    const levels = transform({ plan }, ({ plan }) =>
+      (plan.postings || []).map((p: any) => ({
+        location_id: String(p.location_id),
+        inventory_item_id: String(p.inventory_item_id),
+        stocked_quantity: Number(p.quantity) || 0,
+      }))
+    )
+
+    const resolved = resolveExistingLevelsStep({ levels }) as any
+    const existing = transform(
+      { resolved },
+      ({ resolved }) => resolved?.existing || []
+    )
+
+    const createInputs = transform({ existing, levels }, ({ existing, levels }) => {
+      const exArr = (existing as any[]) || []
+      return ((levels as any[]) || [])
+        .filter(
+          (l) =>
+            !exArr.some(
+              (ex) =>
+                ex.inventory_item_id === l.inventory_item_id &&
+                ex.location_id === l.location_id
+            )
+        )
+        .map((l) => ({
+          inventory_item_id: String(l.inventory_item_id),
+          location_id: String(l.location_id),
+          stocked_quantity: Number(l.stocked_quantity || 0),
+          incoming_quantity: 0,
+        }))
+    })
+
+    const hasCreates = transform(
+      { createInputs },
+      ({ createInputs }) => ((createInputs as any[]) || []).length > 0
+    )
+
+    when(hasCreates, (b) => Boolean(b)).then(() => {
+      createInventoryLevelsWorkflow.runAsStep({
+        input: { inventory_levels: createInputs as unknown as any[] },
+      })
+    })
+
+    const updates = transform({ existing, levels }, ({ existing, levels }) => {
+      const lvlArr = (levels as any[]) || []
+      return (((existing as any[]) || []) as any[]).map((ex) => {
+        const found = lvlArr.find(
+          (l) =>
+            l.inventory_item_id === ex.inventory_item_id &&
+            l.location_id === ex.location_id
+        )
+        return {
+          id: String(ex.id),
+          inventory_item_id: String(ex.inventory_item_id),
+          location_id: String(ex.location_id),
+          stocked_quantity:
+            Number(ex.stocked_quantity || 0) + Number(found?.stocked_quantity || 0),
+        }
+      })
+    })
+
+    const hasUpdates = transform(
+      { updates },
+      ({ updates }) => ((updates as any[]) || []).length > 0
+    )
+
+    when(hasUpdates, (b) => Boolean(b)).then(() => {
+      updateInventoryLevelsWorkflow.runAsStep({
+        input: { updates: updates as any },
+      })
+    })
+
+    recordReceiptActivityStep({
+      orderId: input.orderId,
+      postings: plan.postings,
+      notes: input.notes,
+      received_by: input.received_by,
+      received_by_partner_id: input.received_by_partner_id,
+    })
+
+    // #2289 S3 — a counted line below its dispatch is short.
+    const countedLineIds = transform({ input }, ({ input }) =>
+      Array.isArray(input.lines) ? [...new Set(input.lines.map((l) => String(l.order_line_id)))] : []
+    )
+    recordShortfallsStep({
+      orderId: input.orderId,
+      countedLineIds: countedLineIds as unknown as string[],
+      received_by: input.received_by,
+      received_by_partner_id: input.received_by_partner_id,
+    })
+
+    signalPartnerWorkflowAfterReceiptStep({ orderId: input.orderId })
+
+    return new WorkflowResponse({
+      order_id: input.orderId,
+      received: plan.lines,
+      postings: plan.postings,
+      // Singular, kept for callers that predate splitting; on a split receipt
+      // it names only ONE of the places the goods went.
+      destination_location_id: plan.destination_location_id,
+      destination_location_ids: plan.destination_location_ids,
+    })
+  }
+)
+
+export default receiveInventoryOrderWorkflow
+
+/** Convenience for callers outside a workflow (routes, MCP, maintenance jobs). */
+export const runReceiveInventoryOrder = async (
+  container: MedusaContainer,
+  input: ReceiveInventoryOrderInput
+) => receiveInventoryOrderWorkflow(container as any).run({ input })

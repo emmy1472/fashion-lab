@@ -1,0 +1,106 @@
+//-----------------------------------------------------------------------------
+//  @file   dialogcutspline.h
+//  @author Douglas S Caskey
+//  @date   14 Aug, 2024
+//
+//  @copyright
+//  Copyright (C) 2017 - 2024 Seamly, LLC
+//  https://github.com/fashionfreedom/seamly2d
+//
+//  @brief
+//  Seamly2D is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Seamly2D is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Seamly2D. If not, see <http://www.gnu.org/licenses/>.
+//-----------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------
+//  @file   dialogcutspline.h
+//  @author Roman Telezhynskyi <dismine(at)gmail.com>
+//  @date   15 Dec 2013
+//
+//  @copyright
+//  Copyright (C) 2013 Valentina project.
+//  This source code is part of the Valentina project, a pattern making
+//  program, whose allow create and modeling patterns of clothing.
+//  <https://bitbucket.org/dismine/valentina> All Rights Reserved.
+//
+//  Valentina is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published
+//  by the Free Software Foundation, either version 3 of the License,
+//  or (at your option) any later version.
+//
+//  Valentina is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Valentina.  If not, see <http://www.gnu.org/licenses/>.
+//-----------------------------------------------------------------------------
+
+#ifndef DIALOGCUTSPLINE_H
+#define DIALOGCUTSPLINE_H
+
+#include <qcompilerdetection.h>
+#include <QMetaObject>
+#include <QObject>
+#include <QString>
+#include <QtGlobal>
+
+#include "../vmisc/def.h"
+#include "dialogtool.h"
+
+namespace Ui
+{
+    class DialogCutSpline;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief The DialogCutSpline class dialog for ToolCutSpline.
+//---------------------------------------------------------------------------------------------------------------------
+class DialogCutSpline : public DialogTool
+{
+    Q_OBJECT
+public:
+    DialogCutSpline(const VContainer *data, const quint32 &toolId, QWidget *parent = nullptr);
+    virtual ~DialogCutSpline() override;
+
+    void                setPointName(const QString &value);
+
+    QString             getDirection() const;
+    void                setDirection(const QString &value);
+
+    QString             getFormula() const;
+    void                setFormula(const QString &value);
+
+    quint32             getSplineId() const;
+    void                setSplineId(const quint32 &value);
+
+    QString             getLineColor() const;
+    void                setLineColor(const QString &value);
+
+public slots:
+    virtual void        ChosenObject(quint32 id, const SceneObject &type) override;
+    void                FXLength();
+
+protected:
+    virtual void        ShowVisualization() override;
+    virtual void        SaveData() override; /// @brief SaveData Put dialog data in local variables
+    virtual void        closeEvent(QCloseEvent *event) override;
+
+private:
+    Q_DISABLE_COPY(DialogCutSpline)
+    Ui::DialogCutSpline *ui;     ///  @brief ui keeps information about user interface 
+    QString             formula; ///  @brief formula string with formula
+};
+
+#endif // DIALOGCUTSPLINE_H

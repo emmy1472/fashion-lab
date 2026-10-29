@@ -1,0 +1,128 @@
+---
+name: 🐛 Bug report
+description: Report a problem, or something that went wrong
+title: '[bug]: '
+labels: [':bug: bug']
+body:
+  - type: markdown
+    attributes:
+      value: "Bugs happen :shrug: Please complete the information below so we know what's going on :point_down:"
+  - type: textarea
+    id: desc
+    attributes:
+      label: 'What seems to be the problem? 🤔'
+      description: Please provide a clear and concise description of the problem you encountered
+      placeholder: |
+        When I generate a Simone with my dimensions, the corners of the yoke appear malformed. \
+        This happens both in the lab as on freesewing.org. Seems to occur only when the `box pleat` option is enabled.
+  - type: dropdown
+    id: pkg
+    attributes:
+      label: 'Design / Plugin / Package 🧐'
+      description: Do you know what design/plugin/package the bug is in?
+      multiple: true
+      options:
+        - designs/aaron
+        - designs/albert
+        - designs/bee
+        - designs/bella
+        - designs/benjamin
+        - designs/bent
+        - designs/bibi
+        - designs/bob
+        - designs/breanna
+        - designs/brian
+        - designs/bruce
+        - designs/carlita
+        - designs/carlton
+        - designs/cathrin
+        - designs/charlie
+        - designs/cornelius
+        - designs/diana
+        - designs/examples
+        - designs/florence
+        - designs/florent
+        - designs/gozer
+        - designs/hi
+        - designs/holmes
+        - designs/hortensia
+        - designs/huey
+        - designs/hugo
+        - designs/jaeger
+        - designs/jane
+        - designs/legend
+        - designs/lily
+        - designs/lucy
+        - designs/lumina
+        - designs/lumira
+        - designs/lunetius
+        - designs/magde
+        - designs/naomiwu
+        - designs/noble
+        - designs/octoplushy
+        - designs/onyx
+        - designs/opal
+        - designs/otis
+        - designs/paco
+        - designs/penelope
+        - designs/plugintest
+        - designs/rendertest
+        - designs/sandy
+        - designs/shelly
+        - designs/shin
+        - designs/simon
+        - designs/simone
+        - designs/skully
+        - designs/sven
+        - designs/tamiko
+        - designs/teagan
+        - designs/tiberius
+        - designs/titan
+        - designs/trayvon
+        - designs/tristan
+        - designs/uma
+        - designs/umbra
+        - designs/wahid
+        - designs/walburga
+        - designs/waralee
+        - designs/yuri
+        - plugins/core-plugins
+        - plugins/plugin-annotations
+        - plugins/plugin-bin-pack
+        - plugins/plugin-bust
+        - plugins/plugin-flip
+        - plugins/plugin-gore
+        - plugins/plugin-i18n
+        - plugins/plugin-measurements
+        - plugins/plugin-mirror
+        - plugins/plugin-ringsector
+        - plugins/plugin-round
+        - plugins/plugin-sprinkle
+        - plugins/plugin-svgattr
+        - plugins/plugin-theme
+        - plugins/plugin-timing
+        - plugins/plugin-versionfree-svg
+        - packages/core
+        - packages/models
+        - packages/new-design
+        - packages/prettier-config
+        - packages/react-components
+        - packages/rehype-highlight-lines
+        - packages/rehype-jargon
+        - packages/snapseries
+        - sites/backend
+        - sites/dev
+        - sites/email
+        - sites/org
+        - sites/sde
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Add any other context or screenshots about the issue you are facing here.
+  - type: markdown
+    attributes:
+      value: |
+        Please keep in mind that **FreeSewing is a non-profit project** that depends on **[your support](https://freesewing.org/patrons/join/)**.
+---
+

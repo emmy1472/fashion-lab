@@ -1,0 +1,21 @@
+{
+  "id": "devon",
+  "name": "Devon denim jacket",
+  "code": "Wouter Van Wageningen",
+  "description": "A FreeSewing pattern for a denim jacket, based on the Bent block",
+  "design": "Wouter Van Wageningen",
+  "difficulty": 4,
+  "tags": [
+    "tops",
+    "coats"
+  ],
+  "techniques": [
+    "pocket",
+    "precision",
+    "set-sleeve",
+    "buttonhole"
+  ],
+  "version": "4.2.0",
+  "pkg": "@freesewing/devon",
+  "collection": true
+}

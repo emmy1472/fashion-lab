@@ -1,0 +1,561 @@
+import { Container, Heading, Prompt, StatusBadge, Text, toast } from "@medusajs/ui"
+import { XCircle } from "@medusajs/icons"
+import { useState } from "react"
+import { useParams } from "react-router-dom"
+
+import { CommonSection } from "../../../components/common/section-views"
+import { TwoColumnPage } from "../../../components/pages/two-column-pages"
+import { TwoColumnPageSkeleton } from "../../../components/table/skeleton"
+import { useQuote, useRevokeQuote } from "../../../hooks/api/quotes"
+
+const money = (amount?: number | null, currency?: string) =>
+  amount === null || amount === undefined
+    ? "—"
+    : new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency: (currency || "usd").toUpperCase(),
+      }).format(amount)
+
+/**
+ * How each tax verdict reads to a person, and how much to trust the number
+ * beside it.
+ *
+ * 🔑 `unknown` is not "no tax". It means no rate could be resolved for this
+ * destination, and the amount is deliberately null so nobody can add it to
+ * anything. Colouring it like a settled zero is the whole failure this
+ * vocabulary exists to prevent.
+ */
+const TAX_STATUS: Record<
+  string,
+  { label: string; color: "green" | "grey" | "orange"; hint: string }
+> = {
+  calculated: {
+    label: "Calculated",
+    color: "green",
+    hint: "A real rate, resolved from the same tax module the cart will use.",
+  },
+  zero_rated_export: {
+    label: "Zero-rated export",
+    color: "green",
+    hint: "The goods leave the seller's jurisdiction, so no seller tax is charged. Duty and import VAT still fall on the buyer at their border.",
+  },
+  not_applicable: {
+    label: "Not applicable",
+    color: "grey",
+    hint: "This region does not calculate tax automatically, so neither will the cart.",
+  },
+  unknown: {
+    label: "Unknown",
+    color: "orange",
+    hint: "No rate could be resolved. This is NOT a zero — the buyer is told the figure is missing.",
+  },
+}
+
+/**
+ * The tax rows, or nothing at all on a quote minted before tax existed.
+ *
+ * Kept as a function rather than inline so the partner detail page can be held
+ * to the same shape: the two surfaces showing different tax facts about one
+ * quote is how a partner and an admin end up arguing about a number that is
+ * the same in the database.
+ */
+const taxFields = (quote: any) => {
+  const status = quote.quoted_tax_status as string | null | undefined
+  if (!status) return []
+
+  const meta = TAX_STATUS[status] ?? TAX_STATUS.unknown
+
+  return [
+    {
+      label: quote.quoted_tax_inclusive ? "Tax (included in price)" : "Tax",
+      value: (
+        <span className="flex items-center gap-2">
+          {money(quote.quoted_tax_total, quote.currency_code)}
+          <StatusBadge color={meta.color}>{meta.label}</StatusBadge>
+        </span>
+      ),
+    },
+    {
+      label: "Tax basis",
+      // The frozen reason when there is one — it is the exact sentence the
+      // buyer is reading, so the two can never tell different stories.
+      value: String(quote.quoted_tax_reason || meta.hint),
+    },
+  ]
+}
+
+/**
+ * The activity timeline.
+ *
+ * 🔑 `actor_type` is rendered, not hidden. An admin-minted quote must never
+ * look like one the partner made themselves — that is the first thing asked
+ * when a buyer challenges a price.
+ */
+const ACTOR_LABEL: Record<string, string> = {
+  partner: "Partner",
+  admin: "Admin",
+  buyer: "Buyer",
+  system: "System",
+}
+
+const Timeline = ({ events }: { events: any[] }) => {
+  if (!events?.length) {
+    return (
+      <div className="px-6 py-6">
+        <Text size="small" className="text-ui-fg-subtle">
+          No activity recorded yet. Quotes minted before activity logging
+          shipped have no history — that is expected, not a gap in this quote.
+        </Text>
+      </div>
+    )
+  }
+
+  return (
+    <ul className="px-6 py-4">
+      {events.map((e) => (
+        <li
+          key={e.id}
+          className="flex gap-3 border-l border-ui-border-base pb-4 pl-4 last:pb-0"
+        >
+          <div className="flex flex-col">
+            <div className="flex items-center gap-2">
+              <Text size="small" weight="plus">
+                {e.type}
+              </Text>
+              <StatusBadge color={e.actor_type === "buyer" ? "blue" : "grey"}>
+                {ACTOR_LABEL[e.actor_type] ?? e.actor_type}
+              </StatusBadge>
+            </div>
+            {e.message ? (
+              <Text size="small" className="text-ui-fg-subtle">
+                {e.message}
+              </Text>
+            ) : null}
+            <Text size="xsmall" className="text-ui-fg-muted">
+              {new Date(e.created_at).toLocaleString()}
+            </Text>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+const QuoteDetailPage = () => {
+  const { id } = useParams()
+  const { quote, isLoading } = useQuote(id!)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+
+  const { mutate: revoke, isPending } = useRevokeQuote({
+    onSuccess: (data) => {
+      toast.success(
+        data.price_list_deleted
+          ? "Quote revoked and its price list deleted."
+          : "Quote revoked. No price list was recorded on it, so none was deleted."
+      )
+      setConfirmOpen(false)
+    },
+    onError: (e: any) =>
+      toast.error(e?.message ?? "Could not revoke the quote."),
+  })
+
+  if (isLoading) {
+    return (
+      <TwoColumnPageSkeleton mainSections={2} sidebarSections={2} showJSON />
+    )
+  }
+
+  if (!quote) {
+    return (
+      <Container>
+        <Text size="small" className="text-ui-fg-subtle">
+          Quote not found.
+        </Text>
+      </Container>
+    )
+  }
+
+  /**
+   * 🔑 `waived` is amber, never green. A partner taking a trusted buyer on
+   * account is a decision worth seeing; painting it like money that arrived is
+   * how a receivable goes missing.
+   */
+  const payTone = (
+    s?: string
+  ): "green" | "orange" | "red" | "grey" =>
+    s === "paid"
+      ? "green"
+      : s === "waived" || s === "due"
+        ? "orange"
+        : s === "failed"
+          ? "red"
+          : "grey"
+
+  /**
+   * #1510 — the EFFECTIVE status, so this page and the list it was opened from
+   * read the same word. `status` alone said "active" on a quote whose link the
+   * buyer page was already refusing to price.
+   */
+  const effectiveStatus = quote.status_effective ?? quote.status
+
+  const isRevoked = effectiveStatus === "revoked"
+  /**
+   * A newer quote for this buyer expired this one's price list (#1435). It is
+   * not revocable any more — there is nothing left to delete — but it is also
+   * not a withdrawal, so it must not read as one.
+   */
+  const isSuperseded = effectiveStatus === "superseded"
+  /**
+   * Its clock ran out. Like `superseded`, nothing went wrong and nobody pulled
+   * it — but the price list carries a native `ends_at`, so there is likewise
+   * nothing left for Revoke to do.
+   */
+  const isExpired = effectiveStatus === "expired"
+  const isDead = isRevoked || isSuperseded || isExpired
+
+  const statusColor: "green" | "red" | "orange" | "grey" = isRevoked
+    ? "red"
+    : isSuperseded
+      ? "orange"
+      : isExpired
+        ? "grey"
+        : "green"
+  /**
+   * Acceptance does not replace the status — an accepted quote is still active
+   * until it is paid, and collapsing the two hides which of them the buyer is
+   * in. It is appended, not substituted.
+   */
+  const statusLabel = isRevoked
+    ? "Revoked"
+    : isSuperseded
+      ? "Superseded"
+      : isExpired
+        ? "Expired"
+        : quote.accepted_at
+          ? "Active · Accepted"
+          : "Active"
+
+  /**
+   * 🔴 Revoke is the only action, and it is destructive: it DELETES the price
+   * list behind the quote, so the buyer loses the quoted prices in any cart as
+   * well as the link. It stays behind a `Prompt`, and it is omitted entirely on
+   * a quote that is already dead rather than shown disabled — an action that
+   * cannot do anything invites an operator to hunt for why.
+   */
+  const actionGroups = isDead
+    ? undefined
+    : [
+        {
+          actions: [
+            {
+              icon: <XCircle />,
+              label: "Revoke quote",
+              onClick: () => setConfirmOpen(true),
+            },
+          ],
+        },
+      ]
+
+  return (
+    <>
+      <TwoColumnPage
+        data={quote as any}
+        showJSON
+        showMetadata
+        hasOutlet={false}
+      >
+        <TwoColumnPage.Main>
+          <CommonSection
+            title={quote.recipient_company || quote.recipient_name || "Quote"}
+            description={quote.email_sent_to ?? undefined}
+            actionGroups={actionGroups}
+            fields={[
+              {
+                label: "Status",
+                badge: { value: statusLabel, color: statusColor },
+              },
+              {
+                label: "Landed total",
+                value: money(quote.quoted_landed_total, quote.currency_code),
+              },
+              {
+                label: "Freight",
+                value: (
+                  <span className="flex items-center gap-2">
+                    {money(quote.quoted_freight, quote.currency_code)}
+                    {/* 🔑 A number a person typed and one a carrier returned
+                        carry different confidence; rendering them identically
+                        launders one into the other. */}
+                    {quote.quoted_freight_source === "manual" ? (
+                      <StatusBadge color="orange">By hand</StatusBadge>
+                    ) : null}
+                  </span>
+                ),
+              },
+              ...(quote.quoted_freight_basis
+                ? [
+                    {
+                      label: "Freight basis",
+                      value: String(quote.quoted_freight_basis),
+                    },
+                  ]
+                : []),
+              /**
+               * 🔴 The tax the BUYER is being shown — which nothing on this
+               * page displayed until now.
+               *
+               * A quote went out taxed at 5% while the cart it turns into
+               * charged 18%, because the quote never resolved the
+               * product-type-scoped rate. Both numbers were frozen on this
+               * row the whole time and neither was on screen, so the only way
+               * anyone found out was a buyer failing to accept.
+               *
+               * Rendered with its STATUS, never as a bare amount: `unknown`
+               * and `zero_rated_export` both produce "no tax charged" and mean
+               * entirely different things. A blank here would read as nil due.
+               */
+              ...taxFields(quote),
+              /**
+               * Shown only on a DDP quote, and shown with its basis (#1447).
+               * This is a liability we took on: somebody has to arrange the
+               * clearance and pay this, and until a carrier can do it that
+               * somebody is a person reading this page. A DDP quote whose duty
+               * figure is invisible here is one nobody can honour.
+               */
+              ...(quote.duties_prepaid
+                ? [
+                    {
+                      label: "Duty (we pay)",
+                      value: money(
+                        quote.quoted_duty_total,
+                        quote.currency_code
+                      ),
+                    },
+                    {
+                      // 🔴 Listed separately and NOT folded into the duty: on
+                      // an EU lane this is the larger number by roughly 3×, and
+                      // a lump sum cannot be reconciled against a carrier's
+                      // itemised invoice months later.
+                      label: "Import tax (we pay)",
+                      value: money(
+                        quote.quoted_import_tax_total,
+                        quote.currency_code
+                      ),
+                    },
+                    {
+                      label: "Clearance fee",
+                      value: money(
+                        quote.quoted_ddp_fee_total,
+                        quote.currency_code
+                      ),
+                    },
+                    {
+                      label: "Duty basis",
+                      value: [
+                        quote.quoted_duty_rate !== null &&
+                        quote.quoted_duty_rate !== undefined
+                          ? `${quote.quoted_duty_rate}% duty`
+                          : null,
+                        quote.quoted_import_tax_rate !== null &&
+                        quote.quoted_import_tax_rate !== undefined
+                          ? `${quote.quoted_import_tax_rate}% import tax`
+                          : null,
+                        quote.quoted_duty_basis || null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || "—",
+                    },
+                  ]
+                : []),
+              {
+                /**
+                 * 🔑 Null and 0 are different answers and are shown as such.
+                 * Null means nobody named terms and the platform default
+                 * applies at acceptance; 0 means this buyer pays nothing up
+                 * front. Rendering both as "0%" would misstate one of them.
+                 */
+                label: "Deposit terms",
+                value:
+                  quote.deposit_pct === null || quote.deposit_pct === undefined
+                    ? "Default (30%)"
+                    : `${quote.deposit_pct}%`,
+              },
+              {
+                label: "Destination",
+                value: `${String(quote.destination_country_code || "").toUpperCase()}${
+                  quote.destination_postal_code
+                    ? ` ${quote.destination_postal_code}`
+                    : ""
+                }`,
+              },
+            ]}
+          />
+
+          <Container className="divide-y p-0">
+            <div className="px-6 py-4">
+              <Heading level="h2">Activity</Heading>
+              <Text size="small" className="text-ui-fg-subtle">
+                Who did what to this quote, and when.
+              </Text>
+            </div>
+            <Timeline events={(quote as any).events ?? []} />
+          </Container>
+        </TwoColumnPage.Main>
+
+        <TwoColumnPage.Sidebar>
+          {/* Rendered only once accepted. An empty "0 paid" panel on every
+              unaccepted quote reads as a buyer who has failed to pay rather
+              than one who has not yet been asked. */}
+          {quote.accepted_at ? (
+            <CommonSection
+              title="Payment"
+              description={`Accepted ${new Date(quote.accepted_at).toLocaleString()}`}
+              fields={
+                quote.payment_schedule
+                  ? [
+                      {
+                        label: "Total",
+                        value: money(
+                          quote.payment_schedule.total_due,
+                          quote.payment_schedule.currency_code
+                        ),
+                      },
+                      {
+                        // 🔑 Amount and status in ONE value, because
+                        // `CommonField` is a union — a field carries a value or
+                        // a badge, never both. Split across two rows, "300 INR"
+                        // and "pending" drift apart the moment the layout wraps,
+                        // and money beside the wrong state is worse than either.
+                        label: `Deposit (${quote.payment_schedule.deposit_pct}%)`,
+                        value: (
+                          <span className="flex items-center gap-2">
+                            {money(
+                              quote.payment_schedule.deposit_amount,
+                              quote.payment_schedule.currency_code
+                            )}
+                            <StatusBadge
+                              color={payTone(
+                                quote.payment_schedule.deposit_status
+                              )}
+                            >
+                              {quote.payment_schedule.deposit_status}
+                            </StatusBadge>
+                          </span>
+                        ),
+                      },
+                      {
+                        label: "Balance",
+                        value: (
+                          <span className="flex items-center gap-2">
+                            {money(
+                              quote.payment_schedule.balance_amount,
+                              quote.payment_schedule.currency_code
+                            )}
+                            <StatusBadge
+                              color={payTone(
+                                quote.payment_schedule.balance_status
+                              )}
+                            >
+                              {quote.payment_schedule.balance_status.replace(
+                                "_",
+                                " "
+                              )}
+                            </StatusBadge>
+                          </span>
+                        ),
+                      },
+                      {
+                        label: "Collected via",
+                        value:
+                          quote.payment_schedule.rail === "manual"
+                            ? "Off-platform"
+                            : quote.payment_schedule.rail === "payu"
+                              ? "PayU"
+                              : "Stripe",
+                      },
+                    ]
+                  : [
+                      {
+                        // Said out loud rather than left blank: acceptance got
+                        // as far as a cart and no further, and nothing has been
+                        // charged. That is a state someone has to go and look at.
+                        label: "Schedule",
+                        value: "Missing — acceptance did not finish",
+                      },
+                    ]
+              }
+            />
+          ) : null}
+
+          <CommonSection
+            title="Engagement"
+            description="Whether the buyer has actually opened it."
+            fields={[
+              {
+                label: "Viewed",
+                value:
+                  Number(quote.view_count || 0) === 0
+                    ? "Not yet"
+                    : `${quote.view_count}×`,
+              },
+              {
+                label: "Last viewed",
+                value: quote.last_viewed_at
+                  ? new Date(quote.last_viewed_at).toLocaleString()
+                  : "—",
+              },
+              {
+                label: "Expires",
+                value: quote.expires_at
+                  ? new Date(quote.expires_at).toLocaleString()
+                  : "—",
+              },
+            ]}
+          />
+
+          <CommonSection
+            title="Buyer link"
+            description="The token is the credential."
+            fields={[
+              {
+                /**
+                 * 🔴 Stated, not implied. The raw token is returned once at
+                 * mint and only its sha256 is stored, so no read can rebuild
+                 * the link. A "copy link" button here would be a button that
+                 * cannot work — the UI says so rather than offering one.
+                 */
+                label: "Recoverable",
+                value: "No. Shown once at mint; re-mint to issue a new one.",
+              },
+            ]}
+          />
+        </TwoColumnPage.Sidebar>
+      </TwoColumnPage>
+
+      <Prompt open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <Prompt.Content>
+          <Prompt.Header>
+            <Prompt.Title>Revoke this quote?</Prompt.Title>
+            <Prompt.Description>
+              This deletes the price list behind the quote, so the buyer loses
+              the quoted prices in any cart as well as the link. It cannot be
+              undone — issuing the prices again means minting a new quote.
+            </Prompt.Description>
+          </Prompt.Header>
+          <Prompt.Footer>
+            <Prompt.Cancel>Cancel</Prompt.Cancel>
+            <Prompt.Action onClick={() => revoke(quote.id)}>
+              {isPending ? "Revoking…" : "Revoke"}
+            </Prompt.Action>
+          </Prompt.Footer>
+        </Prompt.Content>
+      </Prompt>
+    </>
+  )
+}
+
+export const handle = {
+  breadcrumb: () => "Quote",
+}
+
+export default QuoteDetailPage

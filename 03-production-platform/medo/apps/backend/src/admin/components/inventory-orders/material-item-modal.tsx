@@ -1,0 +1,297 @@
+import { useContext, useEffect } from "react"
+import { Badge, Button, FocusModal, Text } from "@medusajs/ui"
+import { InventoryItem, RawMaterial } from "../../hooks/api/raw-materials"
+import { StackedFocusModal } from "../modal/stacked-modal/stacked-focused-modal"
+import { StackedModalContext } from "../modal/stacked-modal/stacked-modal-context"
+import { ThumbnailPreview } from "../common/thumbnail-preview"
+import { firstMediaUrl } from "../../lib/utils/first-media-url"
+
+type MaterialItem = (InventoryItem & { raw_materials?: RawMaterial | null }) | null
+
+const MATERIAL_ITEM_MODAL_ID = "material-item-details"
+
+const InfoRow = ({
+  label,
+  value,
+}: {
+  label: string
+  value?: string | number | null
+}) => (
+  <div className="flex flex-col gap-0.5">
+    <Text size="xsmall" className="text-ui-fg-subtle uppercase tracking-wide">
+      {label}
+    </Text>
+    <Text size="small">{value ?? "—"}</Text>
+  </div>
+)
+
+const Divider = () => <div className="border-t border-ui-border-base" />
+
+/** Shared header + body content, reused by the stacked modal and the fallback. */
+const MaterialItemHeaderContent = ({ item }: { item: MaterialItem }) => {
+  const photo =
+    firstMediaUrl(item?.raw_materials?.media) || item?.thumbnail || undefined
+  return (
+    <div className="flex flex-col gap-1">
+      <Text size="small" className="text-ui-fg-subtle uppercase">
+        Inventory Item
+      </Text>
+      <div className="flex flex-wrap items-center gap-3">
+        {photo && (
+          <ThumbnailPreview
+            src={photo}
+            alt={item?.title || "Item"}
+            size="small"
+          />
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <FocusModal.Title asChild>
+            <Text weight="plus" size="large">
+              {item?.title || "Untitled item"}
+            </Text>
+          </FocusModal.Title>
+          {item?.sku && (
+            <Badge size="small" color="grey">
+              SKU: {item.sku}
+            </Badge>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const MaterialItemBodyContent = ({ item }: { item: MaterialItem }) => {
+  if (!item) {
+    return null
+  }
+  const heroPhoto =
+    firstMediaUrl(item.raw_materials?.media) || item.thumbnail || undefined
+  return (
+    <div className="flex flex-col gap-6">
+      {heroPhoto && (
+        <div className="flex justify-center">
+          <ThumbnailPreview
+            src={heroPhoto}
+            alt={item.title || "Item"}
+            size="large"
+          />
+        </div>
+      )}
+      <div className="flex flex-col gap-3">
+        <Text size="small" className="text-ui-fg-subtle">
+          {item.description || "No description provided."}
+        </Text>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <InfoRow label="Material" value={item.material} />
+          <InfoRow label="Weight" value={item.weight} />
+          <InfoRow
+            label="Dimensions"
+            value={`${item.length ?? "—"} × ${item.width ?? "—"} × ${item.height ?? "—"}`}
+          />
+          <InfoRow label="Origin Country" value={item.origin_country} />
+          <InfoRow label="HS Code" value={item.hs_code} />
+          <InfoRow
+            label="Requires Shipping"
+            value={item.requires_shipping ? "Yes" : "No"}
+          />
+        </div>
+      </div>
+
+      {item.raw_materials && (
+        <div className="flex flex-col gap-3">
+          <Divider />
+          <Text weight="plus">Raw Material</Text>
+          {(() => {
+            const media = item.raw_materials?.media
+            const files: string[] = []
+            if (media && Array.isArray((media as { files?: unknown }).files)) {
+              for (const entry of (media as { files: unknown[] }).files) {
+                const url =
+                  typeof entry === "string" ? entry : firstMediaUrl(entry)
+                if (url) {
+                  files.push(url)
+                }
+              }
+            } else {
+              const url = firstMediaUrl(media)
+              if (url) {
+                files.push(url)
+              }
+            }
+            if (files.length > 0) {
+              return (
+                <div className="flex flex-col gap-2">
+                  <Text size="small" className="text-ui-fg-subtle">
+                    Media
+                  </Text>
+                  <div className="flex flex-wrap gap-2">
+                    {files.map((url, index) => (
+                      <ThumbnailPreview
+                        key={index}
+                        src={url}
+                        alt={`${item.raw_materials?.name ?? "Raw material"} media ${index + 1}`}
+                        size="large"
+                      />
+                    ))}
+                  </div>
+                </div>
+              )
+            }
+            return null
+          })()}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <InfoRow label="Name" value={item.raw_materials.name} />
+            <InfoRow label="Color" value={item.raw_materials.color} />
+            <InfoRow label="Width" value={item.raw_materials.width} />
+            <InfoRow label="Weight" value={item.raw_materials.weight} />
+            <InfoRow
+              label="Lead Time (days)"
+              value={
+                item.raw_materials.lead_time_days
+                  ? String(item.raw_materials.lead_time_days)
+                  : undefined
+              }
+            />
+            <InfoRow
+              label="Minimum Order Qty"
+              value={
+                item.raw_materials.minimum_order_quantity
+                  ? String(item.raw_materials.minimum_order_quantity)
+                  : undefined
+              }
+            />
+          </div>
+          {item.raw_materials.description && (
+            <Text size="small" className="text-ui-fg-subtle">
+              {item.raw_materials.description}
+            </Text>
+          )}
+        </div>
+      )}
+
+      {item.location_levels && item.location_levels.length > 0 && (
+        <div className="flex flex-col gap-3">
+          <Divider />
+          <Text weight="plus">Location Levels</Text>
+          <div className="space-y-2">
+            {item.location_levels.map((level) => (
+              <div
+                key={level.id}
+                className="rounded-md border border-ui-border-base p-3 text-sm"
+              >
+                <div className="flex items-center justify-between">
+                  <Text weight="plus">
+                    Location: {level.location_id || "Unknown"}
+                  </Text>
+                  <Badge size="small" color="grey">
+                    {level.inventory_item_id}
+                  </Badge>
+                </div>
+                <div className="mt-2 grid gap-3 sm:grid-cols-3">
+                  <InfoRow
+                    label="Stocked"
+                    value={String(level.stocked_quantity ?? 0)}
+                  />
+                  <InfoRow
+                    label="Reserved"
+                    value={String(level.reserved_quantity ?? 0)}
+                  />
+                  <InfoRow
+                    label="Incoming"
+                    value={String(level.incoming_quantity ?? 0)}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+interface MaterialItemModalProps {
+  item?: MaterialItem
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}
+
+/**
+ * Item-details modal (#832), driven by the order-lines grid's `detailItem`
+ * state and rendered ONCE at the grid root.
+ *
+ * Uses the app's real StackedFocusModal so it stacks ON TOP of the create/edit
+ * order RouteFocusModal (which slides the parent back) instead of floating over
+ * it. The stacked-modal context (provided by RouteFocusModal) is the source of
+ * truth for open/closed, so we mirror our `open` prop into it by id. If the
+ * modal is ever rendered outside a StackedModalProvider we fall back to a plain
+ * FocusModal so details still render.
+ */
+export const MaterialItemModal = ({
+  item,
+  open,
+  onOpenChange,
+}: MaterialItemModalProps) => {
+  const stacked = useContext(StackedModalContext)
+
+  useEffect(() => {
+    if (!stacked) {
+      return
+    }
+    stacked.setIsOpen(MATERIAL_ITEM_MODAL_ID, open)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  if (!stacked) {
+    return (
+      <FocusModal open={open} onOpenChange={onOpenChange}>
+        <FocusModal.Content
+          className="!top-6 flex h-[calc(100vh-3rem)] max-h-[calc(100vh-3rem)] flex-col"
+          overlayProps={{ className: "bg-transparent" }}
+        >
+          <FocusModal.Header>
+            <MaterialItemHeaderContent item={item ?? null} />
+          </FocusModal.Header>
+          <FocusModal.Body className="flex-1 overflow-y-auto px-6 py-4">
+            <MaterialItemBodyContent item={item ?? null} />
+          </FocusModal.Body>
+          <FocusModal.Footer>
+            <FocusModal.Close asChild>
+              <Button variant="secondary" className="ml-auto">
+                Close
+              </Button>
+            </FocusModal.Close>
+          </FocusModal.Footer>
+        </FocusModal.Content>
+      </FocusModal>
+    )
+  }
+
+  return (
+    <StackedFocusModal
+      id={MATERIAL_ITEM_MODAL_ID}
+      onOpenChangeCallback={(next) => {
+        if (!next) {
+          onOpenChange(false)
+        }
+      }}
+    >
+      <StackedFocusModal.Content className="flex h-[calc(100vh-3rem)] max-h-[calc(100vh-3rem)] flex-col">
+        <StackedFocusModal.Header>
+          <MaterialItemHeaderContent item={item ?? null} />
+        </StackedFocusModal.Header>
+        <StackedFocusModal.Body className="flex-1 overflow-y-auto px-6 py-4">
+          <MaterialItemBodyContent item={item ?? null} />
+        </StackedFocusModal.Body>
+        <StackedFocusModal.Footer>
+          <StackedFocusModal.Close asChild>
+            <Button variant="secondary" className="ml-auto">
+              Close
+            </Button>
+          </StackedFocusModal.Close>
+        </StackedFocusModal.Footer>
+      </StackedFocusModal.Content>
+    </StackedFocusModal>
+  )
+}

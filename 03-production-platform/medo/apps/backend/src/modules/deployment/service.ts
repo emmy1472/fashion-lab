@@ -1,0 +1,904 @@
+/**
+ * DeploymentService — Manages Vercel projects and Cloudflare DNS for partner storefronts.
+ *
+ * Resolved from the DI container as "deployment".
+ * Usage: container.resolve("deployment") as DeploymentService
+ */
+
+import { MedusaService } from "@medusajs/framework/utils";
+import type { MedusaContainer } from "@medusajs/framework/types";
+
+import DeploymentAccount from "./models/deployment-account";
+import {
+  resolveCloudflareCredentials,
+  resolveZoneIdByName,
+  type CloudflareCreds,
+} from "./providers/cloudflare-credentials";
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export type VercelProject = {
+  id: string
+  name: string
+  link?: { type: string; repo: string }
+  latestDeployments?: Array<{
+    id: string
+    url: string
+    readyState: string
+    createdAt: number
+  }>
+}
+
+export type VercelDeployment = {
+  id: string
+  url: string
+  readyState: string
+  createdAt: number
+  target: string
+  alias?: string[]
+}
+
+export type VercelDomain = {
+  name: string
+  verified: boolean
+  verification?: Array<{ type: string; domain: string; value: string; reason?: string }>
+}
+
+export type VercelDomainConfig = {
+  configuredBy: string | null
+  acceptedChallenges: string[]
+  misconfigured: boolean
+  recommendedCNAME?: Array<{ rank: number; value: string }>
+  recommendedIPv4?: Array<{ rank: number; value: string[] }>
+}
+
+/** DNS content as compared for identity: trimmed, surrounding quotes stripped. */
+export const normalizeDnsContent = (v: unknown): string =>
+  String(v ?? "").trim().replace(/^"(.*)"$/s, "$1").trim()
+
+export type CloudflareDnsRecord = {
+  id: string
+  type: string
+  name: string
+  content: string
+  proxied: boolean
+  ttl: number
+  created_on: string
+  modified_on: string
+}
+
+type CloudflareResponse<T> = {
+  success: boolean
+  errors: Array<{ code: number; message: string }>
+  result: T
+}
+
+export type EnsureCnameResult = {
+  action: "created" | "updated" | "exists" | "skipped"
+  record?: CloudflareDnsRecord
+  reason?: string
+}
+
+export type ApplyRecommendedDnsResult = {
+  action: "created" | "updated" | "exists" | "skipped" | "failed"
+  type?: "CNAME" | "A"
+  name?: string
+  content?: string
+  record?: CloudflareDnsRecord
+  reason?: string
+  error?: string
+}
+
+// ─── Service ─────────────────────────────────────────────────────────────────
+
+const VERCEL_API_BASE = "https://api.vercel.com"
+const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
+
+class DeploymentService extends MedusaService({ DeploymentAccount }) {
+  private log(level: "info" | "warn" | "error", msg: string, data?: any) {
+    const prefix = `[DeploymentService]`
+    if (data) {
+      console[level](`${prefix} ${msg}`, data)
+    } else {
+      console[level](`${prefix} ${msg}`)
+    }
+  }
+
+  // ── Configuration checks ────────────────────────────────────────────────
+
+  isVercelConfigured(): boolean {
+    return Boolean(process.env.VERCEL_TOKEN)
+  }
+
+  /**
+   * Whether Cloudflare DNS can be driven at all.
+   *
+   * Pass the app container to consult the operator-managed platform row
+   * (`category: "hosting"`, `provider_type: "cloudflare"`); without it this
+   * falls back to env, which is what a caller with no container gets.
+   *
+   * ⚠️ This is a PRESENCE check, not a validity check. It answers "are there
+   * credentials to try", never "do they work" — a dead token and a stale zone
+   * id both pass here and fail at the API. That is exactly how the last
+   * breakage stayed invisible, so do not read a `true` as healthy.
+   */
+  async isCloudflareConfigured(
+    appContainer?: MedusaContainer
+  ): Promise<boolean> {
+    const creds = await resolveCloudflareCredentials(appContainer)
+    const configured = Boolean(creds?.token && (creds?.zoneId || creds?.zoneName))
+    if (!configured) {
+      this.log("warn", "Cloudflare not configured", {
+        hasToken: Boolean(creds?.token),
+        hasZoneId: Boolean(creds?.zoneId),
+        source: creds?.source ?? "none",
+      })
+    }
+    return configured
+  }
+
+  // ── Vercel ──────────────────────────────────────────────────────────────
+
+  private vercelHeaders(): Record<string, string> {
+    const token = process.env.VERCEL_TOKEN
+    if (!token) throw new Error("VERCEL_TOKEN environment variable is not set")
+    return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  }
+
+  private vercelTeamQuery(): string {
+    const teamId = process.env.VERCEL_TEAM_ID
+    return teamId ? `?teamId=${teamId}` : ""
+  }
+
+  sanitizeProjectName(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 100)
+  }
+
+  async createProject(input: {
+    name: string
+    gitRepo: string
+    framework?: string
+    rootDirectory?: string
+    installCommand?: string
+    ignoreCommand?: string
+  }): Promise<VercelProject> {
+    const projectName = this.sanitizeProjectName(input.name)
+    const payload: Record<string, any> = {
+      name: projectName,
+      framework: input.framework || "nextjs",
+      gitRepository: { type: "github", repo: input.gitRepo },
+    }
+    if (input.rootDirectory) {
+      payload.rootDirectory = input.rootDirectory
+    }
+    if (input.installCommand) {
+      payload.installCommand = input.installCommand
+    }
+    if (input.ignoreCommand) {
+      payload.commandForIgnoringBuildStep = input.ignoreCommand
+    }
+    const res = await fetch(`${VERCEL_API_BASE}/v11/projects${this.vercelTeamQuery()}`, {
+      method: "POST",
+      headers: this.vercelHeaders(),
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel createProject failed (${res.status}): ${body}`)
+    }
+    return res.json()
+  }
+
+  async updateProject(
+    projectId: string,
+    patch: {
+      rootDirectory?: string | null
+      installCommand?: string | null
+      ignoreCommand?: string | null
+    }
+  ): Promise<VercelProject> {
+    const payload: Record<string, any> = {}
+    if (patch.rootDirectory !== undefined) payload.rootDirectory = patch.rootDirectory
+    if (patch.installCommand !== undefined) payload.installCommand = patch.installCommand
+    if (patch.ignoreCommand !== undefined) payload.commandForIgnoringBuildStep = patch.ignoreCommand
+
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v9/projects/${projectId}${this.vercelTeamQuery()}`,
+      { method: "PATCH", headers: this.vercelHeaders(), body: JSON.stringify(payload) }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel updateProject failed (${res.status}): ${body}`)
+    }
+    return res.json()
+  }
+
+  async relinkGitRepo(
+    projectId: string,
+    input: { gitRepo: string; type?: "github" | "gitlab" | "bitbucket" }
+  ): Promise<VercelProject> {
+    // Disconnect any existing git link first (404 is fine — nothing to detach)
+    const detachRes = await fetch(
+      `${VERCEL_API_BASE}/v9/projects/${projectId}/link${this.vercelTeamQuery()}`,
+      { method: "DELETE", headers: this.vercelHeaders() }
+    )
+    if (!detachRes.ok && detachRes.status !== 404) {
+      const body = await detachRes.text()
+      throw new Error(`Vercel detach link failed (${detachRes.status}): ${body}`)
+    }
+
+    const attachRes = await fetch(
+      `${VERCEL_API_BASE}/v9/projects/${projectId}/link${this.vercelTeamQuery()}`,
+      {
+        method: "POST",
+        headers: this.vercelHeaders(),
+        body: JSON.stringify({ type: input.type || "github", repo: input.gitRepo }),
+      }
+    )
+    if (!attachRes.ok) {
+      const body = await attachRes.text()
+      throw new Error(`Vercel attach link failed (${attachRes.status}): ${body}`)
+    }
+    return attachRes.json()
+  }
+
+  async listProjects(opts?: { prefix?: string; limit?: number }): Promise<VercelProject[]> {
+    const prefix = opts?.prefix
+    const pageLimit = opts?.limit ?? 100
+    const results: VercelProject[] = []
+    const teamId = process.env.VERCEL_TEAM_ID
+    let until: string | undefined
+
+    while (true) {
+      const url = new URL(`${VERCEL_API_BASE}/v9/projects`)
+      if (teamId) url.searchParams.set("teamId", teamId)
+      url.searchParams.set("limit", String(pageLimit))
+      if (until) url.searchParams.set("until", until)
+
+      const res = await fetch(url.toString(), {
+        method: "GET",
+        headers: this.vercelHeaders(),
+      })
+      if (!res.ok) {
+        const body = await res.text()
+        throw new Error(`Vercel listProjects failed (${res.status}): ${body}`)
+      }
+      const data = (await res.json()) as {
+        projects?: VercelProject[]
+        pagination?: { next?: number | string | null }
+      }
+      for (const p of data.projects || []) {
+        if (!prefix || p.name.startsWith(prefix)) results.push(p)
+      }
+      const next = data.pagination?.next
+      if (!next) break
+      until = String(next)
+    }
+    return results
+  }
+
+  async setEnvironmentVariables(
+    projectId: string,
+    envVars: Array<{
+      key: string
+      value: string
+      type?: "plain" | "sensitive"
+      target?: string[]
+    }>
+  ): Promise<void> {
+    const payload = envVars.map((v) => ({
+      key: v.key,
+      value: v.value,
+      type: v.type || "plain",
+      target: v.target || ["production", "preview"],
+    }))
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v10/projects/${projectId}/env${this.vercelTeamQuery()}&upsert=true`,
+      { method: "POST", headers: this.vercelHeaders(), body: JSON.stringify(payload) }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel setEnvVars failed (${res.status}): ${body}`)
+    }
+  }
+
+  async addDomain(
+    projectId: string,
+    domain: string,
+    opts?: { redirect?: string; redirectStatusCode?: 301 | 302 | 307 | 308 }
+  ): Promise<VercelDomain> {
+    const body: Record<string, any> = { name: domain }
+    if (opts?.redirect) {
+      body.redirect = opts.redirect
+      body.redirectStatusCode = opts.redirectStatusCode ?? 308
+    }
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v10/projects/${projectId}/domains${this.vercelTeamQuery()}`,
+      { method: "POST", headers: this.vercelHeaders(), body: JSON.stringify(body) }
+    )
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(`Vercel addDomain failed (${res.status}): ${text}`)
+    }
+    return res.json()
+  }
+
+  async getDomainConfig(domain: string): Promise<VercelDomainConfig> {
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v6/domains/${domain}/config${this.vercelTeamQuery()}`,
+      { method: "GET", headers: this.vercelHeaders() }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel getDomainConfig failed (${res.status}): ${body}`)
+    }
+    return res.json()
+  }
+
+  async verifyDomain(projectId: string, domain: string): Promise<VercelDomain> {
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v9/projects/${projectId}/domains/${domain}/verify${this.vercelTeamQuery()}`,
+      { method: "POST", headers: this.vercelHeaders() }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel verifyDomain failed (${res.status}): ${body}`)
+    }
+    return res.json()
+  }
+
+  async removeDomain(projectId: string, domain: string): Promise<void> {
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v9/projects/${projectId}/domains/${domain}${this.vercelTeamQuery()}`,
+      { method: "DELETE", headers: this.vercelHeaders() }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel removeDomain failed (${res.status}): ${body}`)
+    }
+  }
+
+  async triggerDeployment(input: {
+    projectName: string
+    gitRepo: string
+    ref?: string
+  }): Promise<VercelDeployment> {
+    const [org, repo] = input.gitRepo.split("/")
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v13/deployments${this.vercelTeamQuery()}&forceNew=1&skipAutoDetectionConfirmation=1`,
+      {
+        method: "POST",
+        headers: this.vercelHeaders(),
+        body: JSON.stringify({
+          name: this.sanitizeProjectName(input.projectName),
+          target: "production",
+          gitSource: { type: "github", org, repo, ref: input.ref || "main" },
+        }),
+      }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel triggerDeployment failed (${res.status}): ${body}`)
+    }
+    return res.json()
+  }
+
+  async getProject(projectId: string): Promise<VercelProject> {
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v9/projects/${projectId}${this.vercelTeamQuery()}`,
+      { method: "GET", headers: this.vercelHeaders() }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel getProject failed (${res.status}): ${body}`)
+    }
+    return res.json()
+  }
+
+  async getDeployment(deploymentId: string): Promise<VercelDeployment> {
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v13/deployments/${deploymentId}${this.vercelTeamQuery()}`,
+      { method: "GET", headers: this.vercelHeaders() }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel getDeployment failed (${res.status}): ${body}`)
+    }
+    return res.json()
+  }
+
+  async deleteProject(projectId: string): Promise<void> {
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v9/projects/${projectId}${this.vercelTeamQuery()}`,
+      { method: "DELETE", headers: this.vercelHeaders() }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel deleteProject failed (${res.status}): ${body}`)
+    }
+  }
+
+  // ── Cloudflare ──────────────────────────────────────────────────────────
+
+  /**
+   * Resolve credentials once per operation and hand them down, rather than
+   * re-reading them per HTTP call. Kept explicit (no instance cache) because
+   * the module service is long-lived: a cached token would outlive an
+   * operator's rotation and the fix would look like it hadn't worked.
+   */
+  private async cloudflareCreds(
+    appContainer?: MedusaContainer
+  ): Promise<CloudflareCreds> {
+    const creds = await resolveCloudflareCredentials(appContainer)
+    if (!creds?.token) {
+      throw new Error(
+        "Cloudflare is not configured: add an active platform (category 'hosting', provider_type 'cloudflare') with an api_token, or set CLOUDFLARE_API_TOKEN."
+      )
+    }
+    return creds
+  }
+
+  private cloudflareHeaders(creds: CloudflareCreds): Record<string, string> {
+    return {
+      Authorization: `Bearer ${creds.token}`,
+      "Content-Type": "application/json",
+    }
+  }
+
+  /**
+   * The zone to write into. Prefers the stored id, but falls back to looking it
+   * up by name — a zone removed and re-added to Cloudflare keeps its name and
+   * gets a NEW id, and every call then fails with an error that blames auth
+   * rather than the id.
+   */
+  private async cloudflareZoneId(creds: CloudflareCreds): Promise<string> {
+    if (creds.zoneId) return creds.zoneId
+    if (creds.zoneName) {
+      const found = await resolveZoneIdByName(creds, creds.zoneName)
+      if (found) {
+        this.log("info", "Cloudflare zone id resolved by name", {
+          zoneName: creds.zoneName,
+        })
+        return found
+      }
+    }
+    throw new Error(
+      "Cloudflare zone is not configured: set zone_id (or zone_name) on the platform row, or CLOUDFLARE_ZONE_ID."
+    )
+  }
+
+  async createDnsRecord(input: {
+    name: string
+    content: string
+    type?: string
+    proxied?: boolean
+    ttl?: number
+  }, creds?: CloudflareCreds): Promise<CloudflareDnsRecord> {
+    const c = creds ?? (await this.cloudflareCreds())
+    const zoneId = await this.cloudflareZoneId(c)
+    this.log("info", `Cloudflare createDnsRecord`, { zoneId: zoneId.slice(0, 8) + "...", name: input.name, content: input.content })
+    const res = await fetch(`${CLOUDFLARE_API_BASE}/zones/${zoneId}/dns_records`, {
+      method: "POST",
+      headers: this.cloudflareHeaders(c),
+      body: JSON.stringify({
+        type: input.type || "CNAME",
+        name: input.name,
+        content: input.content,
+        proxied: input.proxied ?? false,
+        ttl: input.ttl || 1,
+      }),
+    })
+    const data: CloudflareResponse<CloudflareDnsRecord> = await res.json()
+    if (!data.success) {
+      const errMsg = data.errors?.map((e) => e.message).join(", ") || "Unknown error"
+      this.log("error", `Cloudflare createDnsRecord failed`, { errors: data.errors })
+      throw new Error(`Cloudflare createDnsRecord failed: ${errMsg}`)
+    }
+    this.log("info", `Cloudflare createDnsRecord success`, { id: data.result.id })
+    return data.result
+  }
+
+  async listDnsRecords(input: {
+    name?: string
+    type?: string
+  }, creds?: CloudflareCreds): Promise<CloudflareDnsRecord[]> {
+    const c = creds ?? (await this.cloudflareCreds())
+    const zoneId = await this.cloudflareZoneId(c)
+    const params = new URLSearchParams()
+    if (input.name) params.set("name", input.name)
+    if (input.type) params.set("type", input.type)
+    const res = await fetch(
+      `${CLOUDFLARE_API_BASE}/zones/${zoneId}/dns_records?${params.toString()}`,
+      { method: "GET", headers: this.cloudflareHeaders(c) }
+    )
+    const data: CloudflareResponse<CloudflareDnsRecord[]> = await res.json()
+    if (!data.success) {
+      throw new Error(`Cloudflare listDnsRecords failed: ${data.errors?.map((e) => e.message).join(", ") || "Unknown error"}`)
+    }
+    return data.result
+  }
+
+  async updateDnsRecord(
+    recordId: string,
+    input: { name: string; content: string; type?: string; proxied?: boolean; ttl?: number },
+    creds?: CloudflareCreds
+  ): Promise<CloudflareDnsRecord> {
+    const c = creds ?? (await this.cloudflareCreds())
+    const zoneId = await this.cloudflareZoneId(c)
+    const res = await fetch(
+      `${CLOUDFLARE_API_BASE}/zones/${zoneId}/dns_records/${recordId}`,
+      {
+        method: "PUT",
+        headers: this.cloudflareHeaders(c),
+        body: JSON.stringify({
+          type: input.type || "CNAME",
+          name: input.name,
+          content: input.content,
+          proxied: input.proxied ?? false,
+          ttl: input.ttl || 1,
+        }),
+      }
+    )
+    const data: CloudflareResponse<CloudflareDnsRecord> = await res.json()
+    if (!data.success) {
+      throw new Error(`Cloudflare updateDnsRecord failed: ${data.errors?.map((e) => e.message).join(", ") || "Unknown error"}`)
+    }
+    return data.result
+  }
+
+  async deleteDnsRecord(recordId: string, creds?: CloudflareCreds): Promise<void> {
+    const c = creds ?? (await this.cloudflareCreds())
+    const zoneId = await this.cloudflareZoneId(c)
+    const res = await fetch(
+      `${CLOUDFLARE_API_BASE}/zones/${zoneId}/dns_records/${recordId}`,
+      { method: "DELETE", headers: this.cloudflareHeaders(c) }
+    )
+    const data: CloudflareResponse<{ id: string }> = await res.json()
+    if (!data.success) {
+      throw new Error(`Cloudflare deleteDnsRecord failed: ${data.errors?.map((e) => e.message).join(", ") || "Unknown error"}`)
+    }
+  }
+
+  // ── High-level operations ───────────────────────────────────────────────
+
+  /**
+   * Ensure a CNAME record exists for a subdomain pointing to Vercel.
+   * Skips gracefully if Cloudflare is not configured.
+   */
+  async ensureVercelCname(
+    subdomain: string,
+    rootDomain: string,
+    appContainer?: MedusaContainer
+  ): Promise<EnsureCnameResult> {
+    this.log("info", `ensureVercelCname called`, { subdomain, rootDomain })
+
+    if (!(await this.isCloudflareConfigured(appContainer))) {
+      this.log("warn", "ensureVercelCname skipped — Cloudflare not configured")
+      return { action: "skipped", reason: "Cloudflare not configured" }
+    }
+
+    const creds = await this.cloudflareCreds(appContainer)
+
+    const fullDomain = `${subdomain}.${rootDomain}`
+    const vercelCname = "cname.vercel-dns.com"
+
+    this.log("info", `Looking up existing CNAME for ${fullDomain}`)
+    const existing = await this.listDnsRecords({ name: fullDomain, type: "CNAME" }, creds)
+    this.log("info", `Found ${existing.length} existing records for ${fullDomain}`)
+
+    if (existing.length > 0) {
+      const record = existing[0]
+      if (record.content === vercelCname) {
+        this.log("info", `CNAME already points to Vercel: ${record.content}`)
+        return { action: "exists", record }
+      }
+      this.log("info", `Updating CNAME from ${record.content} to ${vercelCname}`)
+      const updated = await this.updateDnsRecord(record.id, {
+        name: fullDomain,
+        content: vercelCname,
+        proxied: false,
+      }, creds)
+      this.log("info", `CNAME updated successfully`, { id: updated.id })
+      return { action: "updated", record: updated }
+    }
+
+    this.log("info", `Creating new CNAME: ${fullDomain} → ${vercelCname}`)
+    const created = await this.createDnsRecord({
+      name: fullDomain,
+      content: vercelCname,
+      proxied: false,
+    }, creds)
+    this.log("info", `CNAME created successfully`, { id: created.id, name: created.name })
+    return { action: "created", record: created }
+  }
+
+  /**
+   * Apply whatever DNS Vercel currently recommends for `domain` into
+   * Cloudflare. Subdomains get a CNAME to recommendedCNAME[0].value (e.g.
+   * `dc034fcb6b63fdce.vercel-dns-017.com` for newer per-project routing);
+   * apex domains get an A record to recommendedIPv4[0].value[0]. Falls
+   * back to the generic cname.vercel-dns.com / 76.76.21.21 if Vercel
+   * returned no recommendation.
+   *
+   * Used in two places that previously had to be kept in sync manually:
+   *   - initial provision (replaces hardcoded ensureVercelCname)
+   *   - the verify/refresh endpoint (which used to only *return* the
+   *     recommended records, leaving DNS apply to the operator)
+   */
+  async applyRecommendedDns(
+    domain: string,
+    appContainer?: MedusaContainer
+  ): Promise<ApplyRecommendedDnsResult> {
+    if (!(await this.isCloudflareConfigured(appContainer))) {
+      return { action: "skipped", reason: "Cloudflare not configured" }
+    }
+
+    const creds = await this.cloudflareCreds(appContainer)
+
+    let config: VercelDomainConfig | null = null
+    try {
+      config = await this.getDomainConfig(domain)
+    } catch (e: any) {
+      // Non-fatal — we'll still apply a sensible fallback so the storefront
+      // resolves while the operator investigates the Vercel-side error.
+      this.log(
+        "warn",
+        `applyRecommendedDns: getDomainConfig failed for ${domain}, using fallback target`,
+        { error: e.message }
+      )
+    }
+
+    const isApex = domain.split(".").length === 2
+    const recommendedCNAME = config?.recommendedCNAME?.[0]?.value
+    const recommendedIPv4 = config?.recommendedIPv4?.[0]?.value?.[0]
+
+    const type: "CNAME" | "A" = isApex ? "A" : "CNAME"
+    const content = isApex
+      ? recommendedIPv4 || "76.76.21.21"
+      : recommendedCNAME || "cname.vercel-dns.com"
+
+    try {
+      const existing = await this.listDnsRecords({ name: domain, type }, creds)
+
+      if (existing.length > 0) {
+        const record = existing[0]
+        if (record.content === content) {
+          this.log("info", `applyRecommendedDns: ${type} already current for ${domain}`)
+          return { action: "exists", type, name: domain, content, record }
+        }
+        const updated = await this.updateDnsRecord(record.id, {
+          name: domain,
+          content,
+          type,
+          proxied: false,
+        }, creds)
+        this.log(
+          "info",
+          `applyRecommendedDns: updated ${type} for ${domain} → ${content}`
+        )
+        return { action: "updated", type, name: domain, content, record: updated }
+      }
+
+      const created = await this.createDnsRecord({
+        name: domain,
+        content,
+        type,
+        proxied: false,
+      }, creds)
+      this.log(
+        "info",
+        `applyRecommendedDns: created ${type} for ${domain} → ${content}`
+      )
+      return { action: "created", type, name: domain, content, record: created }
+    } catch (e: any) {
+      this.log("error", `applyRecommendedDns failed for ${domain}`, {
+        error: e.message,
+      })
+      return { action: "failed", type, name: domain, content, error: e.message }
+    }
+  }
+
+  /**
+   * Upsert a CNAME for `fullDomain` → `target` in our Cloudflare zone,
+   * provider-agnostic. Used for storefront subdomains that live in a zone we
+   * control when the target isn't Vercel's recommendation (e.g. Cloudflare
+   * Pages → `<project>.pages.dev`). Vercel partners keep using
+   * `applyRecommendedDns` for its per-project recommendation.
+   */
+  async ensureCname(
+    fullDomain: string,
+    target: string,
+    appContainer?: MedusaContainer
+  ): Promise<ApplyRecommendedDnsResult> {
+    if (!(await this.isCloudflareConfigured(appContainer))) {
+      return { action: "skipped", reason: "Cloudflare not configured" }
+    }
+    const creds = await this.cloudflareCreds(appContainer)
+    try {
+      const existing = await this.listDnsRecords({ name: fullDomain, type: "CNAME" }, creds)
+      if (existing.length > 0) {
+        const record = existing[0]
+        if (record.content === target) {
+          return { action: "exists", type: "CNAME", name: fullDomain, content: target, record }
+        }
+        const updated = await this.updateDnsRecord(record.id, {
+          name: fullDomain,
+          content: target,
+          type: "CNAME",
+          proxied: false,
+        }, creds)
+        return { action: "updated", type: "CNAME", name: fullDomain, content: target, record: updated }
+      }
+      const created = await this.createDnsRecord({
+        name: fullDomain,
+        content: target,
+        type: "CNAME",
+        proxied: false,
+      }, creds)
+      return { action: "created", type: "CNAME", name: fullDomain, content: target, record: created }
+    } catch (e: any) {
+      this.log("error", `ensureCname failed for ${fullDomain}`, { error: e.message })
+      return { action: "failed", type: "CNAME", name: fullDomain, content: target, error: e.message }
+    }
+  }
+
+  /**
+   * Create the DNS records Vercel requires to verify a domain — typically a
+   * TXT on `_vercel.<zone>` carrying `vc-domain-verify=<host>,<nonce>`.
+   *
+   * 🔴 Two things this got wrong until 2026-10-10 (shramdaan.cicilabel.com
+   * stayed unverified, HTTPS dead):
+   *
+   * 1. It never received the app container, so `cloudflareCreds()` fell back
+   *    to the CLOUDFLARE_API_TOKEN env var — a token that can no longer see
+   *    the zone — while the CNAME step beside it, which DOES pass the
+   *    container, used the platform row's credentials and worked. Pass the
+   *    container.
+   * 2. Every `*.cicilabel.com` storefront shares ONE record name,
+   *    `_vercel.cicilabel.com`. An existing TXT with a different value was
+   *    UPDATED in place — i.e. another partner's verification overwritten.
+   *    A TXT is now always ADDED beside its siblings, never edited.
+   *
+   * Values are compared with surrounding quotes stripped: Cloudflare may
+   * return TXT content quoted.
+   */
+  async createVercelVerificationRecords(
+    verification: Array<{ type: string; domain: string; value: string }> | undefined,
+    appContainer?: MedusaContainer
+  ): Promise<Array<{ domain: string; action: string; id?: string; error?: string }>> {
+    if (!verification?.length) {
+      this.log("info", "No verification records needed")
+      return []
+    }
+
+    if (!(await this.isCloudflareConfigured(appContainer))) {
+      this.log("warn", "Cannot create verification records — Cloudflare not configured")
+      return verification.map((v) => ({ domain: v.domain, action: "skipped" }))
+    }
+
+    const creds = await this.cloudflareCreds(appContainer)
+    const results: Array<{ domain: string; action: string; id?: string; error?: string }> = []
+
+    for (const v of verification) {
+      this.log("info", `Ensuring verification record: ${v.type} ${v.domain}`)
+      try {
+        const existing = await this.listDnsRecords({ name: v.domain, type: v.type }, creds)
+        const match = existing.find(
+          (r) => normalizeDnsContent(r.content) === normalizeDnsContent(v.value)
+        )
+        if (match) {
+          results.push({ domain: v.domain, action: "exists", id: match.id })
+          continue
+        }
+
+        if (existing.length > 0 && String(v.type).toUpperCase() !== "TXT") {
+          // A non-TXT verification record has one value per name: replacing
+          // it is correct. TXT siblings belong to other domains — never this.
+          const updated = await this.updateDnsRecord(
+            existing[0].id,
+            { name: v.domain, content: v.value, type: v.type },
+            creds
+          )
+          results.push({ domain: v.domain, action: "updated", id: updated.id })
+          continue
+        }
+
+        const created = await this.createDnsRecord(
+          { name: v.domain, content: v.value, type: v.type, proxied: false },
+          creds
+        )
+        this.log("info", `Verification record created: ${v.domain}`, { id: created.id })
+        results.push({ domain: v.domain, action: "created", id: created.id })
+      } catch (e: any) {
+        this.log("error", `Failed to create verification record: ${v.domain}`, { error: e.message })
+        results.push({ domain: v.domain, action: "failed", error: e.message })
+      }
+    }
+
+    return results
+  }
+
+  /** One domain as a Vercel project sees it, with its verification challenge. */
+  async getProjectDomain(projectId: string, domain: string): Promise<VercelDomain> {
+    const res = await fetch(
+      `${VERCEL_API_BASE}/v9/projects/${projectId}/domains/${domain}${this.vercelTeamQuery()}`,
+      { method: "GET", headers: this.vercelHeaders() }
+    )
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Vercel getProjectDomain failed (${res.status}): ${body}`)
+    }
+    return res.json()
+  }
+
+  /**
+   * Bring a Vercel storefront domain to verified: read its challenge, publish
+   * the TXT in our zone, ask Vercel to verify. Idempotent — a verified domain
+   * returns immediately, and a TXT already present is left alone. Verification
+   * can lag DNS propagation, so `verified: false` with `txt: created` means
+   * "call again in a minute", not failure.
+   */
+  async ensureVercelDomainVerified(
+    projectId: string,
+    domain: string,
+    appContainer?: MedusaContainer
+  ): Promise<{
+    domain: string
+    verified: boolean
+    txt: Array<{ domain: string; action: string; id?: string; error?: string }>
+    error?: string
+  }> {
+    let current: VercelDomain
+    try {
+      current = await this.getProjectDomain(projectId, domain)
+    } catch (e: any) {
+      return { domain, verified: false, txt: [], error: e.message }
+    }
+    if (current.verified) {
+      return { domain, verified: true, txt: [] }
+    }
+    const txt = await this.createVercelVerificationRecords(
+      current.verification ?? undefined,
+      appContainer
+    )
+    try {
+      const after = await this.verifyDomain(projectId, domain)
+      return { domain, verified: Boolean(after?.verified), txt }
+    } catch (e: any) {
+      // Vercel answers 400 while the TXT has not propagated yet.
+      return { domain, verified: false, txt, error: e.message }
+    }
+  }
+
+  /**
+   * Remove DNS record for a storefront domain. Skips if Cloudflare is not configured.
+   */
+  async removeStorefrontDns(
+    domain: string,
+    appContainer?: MedusaContainer
+  ): Promise<{ action: string; error?: string }> {
+    if (!(await this.isCloudflareConfigured(appContainer))) {
+      return { action: "skipped" }
+    }
+
+    const creds = await this.cloudflareCreds(appContainer)
+
+    try {
+      const records = await this.listDnsRecords({ name: domain, type: "CNAME" }, creds)
+      if (records.length > 0) {
+        await this.deleteDnsRecord(records[0].id, creds)
+        return { action: "deleted" }
+      }
+      return { action: "not_found" }
+    } catch (e: any) {
+      return { action: "failed", error: e.message }
+    }
+  }
+}
+
+export default DeploymentService

@@ -1,0 +1,23 @@
+{
+  "id": "jett",
+  "code": "Candle",
+  "design": "Candle",
+  "description": "A FreeSewing pattern for a bomber or letterman jacket",
+  "name": "Jett Jacket",
+  "difficulty": 4,
+  "collection": true,
+  "tags": [
+    "coats",
+    "tops"
+  ],
+  "techniques": [
+    "button",
+    "ribbing",
+    "welt-pocket",
+    "lining",
+    "set-sleeve",
+    "snap"
+  ],
+  "version": "4.2.0",
+  "pkg": "@freesewing/jett"
+}

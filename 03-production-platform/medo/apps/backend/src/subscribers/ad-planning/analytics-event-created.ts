@@ -1,0 +1,153 @@
+/**
+ * Analytics Event Created Subscriber
+ *
+ * Checks analytics events against conversion goals and tracks conversions.
+ */
+
+import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework";
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils";
+import { AD_PLANNING_MODULE } from "../../modules/ad-planning";
+import { trackConversionWorkflow } from "../../workflows/ad-planning/conversions/track-conversion";
+import { resolveSessionAttributionWorkflow } from "../../workflows/ad-planning/attribution/resolve-session-attribution";
+import { findMatchingCustomGoal } from "../../modules/ad-planning/utils/match-custom-goal";
+
+type AnalyticsEventCreatedEvent = {
+  id: string;
+  event_name: string;
+  event_type?: string;
+  session_id?: string;
+  visitor_id?: string;
+  website_id?: string;
+  page_url?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  event_data?: Record<string, any>;
+};
+
+// Map analytics event names to conversion types
+const EVENT_TO_CONVERSION_MAP: Record<string, string> = {
+  add_to_cart: "add_to_cart",
+  begin_checkout: "begin_checkout",
+  scroll_depth: "scroll_depth",
+  time_on_page: "time_on_site",
+  page_engagement: "page_engagement",
+  lead_submit: "lead_form_submission",
+  form_submit: "lead_form_submission",
+};
+
+export default async function analyticsEventCreatedHandler({
+  event: { data },
+  container,
+}: SubscriberArgs<AnalyticsEventCreatedEvent>) {
+  const logger = container.resolve(ContainerRegistrationKeys.LOGGER);
+  try {
+    const analyticsEvent = data;
+
+    // Skip if no event name
+    if (!analyticsEvent.event_name) {
+      return;
+    }
+
+    const eventName = analyticsEvent.event_name.toLowerCase();
+
+    // Check if this event maps to a conversion type
+    const conversionType = EVENT_TO_CONVERSION_MAP[eventName];
+
+    if (!conversionType) {
+      // Check if there's a custom conversion goal for this event
+      const adPlanningService = container.resolve(AD_PLANNING_MODULE);
+
+      // #568: the goal_type enum value is "custom_event" (not "custom"), and
+      // the matched event name is stored in conditions.event_name — the model
+      // has no trigger_event_name column. Both bugs made this branch dead, so a
+      // custom_event goal never matched an incoming analytics event.
+      const customGoals = await adPlanningService.listConversionGoals({
+        goal_type: "custom_event",
+        is_active: true,
+      });
+
+      const matchingGoal = findMatchingCustomGoal(customGoals, eventName);
+
+      if (!matchingGoal) {
+        // No matching conversion type or goal
+        return;
+      }
+
+      // Track as custom conversion
+      await trackConversionWorkflow(container).run({
+        input: {
+          conversion_type: "custom",
+          visitor_id: analyticsEvent.visitor_id,
+          session_id: analyticsEvent.session_id,
+          website_id: analyticsEvent.website_id,
+          utm_source: analyticsEvent.utm_source,
+          utm_medium: analyticsEvent.utm_medium,
+          utm_campaign: analyticsEvent.utm_campaign,
+          utm_term: analyticsEvent.utm_term,
+          utm_content: analyticsEvent.utm_content,
+          conversion_page: analyticsEvent.page_url,
+          custom_event_name: analyticsEvent.event_name,
+          conversion_value: matchingGoal.default_value ? Number(matchingGoal.default_value) : 0,
+          metadata: analyticsEvent.event_data,
+        },
+      });
+
+      logger.info(`[AdPlanning] Custom conversion tracked for event: ${eventName}`);
+      return;
+    }
+
+    // Track standard conversion
+    await trackConversionWorkflow(container).run({
+      input: {
+        conversion_type: conversionType as any,
+        visitor_id: analyticsEvent.visitor_id,
+        session_id: analyticsEvent.session_id,
+        website_id: analyticsEvent.website_id,
+        utm_source: analyticsEvent.utm_source,
+        utm_medium: analyticsEvent.utm_medium,
+        utm_campaign: analyticsEvent.utm_campaign,
+        utm_term: analyticsEvent.utm_term,
+        utm_content: analyticsEvent.utm_content,
+        conversion_page: analyticsEvent.page_url,
+        metadata: analyticsEvent.event_data,
+      },
+    });
+
+    logger.info(`[AdPlanning] Conversion tracked for event: ${eventName}`);
+
+    // Auto-resolve attribution if session has UTM campaign data.
+    // Nested inside the outer try/catch so that a failure here doesn't
+    // crash the subscriber, but benign duplicate errors (the unique index
+    // on analytics_session_id) are swallowed without log noise.
+    if (analyticsEvent.utm_campaign && analyticsEvent.session_id) {
+      try {
+        await resolveSessionAttributionWorkflow(container).run({
+          input: {
+            session_id: analyticsEvent.session_id,
+            website_id: analyticsEvent.website_id,
+          },
+        });
+      } catch (err: any) {
+        const message = err?.message || String(err);
+        const isDuplicate =
+          message.includes("duplicate") ||
+          message.includes("unique") ||
+          message.includes("already exists");
+        if (!isDuplicate) {
+          logger.error(
+            `[AdPlanning] Attribution resolution failed: ${message}`
+          );
+        }
+      }
+    }
+  } catch (error) {
+    logger.error("[AdPlanning] Failed to process analytics event:", error as Error);
+  }
+}
+
+export const config: SubscriberConfig = {
+  event: "analytics_event.created",
+};

@@ -1,0 +1,1068 @@
+---
+title: useBackend
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { MiniTip } from '@freesewing/react/components/Mini'
+import { Popout } from '@freesewing/react/components/Popout'
+
+<DocusaurusDoc>
+
+The **useBackend** hook provides access to the FreeSewing backend.
+
+Use this hook to load data from the backend, or save data to it.
+
+<MiniTip>To access the user data cached in the browser, refer to the [useAccount](//reference/packages/react/hooks/useaccount/) hook instead.</MiniTip>
+
+## Example
+
+```js
+import { useBackend } from '@freesewing/react/hooks/useBackend'
+
+const MyComponent = () => {
+  const {
+    acceptCset,
+    adminImpersonateUser,
+    adminLoadSubscribers,
+    adminLoadUser,
+    adminPing,
+    adminUpdateUser,
+    confirmMfa,
+    confirmSignup,
+    createApikey,
+    createBookmark,
+    createIssue,
+    createPattern,
+    createPostPr,
+    createSet,
+    createSocialImage,
+    disableMfa,
+    enableMfa,
+    exportAccount,
+    getApikey,
+    getApikeys,
+    getBookmark,
+    getBookmarks,
+    getConfirmation,
+    getCuratedSet,
+    getCuratedSet,
+    getPattern,
+    getPatterns,
+    getPublicPattern,
+    getPublicSet,
+    getSet,
+    getSets,
+    getStats,
+    getSuggestedPacks,
+    getSuggestedSets,
+    getUserCount,
+    getUserData,
+    getUserProfile,
+    isPostSlugAvailable,
+    isUsernameAvailable,
+    newsletterConfirmSubscribe,
+    newsletterStartUnsubscribe,
+    newsletterSubscribe,
+    newsletterUnsubscribe,
+    ping,
+    reloadAccount,
+    removeAccount,
+    removeApikey,
+    removeBookmark,
+    removeCuratedSet,
+    removeImage,
+    removePattern,
+    removeSet,
+    removeSuggestedSet,
+    restrictAccount,
+    signIn,
+    signInFromLink,
+    signUp,
+    suggestCset,
+    suggestOpack,
+    updateAccount,
+    updateConsent,
+    updateCuratedSet,
+    updatePattern,
+    updateSet,
+    uploadImage,
+  } = useBackend()
+
+  // ...
+}
+```
+## Return value
+
+Calling the hook returns an object with the following properties which are all methods:
+
+- [acceptCset](#acceptcset)
+- [adminImpersonateUser](#adminimpersonateuser)
+- [adminLoadSubscribers](#adminloadsubscribers)
+- [adminLoadUser](#adminloaduser)
+- [adminPing](#adminping)
+- [adminUpdateUser](#adminupdateuser)
+- [confirmMfa](#confirmmfa)
+- [confirmSignup](#confirmsignup)
+- [createApikey](#createapikey)
+- [createBookmark](#createbookmark)
+- [createIssue](#createissue)
+- [createPattern](#createpattern)
+- [createPostPr](#createpostpr)
+- [createSet](#createset)
+- [createSocialImage](#createsocialimage)
+- [disableMfa](#disablemfa)
+- [enableMfa](#enablemfa)
+- [exportAccount](#exportaccount)
+- [getApikey](#getapikey)
+- [getApikeys](#getapikeys)
+- [getBookmark](#getbookmark)
+- [getBookmarks](#getbookmarks)
+- [getConfirmation](#getconfirmation)
+- [getCuratedSet](#getcuratedset)
+- [getCuratedSet](#getcuratedset)
+- [getPattern](#getpattern)
+- [getPatterns](#getpatterns)
+- [getPublicPattern](#getpublicpattern)
+- [getPublicSet](#getpublicset)
+- [getSet](#getset)
+- [getSets](#getsets)
+- [getStats](#getstats)
+- [getSuggestedPacks](#getsuggestedpacks)
+- [getSuggestedSets](#getsuggestedsets)
+- [getUserCount](#getusercount)
+- [getUserData](#getuserdata)
+- [getUserProfile](#getuserprofile)
+- [isPostSlugAvailable](#ispostslugavailable)
+- [isUsernameAvailable](#isusernameavailable)
+- [newsletterConfirmSubscribe](#newsletterconfirmsubscribe)
+- [newsletterStartUnsubscribe](#newsletterstartunsubscribe)
+- [newsletterSubscribe](#newslettersubscribe)
+- [newsletterUnsubscribe](#newsletterunsubscribe)
+- [oauthInit](#oauthinit)
+- [oauthSignIn](#oauthsignin)
+- [ping](#ping)
+- [reloadAccount](#reloadaccount)
+- [removeAccount](#removeaccount)
+- [removeApikey](#removeapikey)
+- [removeBookmark](#removebookmark)
+- [removeCuratedSet](#removecuratedset)
+- [removeImage](#removeimage)
+- [removePattern](#removepattern)
+- [removeSet](#removeset)
+- [removeSuggestedSet](#removesuggestedset)
+- [restrictAccount](#restrictaccount)
+- [signIn](#signin)
+- [signInFromLink](#signinfromlink)
+- [signUp](#signup)
+- [suggestCset](#suggestcset)
+- [suggestOpack](#suggestopack)
+- [updateAccount](#updateaccount)
+- [updateConsent](#updateconsent)
+- [updateCuratedSet](#updatecuratedset)
+- [updatePattern](#updatepattern)
+- [updateSet](#updateset)
+- [uploadImage](#uploadimage)
+
+### acceptCset
+
+A method to accept a candidate measurements set for curation.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function acceptCset (
+  Number id // The ID of the curated set to accept for curation
+)
+```
+
+
+### adminImpersonateUser
+
+A method to impersonates a user.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function adminImpersonateUser (
+  Number id // The user ID to impersonate
+)
+```
+
+
+### adminLoadSubscribers
+
+A method to load the list of newsletter subscribers.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function adminLoadSubscribers ()
+```
+
+
+### adminLoadUser
+
+A method to load the account data for a given user ID.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function adminLoadUser (
+  Number id // The user ID to load account data for
+)
+```
+
+
+### adminPing
+
+A method that checks whether a given JSON Web Token (JWT) is valid.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function adminPing (
+  String token // The JWT to verify
+)
+```
+
+
+### adminUpdateUser
+
+A method that loads user data for a user that is not the current user.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function adminUpdateUser (
+  {
+    Number id, // The user ID to update
+    Object data, // The account data to store
+  }
+)
+```
+
+
+### confirmMfa
+
+A method to confirm the setup of MFA on the account.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function confirmMfa (
+  {
+    Boolean mfa, // Whether to enable MFA (true) or not (false)
+    String secret, // The MFA secret
+    String token, // The MFA token (TOTP)
+  }
+)
+```
+
+
+### confirmSignup
+
+A method to confirm the account sign up.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function confirmSignup (
+  {
+    Number id, // The user ID
+    Number consent, // A number representing the consent granted
+  }
+)
+```
+
+
+### createApikey
+
+A method to create an API key.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function createApikey (
+  {
+      String name, // The API key name
+      Number level, // The API key access level
+      Number expiresIn, // Time in seconds before this API key expires
+  }
+)
+```
+
+
+### createBookmark
+
+A method to create a bookmark.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function createBookmark (
+  {
+    String title, // The bookmark title
+    String url, // The bookmark URL
+    String type, // The bookmark type
+  }
+)
+```
+
+
+### createIssue
+
+A method to create an issue on GitHub.
+<Popout type="fixme" compact>This is not (yet) ported to Codeberg.</Popout>
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function createIssue (
+  Object data // The issue data
+)
+```
+
+
+### createPattern
+
+A method to store a new pattern in the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function createPattern (
+  Object data // The pattern data
+)
+```
+
+
+### createPostPr
+
+A method to create a pull request to add a new showcase or blog post.
+
+<Popout type="fixme" compact>This is not (yet) ported to Codeberg.</Popout>
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function createPostPr (
+  String type, // The post type, one of showcase or blog
+  Object data // The post data
+)
+```
+
+
+### createSet
+
+A method to store a new measurements set in the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function createSet (
+  Object data // The set data
+)
+```
+
+
+### createSocialImage
+
+A method to create an image for social media.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function createSocialImage (
+  Object data // The image data
+)
+```
+
+
+### disableMfa
+
+A method to disable MFA on the account.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function disableMfa (
+  {
+    String password, // The user's password
+    String token, // A MFA token (TOTP)
+  }
+)
+```
+
+
+### enableMfa
+
+A method to enable MFA on the account.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function enableMfa ()
+```
+
+
+### exportAccount
+
+A method to export the current user's account data.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function exportAccount ()
+```
+
+
+### getApikey
+
+A method to load an API key from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getApikey (
+  String ID // The API key ID
+)
+```
+
+
+### getApikeys
+
+A method to load the list of API keys from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getApikeys ()
+```
+
+
+### getBookmark
+
+A method to load a bookmark from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getBookmark (
+  String id // The bookmark ID
+)
+```
+
+
+### getBookmarks
+
+A method to load the list of bookmarks from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getBookmarks ()
+```
+
+
+### getConfirmation
+
+A method to load a confirmation from the backend.
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getConfirmation (
+  {
+    string id, // The confirmation ID
+    string check, // The confirmation verifier
+  }
+)
+```
+
+
+### getCuratedSet
+
+A method to load a curated measurements set from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getCuratedSet (
+)
+```
+
+
+### getCuratedSet
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getCuratedSet (
+  Number id // The ID of the curated measurements set to load
+)
+```
+
+
+### getPattern
+
+A method to load a pattern from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getPattern (
+  Number id // The ID of the pattern to load
+)
+```
+
+
+### getPatterns
+
+A method to load the patterns of the current user from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getPatterns ()
+```
+
+
+### getPublicPattern
+
+A method to load a public pattern from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getPublicPattern (
+  Number id // The ID of the public pattern to load
+)
+```
+
+
+### getPublicSet
+
+A method to load a public measurements set from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getPublicSet (
+  Number id // The ID of the public measurements set to load
+)
+```
+
+
+### getSet
+
+A method to load a measurements set from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getSet (
+  Number id // The ID of the measurements set to load
+)
+```
+
+
+### getSets
+
+A method to load the user's measurements sets from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getSets ()
+```
+
+
+### getStats
+
+A method to load statistics about the FreeSewing backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getStats ()
+```
+
+
+### getSuggestedPacks
+
+<Popout type="fixme" compact>This is a work in progress</Popout>
+
+
+### getSuggestedSets
+
+A method to load the measurements sets suggested for curation.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getSuggestedSets ()
+```
+
+
+### getUserCount
+
+A method to load the number of FreeSewing users.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getUserCount ()
+```
+
+
+### getUserData
+
+A method to load a user's data.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getUserData (
+  Number uid, // The user ID
+)
+```
+
+
+### getUserProfile
+
+A method to load a user's profile data.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function getUserProfile (
+  Number uid, // The user ID
+)
+```
+
+
+### isPostSlugAvailable
+
+A method that checks whether a post slug is available in the repository.
+
+<Popout type="fixme" compact>This is not (yet) ported to Codeberg.</Popout>
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function isPostSlugAvailable (
+  {
+    String slug, // The slug to check
+    String type, // The post type, one of showcase or blog
+  }
+)
+```
+
+
+### isUsernameAvailable
+
+A method to check whether a username is available for registration.
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function isUsernameAvailable (
+  String username // The username to check
+)
+```
+
+
+### newsletterConfirmSubscribe
+
+A method to confirm a newsletter subscription after sending out the confirmation email.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function newsletterConfirmSubscribe (
+  {
+    String id, // The confirmation ID
+    String ehash, // The confirmation ehash
+  }
+)
+```
+
+
+### newsletterStartUnsubscribe
+
+A method to start the unsubscribe flow for the newsletter.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function newsletterStartUnsubscribe ()
+```
+
+
+### newsletterSubscribe
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function newsletterSubscribe (
+  String email // The email to unsubscribe
+)
+```
+
+
+### newsletterUnsubscribe
+
+A method to unsubscribe an email address from the newsletter.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function newsletterUnsubscribe (
+  String ehash // The ehash to unsubscribe
+)
+```
+
+
+### ping
+
+A method that checks whether the current user is logged in.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function ping ()
+```
+
+
+### reloadAccount
+
+A method that returns the current account data from the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function reloadAccount ()
+```
+
+
+### removeAccount
+
+A method to remove a user's account.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function removeAccount ()
+```
+
+
+### removeApikey
+
+A method to remove an API key.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function removeApikey (
+  String id // The API key ID
+)
+```
+
+
+### removeBookmark
+
+A method to remove an API key.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function removeBookmark (
+  Number id // The bookmark ID
+)
+```
+
+
+### removeCuratedSet
+
+A method to remove a curated measurements set.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function removeCuratedSet (
+  Number id // The curated measurements set ID
+)
+```
+
+
+### removeImage
+
+A method to remove an image.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function removeImage (
+  String id // The image ID
+)
+```
+
+
+### removePattern
+
+A method to remove a pattern.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function removePattern (
+  Number id // The pattern ID
+)
+```
+
+
+### removeSet
+
+A method to remove a measurements set.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function removeSet (
+  Number id // The measurements set ID
+)
+```
+
+
+### removeSuggestedSet
+
+A method to remove a suggested measurements set. This removes the suggestion, not the measurements set itself.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function removeSuggestedSet (
+  Number id // The suggested measurements set ID
+)
+```
+
+
+### restrictAccount
+
+A method to restrict processing of account data. This locks you out of your account.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function restrictAccount ()
+```
+
+
+### signIn
+
+A method to sign in, or authenticate.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function signIn (
+  {
+    String username, // The username to sign in with
+    String password, // The password
+    String token, // The MFA TOTP token (only required if MFA is enabled on the account)
+  }
+)
+```
+
+
+### signInFromLink
+
+A method to sign in based on the data in a sign in link emailed to the user.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function signInFromLink (
+  {
+    String id, // The confirmation ID
+    String check, // The confirmation verifier
+    String token, // The MFA TOTP token (only required if MFA is enabled on the account)
+  }
+)
+```
+
+
+### signUp
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function signUp (
+  {
+    String email // The email address to sign up
+  }
+)
+```
+
+
+### suggestCset
+
+A method to suggest a measurements set for curation.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function suggestCset (
+  Number id // The ID of the measurements set being suggested
+)
+```
+
+
+### suggestOpack
+
+<Popout type="fixme" compact>This is a work in progress</Popout>
+
+
+### updateAccount
+
+A method to update the account data stored in the backend.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function updateAccount (
+)
+```
+
+
+### updateConsent
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function updateConsent (
+  Object data // The account data to be updated
+)
+```
+
+
+### updateCuratedSet
+
+A method to update a curated measurements set.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function updateCuratedSet (
+  {
+    Number id, // The ID of the curated measurements set to update
+    Object data // The data to be updated
+  }
+)
+```
+
+
+### updatePattern
+
+A method to update a pattern.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function updatePattern (
+  {
+    Number id, // The ID of the pattern to update
+    Object data // The data to be updated
+  }
+)
+```
+
+
+### updateSet
+
+A method to update a measurements set.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function updateSet (
+  {
+    Number id, // The ID of the measurements set to update
+    Object data // The data to be updated
+  }
+)
+```
+
+
+### uploadImage
+
+A method to upload an image.
+
+```js
+[
+  Number status, // The HTTP Status Code returned from the backend
+  Object data, // The response body returned from the backend
+] = async function uploadImage (
+  Object data // The image data
+)
+```
+
+
+</DocusaurusDoc>

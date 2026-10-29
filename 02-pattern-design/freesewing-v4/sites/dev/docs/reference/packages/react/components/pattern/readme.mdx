@@ -1,0 +1,127 @@
+---
+title: Pattern
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import { FunctionDocs } from '@site/src/components/function-docs.js'
+import { ConstantDocs } from '@site/src/components/constant-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.pattern.mjs'
+import * as fndoc from '@site/prebuild/jsdoc/functions.pattern.mjs'
+import * as cdoc from '@site/prebuild/jsdoc/constants.pattern.mjs'
+import { Example } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+- [Constants](#constants)
+- [Functions](#functions)
+
+## Components
+
+The **Pattern** component family provides the following components:
+
+- [Circle](#circle)
+- [Defs](#defs)
+- [Grid](#grid)
+- [Group](#group)
+- [Part](#part)
+- [Path](#path)
+- [Pattern](#pattern)
+- [Point](#point)
+- [Snippet](#snippet)
+- [Stack](#stack)
+- [Svg](#svg)
+- [Text](#text)
+- [TextOnPath](#textonpath)
+
+## Components
+
+### Circle
+
+<ComponentDocs docs={jsdoc.jsdocCircle} example={Example} />
+
+### Defs
+
+<ComponentDocs docs={jsdoc.jsdocDefs} example={Example} />
+
+### Grid
+
+<ComponentDocs docs={jsdoc.jsdocGrid} example={Example} />
+
+### Group
+
+<ComponentDocs docs={jsdoc.jsdocGroup} example={Example} />
+
+### Part
+
+<ComponentDocs docs={jsdoc.jsdocPart} example={Example} />
+
+### Path
+
+<ComponentDocs docs={jsdoc.jsdocPath} example={Example} />
+
+### Pattern
+
+<ComponentDocs docs={jsdoc.jsdocPattern} example={Example} />
+
+### Point
+
+<ComponentDocs docs={jsdoc.jsdocPoint} example={Example} />
+
+### Snippet
+
+<ComponentDocs docs={jsdoc.jsdocSnippet} example={Example} />
+
+### Stack
+
+<ComponentDocs docs={jsdoc.jsdocStack} example={Example} />
+
+### Svg
+
+<ComponentDocs docs={jsdoc.jsdocSvg} example={Example} />
+
+### Text
+
+<ComponentDocs docs={jsdoc.jsdocText} example={Example} />
+
+### TextOnPath
+
+<ComponentDocs docs={jsdoc.jsdocTextOnPath} example={Example} />
+
+## Constants
+
+The **Pattern** family exports the following constants:
+
+- [defaultComponents](#defaultcomponents)
+
+### defaultComponents
+
+<ConstantDocs docs={cdoc.jsdocdefaultComponents} />
+
+## Functions
+
+The **Pattern** family exports the following functions:
+
+- [getId](#getid)
+- [getProps](#getprops)
+- [translateStrings](#translatestrings)
+- [withinPartBounds](#withinpartbounds)
+
+### getId
+
+<FunctionDocs docs={fndoc.jsdocgetId} />
+
+### getProps
+
+<FunctionDocs docs={fndoc.jsdocgetProps} />
+
+### translateStrings
+
+<FunctionDocs docs={fndoc.jsdoctranslateStrings} />
+
+### withinPartBounds
+
+<FunctionDocs docs={fndoc.jsdocwithinPartBounds} />
+
+</DocusaurusDoc>

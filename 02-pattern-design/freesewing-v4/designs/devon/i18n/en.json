@@ -1,0 +1,246 @@
+{
+  "t": "Devon",
+  "d": "A denim jacket design",
+  "p": {
+    "back": "Back",
+    "backPanel": "Back panel",
+    "backSide": "Back outside",
+    "backYoke": "Back yoke",
+    "base": "Base",
+    "collar": "Collar",
+    "cuff": "Cuff",
+    "front": "Front",
+    "frontFacing": "Front facing",
+    "frontInside": "Front inside panel",
+    "frontPanel": "Front panel",
+    "frontSidePanel": "Front outside panel",
+    "frontYoke": "Front yoke",
+    "pocket": "Pocket",
+    "pocketflap": "Pocket flap",
+    "sleevecap": "Sleevecap",
+    "sleeve": "Sleeve",
+    "topSleeve": "Top sleeve",
+    "underSleeve": "Under sleeve",
+    "underCollar": "Under collar",
+    "upperCollar": "Upper collar",
+    "waistband": "Waistband"
+  },
+  "s": { 
+    "largeShoulderWidth.t": "Shoulder Width larger than anticipated",
+    "largeShoulderWidth.d": "The pattern was not able to generate an optimal armhole shape using the given measurements and options. Please be aware that the generated pattern may not be correct. Please retake your measurements, verify that they are correct, and try generating a new pattern with the new measurements."
+  },
+  "o": {
+    "fullBustAdjustment": {
+      "t": "Full Bust Adjustment",
+      "d": "Tries to adjust the jacket to better fit a full bust."
+    },
+    "fullBustAdjustmentNo": {
+      "t": "No Full Bust Adjustment",
+      "d": "Do not adjust the jacket to better fit a full bust."
+    },
+    "fullBustAdjustmentYes": {
+      "t": "Full Bust Adjustment",
+      "d": "Adjust the jacket to better fit a full bust."
+    },
+    "waistAdjustment": {
+      "t": "Waist/Hips adjustment",
+      "d": "Adjusts the bottom of the denim jacket to match the hips measurement."
+    },
+    "waistAdjustmentNo": {
+      "t": "No waist/hips adjustment",
+      "d": "Do not Adjust the bottom of the denim jacket to match the hips measurement."
+    },
+    "waistAdjustmentYes": {
+      "t": "Waist/Hips adjustment",
+      "d": "Adjust the bottom of the denim jacket to match the hips measurement."
+    },
+    "acrossBackFactor": {
+      "t": "Across back factor",
+      "d": "Controls your across back width as a factor of your shoulder to shoulder measurement."
+    },
+    "armholeDepth": {
+      "t": "Armhole depth",
+      "d": "Controls the depth of the armhole. Higher values make a deeper armhole."
+    },
+    "armholeDepthFactor": {
+      "t": "Armhole depth factor (legacy)",
+      "d": "Controls the depth of the armhole. Higher values make a deeper armhole. This option only applies to the legacy (v2) way of calculating the armhole depth."
+    },
+    "backNeckCutout": {
+      "t": "Back neck cutout",
+      "d": "How deep the neck is cut out at the back"
+    },
+    "bicepsEase": {
+      "t": "Biceps ease",
+      "d": "The amount of ease at your upper arm. Note that while we try to respect this, fitting the sleeve to the armhole takes precedence over respecting the exact amount of ease."
+    },
+    "collarEase": {
+      "t": "Collar ease",
+      "d": "The amount of ease around your neck"
+    },
+    "chestEase": {
+      "t": "Chest ease",
+      "d": "The amount of ease at your chest."
+    },
+    "cuffEase": {
+      "t": "Cuff ease",
+      "d": "The amount of ease at your wrist."
+    },
+    "cuffWidth": {
+      "t": "Cuff width",
+      "d": "The width of the cuff."
+    },
+    "hemEase": {
+      "t": "Hem ease",
+      "d": "The amount of ease at the hem."
+    },
+    "frontArmholeDeeper": {
+      "t": "Front armhole extra cutout",
+      "d": "How much do you want the front armhole to be cut out deeper than the back."
+    },
+    "legacyArmholeDepth": {
+      "t": "Legacy armhole depth",
+      "d": "Enable this option to use the legacy way to calculate the armhole depth (using biceps circumference) rather than the v3 way (using the waist to armpit measurement)"
+    },
+    "legacyArmholeDepthNo": {
+      "t": "Calculate armhole depth the v3 way",
+      "d": "Uses the waist to armpit measurement to locate the bottom of the armhole"
+    },
+    "legacyArmholeDepthYes": {
+      "t": "Calculate armhole depth the legacy (v2) way",
+      "d": "Uses the biceps measurement to locate the bottom of the armhole"
+    },
+    "frontPocket": {
+      "t": "Front pocket",
+      "d": "Enable this option to create a front pocket"
+    },
+    "frontPocketNo": {
+      "t": "Do not create a front pocket",
+      "d": "Leave out the front pocket in the panel seam"
+    },
+    "frontPocketYes": {
+      "t": "Create a front pocket",
+      "d": "This creates a front pocket in the panel seam"
+    },
+    "lengthBonus": {
+      "t": "Length bonus",
+      "d": "The amount to lengthen the garment. A negative value will shorten it."
+    },
+    "neckDrop": {
+      "t": "Neck drop",
+      "d": "The amount the front of the neck will drop."
+    },
+    "shoulderEase": {
+      "t": "Shoulder ease",
+      "d": "The amount of ease at your shoulder. This increases the shoulder to shoulder distance to accommodate additional layers or thickness."
+    },
+    "shoulderShift": {
+      "t": "Shoulder shift",
+      "d": "This controls how far the shoulder seam is shifted to the front."
+    },
+    "shoulderSlopeReduction": {
+      "t": "Shoulder slope reduction",
+      "d": "The amount by which the shoulder slope is reduced to allow for shoulder padding."
+    },
+    "sleeveLengthBonus": {
+      "t": "Sleeve length bonus",
+      "d": "The amount to lengthen the sleeve. A negative value will shorten it."
+    },
+    "sleeveBend": {
+      "t": "Sleeve bend",
+      "d": "The angle of the sleeve at the elbow."
+    },
+    "sleevecapEase": {
+      "t": "Sleevecap ease",
+      "d": "The amount by which the sleevecap seam is longer than the armhole seam."
+    },
+    "sleevecapHeight": {
+      "t": "Sleevecap height",
+      "d": "Controls the height of the sleevecap."
+    },
+    "sleevecapTopFactorX": {
+      "t": "Sleevecap top X",
+      "d": "Controls the horizontal location of the sleevecap top."
+    },
+    "sleevecapTopFactorY": {
+      "t": "Sleevecap top Y",
+      "d": "Controls the height of the sleevecap. A higher value results in a higher and more narrow sleevecap."
+    },
+    "sleevecapBackFactorX": {
+      "t": "Sleevecap back X",
+      "d": "Controls the placement of the sleevecap back pitchpoint on the X-axis (horizontal)"
+    },
+    "sleevecapBackFactorY": {
+      "t": "Sleevecap back Y",
+      "d": "Controls the placement of the sleevecap back pitchpoint on the Y-axis (vertical)"
+    },
+    "sleevecapFrontFactorX": {
+      "t": "Sleevecap front X",
+      "d": "Controls the placement of the sleevecap front pitchpoint on the X-axis (horizontal)"
+    },
+    "sleevecapFrontFactorY": {
+      "t": "Sleevecap front Y",
+      "d": "Controls the placement of the sleevecap front pitchpoint on the Y-axis (vertical)"
+    },
+    "sleevecapQ1Offset": {
+      "t": "Sleevecap Q1 offset",
+      "d": "Controls the curvature of the sleevecap in the first quadrant (front armhole)"
+    },
+    "sleevecapQ2Offset": {
+      "t": "Sleevecap Q2 offset",
+      "d": "Controls the curvature of the sleevecap in the second quadrant (front shoulder)"
+    },
+    "sleevecapQ3Offset": {
+      "t": "Sleevecap Q3 offset",
+      "d": "Controls the curvature of the sleevecap in the third quadrant (back shoulder)"
+    },
+    "sleevecapQ4Offset": {
+      "t": "Sleevecap Q4 offset",
+      "d": "Controls the curvature of the sleevecap in the fourth quadrant (back armhole)"
+    },
+    "sleevecapQ1Spread1": {
+      "t": "Sleevecap Q1 downward spread",
+      "d": "Controls the spread of the sleevecap first quadrant curvature towards the armhole"
+    },
+    "sleevecapQ1Spread2": {
+      "t": "Sleevecap Q1 upward spread",
+      "d": "Controls the spread of the sleevecap first quadrant curvature towards the shoulder"
+    },
+    "sleevecapQ2Spread1": {
+      "t": "Sleevecap Q2 downward spread",
+      "d": "Controls the spread of the sleevecap second quadrant curvature towards the armhole"
+    },
+    "sleevecapQ2Spread2": {
+      "t": "Sleevecap Q2 upward spread",
+      "d": "Controls the spread of the sleevecap second quadrant curvature towards the shoulder"
+    },
+    "sleevecapQ3Spread1": {
+      "t": "Sleevecap Q3 upward spread",
+      "d": "Controls the spread of the sleevecap third quadrant curvature towards the shoulder"
+    },
+    "sleevecapQ3Spread2": {
+      "t": "Sleevecap Q3 downward spread",
+      "d": "Controls the spread of the sleevecap third quadrant curvature towards the armhole"
+    },
+    "sleevecapQ4Spread1": {
+      "t": "Sleevecap Q4 upward spread",
+      "d": "Controls the spread of the sleevecap fourth quadrant curvature towards the shoulder"
+    },
+    "sleevecapQ4Spread2": {
+      "t": "Sleevecap Q4 downward spread",
+      "d": "Controls the spread of the sleevecap fourth quadrant curvature towards the armhole"
+    },
+    "sleeveWidthGuarantee": {
+      "t": "Sleeve width guarantee",
+      "d": "Controls how much of the sleeve width will be guaranteed. This determines how much we can alter the sleeve width to fit the sleeve in the armhole."
+    },
+    "waistbandWidth": {
+      "t": "Waistband width",
+      "d": "The width of the waistband."
+    },
+    "yokeDrop": {
+      "t": "Yoke drop",
+      "d": "How far the yoke will drop down. Percentage of back neck-to-waist."
+    }
+  }
+}

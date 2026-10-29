@@ -1,0 +1,461 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="101.02814mm"
+   height="131.07002mm"
+   viewBox="0 0 101.02817 131.07"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4 (86a8ad7, 2024-10-11)"
+   sodipodi:docname="front5.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     inkscape:zoom="2.0792508"
+     inkscape:cx="-69.977128"
+     inkscape:cy="187.80803"
+     inkscape:window-width="2560"
+     inkscape:window-height="1369"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs1">
+    <pattern
+       inkscape:collect="always"
+       xlink:href="#pattern24"
+       preserveAspectRatio="xMidYMid"
+       id="pattern6"
+       patternTransform="matrix(0.3,0,0,0.3,2449.6626,1438.5313)"
+       x="0"
+       y="0" />
+    <pattern
+       inkscape:collect="always"
+       xlink:href="#pattern24"
+       preserveAspectRatio="xMidYMid"
+       id="pattern20"
+       patternTransform="matrix(0.3,0,0,0.3,2449.6626,1438.5313)"
+       x="0"
+       y="0" />
+    <pattern
+       inkscape:collect="always"
+       xlink:href="#pattern24"
+       preserveAspectRatio="xMidYMid"
+       id="pattern18"
+       patternTransform="matrix(0.3,0,0,0.3,2449.6626,1438.5313)"
+       x="0"
+       y="0" />
+    <pattern
+       patternUnits="userSpaceOnUse"
+       width="410.18935"
+       height="382.93905"
+       patternTransform="translate(2449.6626,1438.5313)"
+       preserveAspectRatio="xMidYMid"
+       id="pattern24"
+       inkscape:label="pattern24">
+      <rect
+         style="fill:#09275d;fill-opacity:1;stroke:none;stroke-width:1e-08;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:0.0340157;filter:url(#filter24)"
+         id="rect19"
+         width="108.52927"
+         height="101.31929"
+         x="648.13989"
+         y="380.61142"
+         transform="matrix(3.7795276,0,0,3.7795276,-2449.6626,-1438.5313)" />
+    </pattern>
+    <filter
+       inkscape:label="Film Grain"
+       inkscape:menu="Image Effects"
+       inkscape:menu-tooltip="Adds a small scale graininess"
+       style="color-interpolation-filters:sRGB"
+       id="filter24"
+       x="0"
+       y="0"
+       width="1"
+       height="1">
+      <feTurbulence
+         type="fractalNoise"
+         numOctaves="3"
+         baseFrequency="1"
+         seed="0"
+         result="result0"
+         id="feTurbulence23" />
+      <feColorMatrix
+         result="result4"
+         values="0"
+         type="saturate"
+         id="feColorMatrix23" />
+      <feComposite
+         in="SourceGraphic"
+         in2="result4"
+         operator="arithmetic"
+         k1="1.25"
+         k2="0.5"
+         k3="0.5"
+         result="result2"
+         id="feComposite23"
+         k4="0" />
+      <feBlend
+         result="result5"
+         mode="normal"
+         in="result2"
+         in2="SourceGraphic"
+         id="feBlend23" />
+      <feComposite
+         in="result5"
+         in2="SourceGraphic"
+         operator="in"
+         result="result3"
+         id="feComposite24" />
+    </filter>
+    <pattern
+       patternUnits="userSpaceOnUse"
+       width="410.18935"
+       height="382.93905"
+       patternTransform="translate(2986.0641,1626.4152)"
+       preserveAspectRatio="xMidYMid"
+       id="pattern37"
+       style="fill:#000000"
+       inkscape:label="pattern37">
+      <g
+         id="g37"
+         transform="matrix(3.7795276,0,0,3.7795276,-2986.0641,-1626.4152)">
+        <rect
+           style="display:inline;fill:#95acd3;fill-opacity:1;stroke:none;stroke-width:0.264583;filter:url(#filter37)"
+           width="108.52927"
+           height="101.31929"
+           x="790.06281"
+           y="430.32236"
+           id="rect31" />
+        <rect
+           style="display:inline;fill:#b8c9e5;fill-opacity:0.703046;stroke:none;stroke-width:0.264583"
+           width="108.529"
+           height="101.31929"
+           x="790.06281"
+           y="430.32236"
+           id="rect36" />
+      </g>
+    </pattern>
+    <filter
+       inkscape:label="Film Grain"
+       inkscape:menu="Image Effects"
+       inkscape:menu-tooltip="Adds a small scale graininess"
+       style="color-interpolation-filters:sRGB"
+       id="filter37"
+       x="0"
+       y="0"
+       width="1"
+       height="1">
+      <feTurbulence
+         type="fractalNoise"
+         numOctaves="3"
+         baseFrequency="1"
+         seed="0"
+         result="result0"
+         id="feTurbulence36" />
+      <feColorMatrix
+         result="result4"
+         values="0"
+         type="saturate"
+         id="feColorMatrix36" />
+      <feComposite
+         in="SourceGraphic"
+         in2="result4"
+         operator="arithmetic"
+         k1="1.25"
+         k2="0.5"
+         k3="0.5"
+         result="result2"
+         id="feComposite36"
+         k4="0" />
+      <feBlend
+         result="result5"
+         mode="normal"
+         in="result2"
+         in2="SourceGraphic"
+         id="feBlend36" />
+      <feComposite
+         in="result5"
+         in2="SourceGraphic"
+         operator="in"
+         result="result3"
+         id="feComposite37" />
+    </filter>
+    <pattern
+       inkscape:collect="always"
+       xlink:href="#pattern37"
+       preserveAspectRatio="xMidYMid"
+       id="pattern1"
+       patternTransform="translate(2986.0641,1626.4152)" />
+    <pattern
+       patternUnits="userSpaceOnUse"
+       width="410.18935"
+       height="382.93905"
+       patternTransform="translate(2986.0641,1626.4152)"
+       preserveAspectRatio="xMidYMid"
+       id="pattern2"
+       style="fill:#000000"
+       inkscape:label="pattern37">
+      <g
+         id="g2"
+         transform="matrix(3.7795276,0,0,3.7795276,-2986.0641,-1626.4152)">
+        <rect
+           style="display:inline;fill:#95acd3;fill-opacity:1;stroke:none;stroke-width:0.264583;filter:url(#filter37)"
+           width="108.52927"
+           height="101.31929"
+           x="790.06281"
+           y="430.32236"
+           id="rect1" />
+        <rect
+           style="display:inline;fill:#b8c9e5;fill-opacity:0.703046;stroke:none;stroke-width:0.264583"
+           width="108.529"
+           height="101.31929"
+           x="790.06281"
+           y="430.32236"
+           id="rect2" />
+      </g>
+    </pattern>
+    <filter
+       inkscape:label="Film Grain"
+       inkscape:menu="Image Effects"
+       inkscape:menu-tooltip="Adds a small scale graininess"
+       style="color-interpolation-filters:sRGB"
+       id="filter3"
+       x="0"
+       y="0"
+       width="1"
+       height="1">
+      <feTurbulence
+         type="fractalNoise"
+         numOctaves="3"
+         baseFrequency="1"
+         seed="0"
+         result="result0"
+         id="feTurbulence2" />
+      <feColorMatrix
+         result="result4"
+         values="0"
+         type="saturate"
+         id="feColorMatrix2" />
+      <feComposite
+         in="SourceGraphic"
+         in2="result4"
+         operator="arithmetic"
+         k1="1.25"
+         k2="0.5"
+         k3="0.5"
+         result="result2"
+         id="feComposite2"
+         k4="0" />
+      <feBlend
+         result="result5"
+         mode="normal"
+         in="result2"
+         in2="SourceGraphic"
+         id="feBlend2" />
+      <feComposite
+         in="result5"
+         in2="SourceGraphic"
+         operator="in"
+         result="result3"
+         id="feComposite3" />
+    </filter>
+    <pattern
+       inkscape:collect="always"
+       xlink:href="#pattern37"
+       preserveAspectRatio="xMidYMid"
+       id="pattern3"
+       patternTransform="translate(2986.0641,1626.4152)" />
+    <pattern
+       patternUnits="userSpaceOnUse"
+       width="410.18935"
+       height="382.93905"
+       patternTransform="translate(2986.0641,1626.4152)"
+       preserveAspectRatio="xMidYMid"
+       id="pattern4"
+       style="fill:#000000"
+       inkscape:label="pattern37">
+      <g
+         id="g4"
+         transform="matrix(3.7795276,0,0,3.7795276,-2986.0641,-1626.4152)">
+        <rect
+           style="display:inline;fill:#95acd3;fill-opacity:1;stroke:none;stroke-width:0.264583;filter:url(#filter37)"
+           width="108.52927"
+           height="101.31929"
+           x="790.06281"
+           y="430.32236"
+           id="rect3" />
+        <rect
+           style="display:inline;fill:#b8c9e5;fill-opacity:0.703046;stroke:none;stroke-width:0.264583"
+           width="108.529"
+           height="101.31929"
+           x="790.06281"
+           y="430.32236"
+           id="rect4" />
+      </g>
+    </pattern>
+    <filter
+       inkscape:label="Film Grain"
+       inkscape:menu="Image Effects"
+       inkscape:menu-tooltip="Adds a small scale graininess"
+       style="color-interpolation-filters:sRGB"
+       id="filter5"
+       x="0"
+       y="0"
+       width="1"
+       height="1">
+      <feTurbulence
+         type="fractalNoise"
+         numOctaves="3"
+         baseFrequency="1"
+         seed="0"
+         result="result0"
+         id="feTurbulence4" />
+      <feColorMatrix
+         result="result4"
+         values="0"
+         type="saturate"
+         id="feColorMatrix4" />
+      <feComposite
+         in="SourceGraphic"
+         in2="result4"
+         operator="arithmetic"
+         k1="1.25"
+         k2="0.5"
+         k3="0.5"
+         result="result2"
+         id="feComposite4"
+         k4="0" />
+      <feBlend
+         result="result5"
+         mode="normal"
+         in="result2"
+         in2="SourceGraphic"
+         id="feBlend4" />
+      <feComposite
+         in="result5"
+         in2="SourceGraphic"
+         operator="in"
+         result="result3"
+         id="feComposite5" />
+    </filter>
+  </defs>
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1"
+     transform="translate(258.42909,-146.03374)">
+    <g
+       id="fs-stack-devon.frontSidePanel"
+       transform="matrix(0.29752405,0,0,0.29752405,-251.21028,95.207855)"
+       style="fill:url(#pattern20);fill-opacity:1;stroke:none">
+      <!-- Start of group #fs-stack-devon.frontSidePanel-part-devon.frontSidePanel -->
+      <g
+         id="fs-stack-devon.frontSidePanel-part-devon.frontSidePanel"
+         style="fill:url(#pattern20);fill-opacity:1;stroke:none">
+        <path
+           class="fabric"
+           id="fs-3"
+           d="M 153.19,391.03 144.82,610.4 258.46727,610.64002 315,260.7 c -25.42,0 -65.44,-17.32 -74.91,-26.79 -15.21,-15.21 -23.34561,-33.17954 -25.92561,-62.30954 0,0 -24.41318,-0.15122 -52.61439,0.0595 z"
+           style="fill:url(#pattern20);fill-opacity:1;stroke:#000000;stroke-width:0.6;stroke-linecap:round;stroke-linejoin:round;stroke-opacity:1"
+           sodipodi:nodetypes="ccccsccc" />
+      </g>
+      <!-- end of group #fs-stack-devon.frontSidePanel-part-devon.frontSidePanel -->
+    </g>
+    <g
+       id="fs-stack-devon.frontPanel-7"
+       transform="matrix(0.29698886,-0.00296038,0.00296038,0.29698886,-252.68449,95.989785)"
+       style="fill:url(#pattern18);fill-opacity:1;stroke:#000000;stroke-opacity:1">
+      <!-- Start of group #fs-stack-devon.frontPanel-part-devon.frontPanel -->
+      <g
+         id="fs-stack-devon.frontPanel-part-devon.frontPanel-7"
+         style="fill:url(#pattern18);fill-opacity:1;stroke:#000000;stroke-opacity:1">
+        <path
+           class="fabric"
+           id="fs-1-7"
+           d="m 144.82,610.4 1.56682,-54.43724 c 0.70173,-27.41477 7.02204,-137.27196 8.16925,-166.39615 L 164.96,170.92 H 64.27 l 20.14302,439.17706 z"
+           style="fill:url(#pattern18);fill-opacity:1;stroke:#000000;stroke-width:0.6;stroke-linecap:round;stroke-linejoin:round;stroke-opacity:1"
+           sodipodi:nodetypes="ccccccc" />
+      </g>
+      <!-- end of group #fs-stack-devon.frontPanel-part-devon.frontPanel -->
+    </g>
+    <path
+       style="fill:none;stroke:#d3ab1d;stroke-width:0.600001;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:2.26772, 1.51181;stroke-dashoffset:0.755904;stroke-opacity:1"
+       d="m -208.94648,276.80377 c 0.19595,-14.49432 3.92611,-114.82175 4.38955,-130.40993"
+       id="path21"
+       sodipodi:nodetypes="cc" />
+    <path
+       style="fill:none;stroke:#d3ab1d;stroke-width:0.600001;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:2.26772, 1.51181;stroke-dashoffset:0.755904;stroke-opacity:1"
+       d="m -210.38349,276.78833 c 0.19595,-14.49432 3.92611,-114.82175 4.38955,-130.40993"
+       id="path1"
+       sodipodi:nodetypes="cc" />
+    <path
+       style="fill:none;stroke:#d3ab1d;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:2.4, 2.4;stroke-dashoffset:5.28"
+       d="m -208.39045,211.38534 h 2.69936"
+       id="path2" />
+    <path
+       style="fill:none;stroke:#d3ab1d;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:2.4, 2.4;stroke-dashoffset:5.28"
+       d="m -210.19003,256.7347 h 2.69936"
+       id="path3" />
+    <g
+       id="fs-stack-devon.frontInside"
+       transform="matrix(0.29678242,0,0,0.29678242,-250.89082,95.841462)"
+       style="fill:url(#pattern6);fill-opacity:1;stroke:#000000;stroke-opacity:1">
+      <!-- Start of group #fs-stack-devon.frontInside-part-devon.frontInside -->
+      <g
+         id="fs-stack-devon.frontInside-part-devon.frontInside"
+         style="fill:url(#pattern6);fill-opacity:1;stroke:#000000;stroke-opacity:1">
+        <path
+           class="fabric"
+           id="fs-9"
+           d="M 84.713181,609.79364 64.27,170.92 H -25.1 v 439.02523 z"
+           style="fill:url(#pattern6);fill-opacity:1;stroke:#000000;stroke-width:0.6;stroke-linecap:round;stroke-linejoin:round;stroke-opacity:1"
+           sodipodi:nodetypes="ccccc" />
+      </g>
+      <!-- end of group #fs-stack-devon.frontInside-part-devon.frontInside -->
+    </g>
+    <path
+       style="fill:none;stroke:#d3ab1d;stroke-width:0.600001;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:2.26772, 1.51181;stroke-dashoffset:0.755904;stroke-opacity:1"
+       d="m -224.82044,276.60837 c 0,0 -5.58035,-129.96442 -5.66204,-130.28268"
+       id="path7"
+       sodipodi:nodetypes="cc" />
+    <path
+       style="fill:none;stroke:#d3ab1d;stroke-width:0.600001;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:2.26772, 1.51181;stroke-dashoffset:0.755904;stroke-opacity:1"
+       d="m -223.1662,276.60837 c 0,0 -5.58035,-129.96442 -5.66204,-130.28268"
+       id="path9"
+       sodipodi:nodetypes="cc" />
+    <g
+       id="g11">
+      <rect
+         style="fill:#fefefe;fill-opacity:1;stroke:#ffffff;stroke-width:0.7;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:2.85732;stroke-opacity:1"
+         id="rect15"
+         width="30.592821"
+         height="4.85886"
+         x="-232.60515"
+         y="146.38374" />
+    </g>
+    <path
+       style="fill:none;stroke:#d3ab1d;stroke-width:0.600001;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:2.26772, 1.51181;stroke-dashoffset:0.755904;stroke-opacity:1"
+       d="m -201.97918,152.33393 -30.73017,-0.0911"
+       id="path15"
+       sodipodi:nodetypes="cc" />
+    <path
+       style="fill:none;stroke:#d3ab1d;stroke-width:0.600001;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:2.26772, 1.51181;stroke-dashoffset:0.755904;stroke-opacity:1"
+       d="m -201.95669,153.52615 -30.73017,-0.0911"
+       id="path16"
+       sodipodi:nodetypes="cc" />
+  </g>
+</svg>

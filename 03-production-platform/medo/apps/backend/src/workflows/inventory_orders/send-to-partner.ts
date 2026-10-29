@@ -1,0 +1,613 @@
+// Configurable await timeouts (seconds) with sane defaults and Node clamp
+const DEFAULT_AWAIT_TIMEOUT_SECONDS = 60 * 60 * 24 * 23 // 23 days (per requirement)
+const NODE_MAX_TIMEOUT_MS = 2_147_483_647 // ~24.8 days
+const SAFE_MAX_TIMEOUT_SECONDS = Math.floor(NODE_MAX_TIMEOUT_MS / 1000)
+const MAX_ALLOWED_SECONDS = 60 * 60 * 24 * 23 // Hard cap at 23 days
+const AWAIT_TIMEOUT_SECONDS = (() => {
+  const v = process.env.INVENTORY_AWAIT_TIMEOUT_SECONDS
+  const n = v ? Number(v) : NaN
+  const desired = Number.isFinite(n) && n > 0 ? n : DEFAULT_AWAIT_TIMEOUT_SECONDS
+  return Math.min(desired, MAX_ALLOWED_SECONDS, SAFE_MAX_TIMEOUT_SECONDS)
+})()
+import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils"
+import { createStep, createWorkflow, StepResponse, WorkflowResponse, transform, when } from "@medusajs/framework/workflows-sdk"
+import { notifyOnFailureStep, sendNotificationsStep } from "@medusajs/medusa/core-flows"
+import type { IEventBusModuleService, RemoteQueryFunction } from "@medusajs/types"
+import type { Link } from "@medusajs/modules-sdk"
+import { ORDER_INVENTORY_MODULE } from "../../modules/inventory_orders"
+import { PARTNER_MODULE } from "../../modules/partner"
+import InventoryOrderService from "../../modules/inventory_orders/service"
+import { LinkDefinition } from "@medusajs/framework/types"
+import { createTasksFromTemplatesWorkflow } from "./create-tasks-from-templates"
+import { mirrorPartnerLinkOnUnifiedOrderStep } from "./dual-write-unified-order"
+import { TASKS_MODULE } from "../../modules/tasks"
+import TaskService from "../../modules/tasks/service"
+import { isWaitExpiry } from "./lib/wait-expiry"
+import {
+    assessInventoryOrderFinished,
+    loadInventoryOrderFinishEvidence,
+} from "./lib/order-finished"
+
+/**
+ * #2324 — the compensation guard. True when the order is finished by real
+ * evidence (see `assessInventoryOrderFinished`), in which case the rollback
+ * keeps the partner link (and the assignment claim) and emits no
+ * `inventory_order_partner_link_rolled_back` event.
+ *
+ * If the evidence cannot be read it answers false — the pre-#2324 behaviour —
+ * and says so in the log, rather than guessing.
+ */
+const isFinishedForRollback = async (container: any, orderId: string | undefined): Promise<boolean> => {
+    if (!orderId) {
+        return false
+    }
+    let logger: any = null
+    try {
+        logger = container.resolve(ContainerRegistrationKeys.LOGGER)
+    } catch {
+        logger = null
+    }
+    try {
+        const evidence = await loadInventoryOrderFinishEvidence(container, orderId)
+        if (!evidence) {
+            return false
+        }
+        const verdict = assessInventoryOrderFinished(evidence)
+        if (verdict.finished) {
+            logger?.info?.(
+                `[inventory-order] send-to-partner rollback kept the partner link on finished order ${orderId}: ${verdict.reasons.join("; ")}`
+            )
+        }
+        return verdict.finished
+    } catch (e: any) {
+        logger?.warn?.(
+            `[inventory-order] send-to-partner rollback could not read finish evidence for ${orderId}; rolling back as before: ${e?.message ?? e}`
+        )
+        return false
+    }
+}
+
+/**
+ * 🔴 The wait expiring is NOT a reason to take the order away from the partner.
+ *
+ * Before this, an order nobody had finished in 23 days was silently UNLINKED:
+ * the partner lost it from their portal while it still read "Processing" in
+ * the admin, and the only trace was a feed item saying "Failed to send order".
+ * 2026-10-05: JP Handloom's sample `inv_order_01M2AK0ET8005WDMWKSENX4PV2`
+ * (sent 12 Sep, courier pickup failing for 10 days) lost its partner exactly
+ * 23 days after it was sent.
+ *
+ * Cancelling instead would be worse — a slow but real order (cloth still on
+ * the loom, a pickup that keeps slipping) cancelled behind everyone's back,
+ * and a message to a partner cannot be recalled. So the order stays exactly as
+ * it is, assigned, and a PERSON is told to decide: follow up, or cancel.
+ */
+const reportWaitExpired = async (
+    container: any,
+    orderId: string | undefined,
+    partnerId: string | undefined
+) => {
+    try {
+        const eventService = container.resolve(Modules.EVENT_BUS) as IEventBusModuleService
+        await eventService.emit({
+            name: "inventory_order_partner_wait_expired",
+            data: {
+                inventory_order_id: orderId,
+                partner_id: partnerId,
+                timeout_days: Math.round(AWAIT_TIMEOUT_SECONDS / 86400),
+                timestamp: new Date().toISOString(),
+            },
+        })
+    } catch {
+        // best-effort: the order itself is untouched either way
+    }
+    try {
+        const notificationService = container.resolve(Modules.NOTIFICATION) as any
+        await notificationService.createNotifications([
+            {
+                to: "",
+                channel: "feed",
+                template: "admin-ui",
+                data: {
+                    title: "Inventory order: no update from partner",
+                    description: `Order ${orderId} has had no update from partner ${partnerId} for ${Math.round(
+                        AWAIT_TIMEOUT_SECONDS / 86400
+                    )} days. It is still assigned to them. Follow up, or cancel the order.`,
+                },
+            },
+        ])
+    } catch {
+        // best-effort
+    }
+}
+
+type SendInventoryOrderToPartnerInput = {
+    inventoryOrderId: string,
+    partnerId: string,
+    notes?: string,
+    reinitiate?: boolean,
+}
+
+const validateInventoryOrderStep = createStep(
+    "validate-inventory-order",
+    async (input: SendInventoryOrderToPartnerInput, { container }) => {
+        const query = container.resolve(ContainerRegistrationKeys.QUERY) as Omit<RemoteQueryFunction, symbol>
+
+        const { data: orders } = await query.graph({
+            entity: "inventory_orders",
+            fields: ["*", "tasks.*"],
+            filters: {
+                id: input.inventoryOrderId
+            }
+        })
+
+        if (!orders || orders.length === 0) {
+            throw new MedusaError(MedusaError.Types.NOT_FOUND, `Inventory order ${input.inventoryOrderId} not found`)
+        }
+
+        const order = orders[0] as any
+
+        if (order.status !== 'Pending') {
+            throw new MedusaError(MedusaError.Types.INVALID_DATA, `Inventory order must be in Pending status to send to partner. Current status: ${order.status}`)
+        }
+
+        // Idempotency guard: reject if partner workflow tasks already exist
+        const tasks: any[] = Array.isArray(order.tasks) ? order.tasks : []
+        const PARTNER_TASK_NAMES = ["partner-order-sent", "partner-order-received", "partner-order-shipped"]
+        const existingPartnerTask = tasks.find(
+            (t) => PARTNER_TASK_NAMES.includes(t?.title) && t?.transaction_id
+        )
+        if (existingPartnerTask) {
+            throw new MedusaError(
+                MedusaError.Types.INVALID_DATA,
+                `Inventory order ${input.inventoryOrderId} is already assigned to a partner (transaction: ${existingPartnerTask.transaction_id}). Use the existing workflow or cancel it before reassigning.`
+            )
+        }
+
+        return new StepResponse(order)
+    }
+)
+
+/**
+ * #780 H7c — take an exclusive claim on this order's partner assignment.
+ *
+ * Runs BEFORE the link, the tasks and the partner notification, so a request
+ * that loses the race stops before it can duplicate any of them.
+ *
+ * The claim is a conditional update: only a row whose `partner_assignment_id`
+ * is still null is updated, so two concurrent sends resolve to exactly one
+ * winner in a single atomic statement. The zero-row result is the loser's
+ * signal — the same compare-and-set shape already merged on the partner start
+ * route (#780 A4), which this deliberately mirrors.
+ *
+ * ⚠️ Do not "simplify" this into a read-then-write. That is what it replaces.
+ */
+const claimPartnerAssignmentStep = createStep(
+    "claim-partner-assignment",
+    async (input: { inventoryOrderId: string }, { container, context }) => {
+        const pg = container.resolve(ContainerRegistrationKeys.PG_CONNECTION) as any
+        const transactionId = context.transactionId
+
+        // 🔴 This MUST be raw SQL. `updateInventoryOrders({ selector, data })`
+        // looks like a conditional update but is a read-then-write: two
+        // concurrent calls with the same `where ... is null` selector BOTH
+        // return a row (probed directly — 1 and 1, expected 1 and 0). A single
+        // UPDATE ... WHERE ... IS NULL is serialized by Postgres row locking,
+        // so the loser's predicate re-evaluates to false and it updates zero
+        // rows. See #780 — the same false-atomicity affects the A4 guard on the
+        // partner start route.
+        const claimed = await pg.raw(
+            `update inventory_orders
+                set partner_assignment_id = ?, updated_at = now()
+              where id = ?
+                and partner_assignment_id is null
+                and deleted_at is null
+             returning id`,
+            [transactionId, input.inventoryOrderId]
+        )
+        const rows = claimed?.rows ?? []
+
+        if (rows.length === 0) {
+            // Either another request claimed it microseconds ago, or the order
+            // was already assigned and the route pre-check did not see it.
+            throw new MedusaError(
+                MedusaError.Types.CONFLICT,
+                `Inventory order ${input.inventoryOrderId} is already assigned to a partner. Cancel the existing assignment before sending it again.`
+            )
+        }
+
+        return new StepResponse({ inventoryOrderId: input.inventoryOrderId, transactionId }, {
+            inventoryOrderId: input.inventoryOrderId,
+            transactionId,
+            claimedAt: new Date().toISOString(),
+        })
+    },
+    async (claimed, { container }) => {
+        if (!claimed) {
+            return
+        }
+        // #2324 — a finished order keeps its claim, alongside its link.
+        if (await isFinishedForRollback(container, claimed.inventoryOrderId)) {
+            return
+        }
+        // …and so does one whose 23-day wait merely ran out (see
+        // reportWaitExpired). The link step's compensation does the telling.
+        if (isWaitExpiry((claimed as any).claimedAt)) {
+            return
+        }
+        const pg = container.resolve(ContainerRegistrationKeys.PG_CONNECTION) as any
+        // Release only our own claim — the transaction id is in the predicate,
+        // so a rollback can never clear an assignment another run owns.
+        await pg.raw(
+            `update inventory_orders
+                set partner_assignment_id = null, updated_at = now()
+              where id = ? and partner_assignment_id = ?`,
+            [claimed.inventoryOrderId, claimed.transactionId]
+        )
+    }
+)
+
+const validatePartnerStep = createStep(
+    "validate-partner",
+    async (input: SendInventoryOrderToPartnerInput, { container }) => {
+        const query = container.resolve(ContainerRegistrationKeys.QUERY) as Omit<RemoteQueryFunction, symbol>
+        
+        const { data: partners } = await query.graph({
+            entity: "partners",
+            fields: ["*"],
+            filters: {
+                id: input.partnerId
+            }
+        })
+        
+        if (!partners || partners.length === 0) {
+            throw new MedusaError(MedusaError.Types.NOT_FOUND, `Partner ${input.partnerId} not found`)
+        }
+        
+        const partner = partners[0]
+        
+        return new StepResponse(partner)
+    }
+)
+
+const updateInventoryOrderStep = createStep(
+    "update-inventory-order-metadata",
+    async (input: { inventoryOrderId: string, metadata: Record<string, any> }, { container }) => {
+        const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE)
+        
+        const updatedOrder = await inventoryOrderService.updateInventoryOrders({
+            id: input.inventoryOrderId,
+            metadata: {
+                ...input.metadata
+            }
+        })
+        
+        return new StepResponse(updatedOrder)
+    }
+)
+
+const linkInventoryOrderWithPartnerStep = createStep(
+    "link-inventory-order-with-partner",
+    async (input: {inventoryOrderId: string, partnerId: string}, { container }) => {
+        const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link
+
+        const links: LinkDefinition[] = [{
+            [PARTNER_MODULE]: {
+                partner_id: input.partnerId,
+            },
+            [ORDER_INVENTORY_MODULE]: {
+                inventory_orders_id: input.inventoryOrderId,
+            },
+            data: {
+                partner_id: input.partnerId,
+                inventory_order_id: input.inventoryOrderId,
+                assigned_at: new Date().toISOString()
+            },
+        }]
+        await remoteLink.create(links)
+        return new StepResponse(links)
+    },
+    async (links: LinkDefinition[], { container }) => {
+        // Compensation: remove the link
+        if (!links || links.length === 0) {
+            return
+        }
+
+        // #2324 — a finished order keeps its partner. The await steps time out
+        // after 23 days when the order was finished through a door that never
+        // signalled them (admin receive, the close-received job); un-linking
+        // then hid a delivered, paid order from the partner's portal.
+        const guardOrderId = (links[0] as any)?.[ORDER_INVENTORY_MODULE]?.inventory_orders_id
+        if (await isFinishedForRollback(container, guardOrderId)) {
+            return
+        }
+
+        // The wait ran out on an unfinished order: keep the partner, tell a person.
+        const assignedAt = (links[0] as any)?.data?.assigned_at
+        if (isWaitExpiry(assignedAt)) {
+            await reportWaitExpired(
+                container,
+                guardOrderId,
+                (links[0] as any)?.[PARTNER_MODULE]?.partner_id
+            )
+            return
+        }
+
+        const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link
+        await remoteLink.dismiss(links)
+
+        // Emit an admin-feed style event so history is visible even when link is rolled back
+        try {
+            const eventService = container.resolve(Modules.EVENT_BUS) as IEventBusModuleService
+            const link = (links || [])[0] as any
+            const inventoryOrderId = link?.[ORDER_INVENTORY_MODULE]?.inventory_orders_id
+            const partnerId = link?.[PARTNER_MODULE]?.partner_id
+            await eventService.emit({
+                name: "inventory_order_partner_link_rolled_back",
+                data: {
+                    inventory_order_id: inventoryOrderId,
+                    partner_id: partnerId,
+                    reason: "workflow_rollback",
+                    timestamp: new Date().toISOString(),
+                }
+            })
+        } catch (e) {
+            // swallow rollback event emission errors silently
+        }
+    }
+)
+
+const notifyPartnerStep = createStep(
+    {
+        name: 'notify-partner-inventory-order',
+    },
+    async (input: {input: SendInventoryOrderToPartnerInput, order: any}, { container }) => {
+        const eventService = container.resolve(Modules.EVENT_BUS) as IEventBusModuleService
+        
+        // Emit event for partner notification
+        eventService.emit({
+            name: "inventory_order_assigned_to_partner",
+            data: {
+                inventory_order_id: input.input.inventoryOrderId,
+                partner_id: input.input.partnerId,
+                order: input.order,
+                notes: input.input.notes
+            }
+        })
+        
+    }
+)
+
+const awaitOrderStart = createStep(
+    {
+        name: 'await-order-start',
+        async: true,
+        // #778 H12 — actually apply the configured await timeout (was computed
+        // but never wired), mirroring production-run lifecycle steps.
+        timeout: AWAIT_TIMEOUT_SECONDS,
+        maxRetries: 2
+    },
+    async (_, { container }) => {
+        // ✅ NO return statement - waits for external signaling via setStepSuccess
+    }
+)
+
+const awaitOrderCompletion = createStep(
+    {
+        name: 'await-order-completion',
+        async: true,
+        // #778 H12 — apply the configured await timeout (see awaitOrderStart).
+        timeout: AWAIT_TIMEOUT_SECONDS,
+        maxRetries: 2
+    },
+    async (_, { container }) => {
+        // ✅ NO return statement - waits for external signaling via setStepSuccess
+    }
+)
+
+const updateOrderStatusStep = createStep(
+    "update-order-status-for-partner",
+    async (input: {orderId: string, status: string}, { container }) => {
+        const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE)
+        
+        const updatedOrder = await inventoryOrderService.updateInventoryOrders({
+            id: input.orderId,
+            status: input.status as any
+        })
+        
+        return new StepResponse(updatedOrder)
+    },
+    async (updatedOrder, { container }) => {
+        if (!updatedOrder) {
+            return;
+        }
+        // Compensation: revert status change if needed
+        const inventoryOrderService: InventoryOrderService = container.resolve(ORDER_INVENTORY_MODULE)
+        // Note: In a real scenario, you'd want to store the previous status
+        // For now, we'll just log the compensation
+        // (no-op logging removed)
+    }
+)
+
+
+
+const setTaskTransactionIdsStep = createStep(
+    "set-task-transaction-ids",
+    async (input: {partnerTasks: any}, { container, context }) => {
+        const taskService: TaskService = container.resolve(TASKS_MODULE)
+        const workflowTransactionId = context.transactionId
+
+        // Get the created tasks from the workflow result
+        // The task creation workflow returns [validateStep, createTasksStep, createLinksStep]
+        // The actual tasks are in createTasksStep.withTemplates, and task IDs are in the links
+        const workflowResult = input.partnerTasks
+        let createdTasks: any[] = []
+        
+        // Extract task IDs from the link objects (index 2 contains the links)
+        const linkObjects = workflowResult[2] || []
+        const taskIds: string[] = []
+        
+        if (Array.isArray(linkObjects)) {
+            for (const link of linkObjects) {
+                if (link && link.task_id) {
+                    taskIds.push(link.task_id)
+                }
+            }
+        }
+        
+        // Get the actual task objects using TaskService
+        if (taskIds.length > 0) {
+            const tasks = await taskService.listTasks({
+                id: taskIds
+            })
+            createdTasks = tasks
+        }
+        
+        // Update tasks with workflow transaction ID for proper coordination
+        const updatedTasks: any[] = []
+        if (Array.isArray(createdTasks)) {
+            for (const task of createdTasks) {
+                if (task && typeof task === 'object' && 'id' in task) {
+                    const updatedTask = await taskService.updateTasks({
+                        id: task.id,
+                        transaction_id: workflowTransactionId,
+                        status: task.title?.includes("sent") ? "completed" : "pending" // Mark "sent" task as completed
+                    })
+                    updatedTasks.push(updatedTask)
+                }
+            }
+        }
+        
+        return new StepResponse({
+            tasks: updatedTasks,
+            transactionId: workflowTransactionId
+        })
+    },
+    async (taskData, { container }) => {
+        // Compensation: remove transaction IDs from tasks
+        if (!taskData || !taskData.tasks || !Array.isArray(taskData.tasks)) {
+            return
+        }
+        
+        const taskService: TaskService = container.resolve(TASKS_MODULE)
+        
+        for (const task of taskData.tasks) {
+            if (task && typeof task === 'object' && 'id' in task) {
+                try {
+                    await taskService.updateTasks({
+                        id: task.id,
+                        transaction_id: null // Remove transaction ID
+                    })
+                } catch (error) {
+                    // swallow compensation errors silently
+                }
+            }
+        }
+    }
+)
+
+export const sendInventoryOrderToPartnerWorkflow = createWorkflow(
+    {
+        name: 'send-inventory-order-to-partner',
+        store: true
+    },
+    (input: SendInventoryOrderToPartnerInput) => {
+        // Failure notification if this workflow itself errors at kickoff
+        const failureNotification = transform({ input }, (data) => {
+            return [
+                {
+                    to: "",
+                    channel: "feed",
+                    template: "admin-ui",
+                    data: {
+                        title: "Inventory Order Partner Workflow",
+                        // Fires for a kickoff failure AND for the 23-day wait
+                        // running out; the latter now keeps the partner and
+                        // posts its own "no update from partner" item.
+                        description: `The partner workflow for order ${data.input.inventoryOrderId} (partner ${data.input.partnerId}) stopped. Open the order to see whether the partner is still assigned.`,
+                    },
+                },
+            ]
+        })
+        notifyOnFailureStep(failureNotification)
+
+        // Step 1: Validate the inventory order
+        const order = validateInventoryOrderStep(input)
+        
+        // Step 2: Validate the partner
+        const partner = validatePartnerStep(input)
+
+        // #780 H7c — claim the assignment before anything observable happens.
+        // A concurrent duplicate send fails here, so it cannot duplicate the
+        // tasks, the partner notification, or the awaiting workflow instance.
+        claimPartnerAssignmentStep({ inventoryOrderId: input.inventoryOrderId })
+
+        // The link itself is NOT the guard: Link.create refuses a second
+        // *partner* for one order (singular-side uniqueness, cf. #1775) but is
+        // a silent no-op for the same partner twice. The claim above covers it.
+        linkInventoryOrderWithPartnerStep({
+            inventoryOrderId: input.inventoryOrderId,
+            partnerId: input.partnerId
+        })
+        
+        // #342 T2: mirror the assignment onto the unified core order
+        // (partner_order link + metadata.partner_status). Best-effort —
+        // the step swallows its own errors.
+        mirrorPartnerLinkOnUnifiedOrderStep({
+            inventoryOrderId: input.inventoryOrderId,
+            partnerId: input.partnerId
+        })
+
+        // Step 4: Update inventory order with admin notes
+        const orderWithNotes = updateInventoryOrderStep({
+            inventoryOrderId: input.inventoryOrderId,
+            metadata: {
+                assignment_notes: input.notes
+            }
+        })
+        
+        // Step 5/6: Always create tasks and set transaction ids
+        const partnerTasks = createTasksFromTemplatesWorkflow.runAsStep({
+            input: {
+                inventoryOrderId: input.inventoryOrderId,
+                type: "template",
+                template_names: ["partner-order-sent", "partner-order-received", "partner-order-shipped"],
+                metadata: {
+                    partner_id: input.partnerId,
+                    inventory_order_id: input.inventoryOrderId,
+                    workflow_type: "partner_assignment"
+                }
+            }
+        })
+        const tasksWithTransactionIds = setTaskTransactionIdsStep({ partnerTasks })
+        
+        // Step 7: Notify partner (always)
+        notifyPartnerStep({input, order})
+
+        // Success notification that kickoff completed
+        const successNotification = transform({ input }, (data) => {
+            return [
+                {
+                    to: "",
+                    channel: "feed",
+                    template: "admin-ui",
+                    data: {
+                        title: "Inventory Order Partner Workflow",
+                        description: `Order ${data.input.inventoryOrderId} sent to partner ${data.input.partnerId}.`,
+                    },
+                },
+            ]
+        })
+        sendNotificationsStep(successNotification)
+        
+        // Step 8: Wait for partner to start
+        awaitOrderStart()
+        
+        // Step 9: Wait for partner to complete
+        awaitOrderCompletion()
+        
+        return new WorkflowResponse({
+            success: true
+        })
+    }
+)

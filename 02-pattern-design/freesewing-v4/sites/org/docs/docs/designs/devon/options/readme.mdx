@@ -1,0 +1,311 @@
+---
+title: "Devon: Design Options"
+sidebar_label: Design Options
+sidebar_position: 10
+toc_max_heading_level: 5
+---
+
+import Acrossbackfactor from '@site/docs/docs/designs/devon/options/acrossbackfactor/readme.mdx'
+import Armholedepth from '@site/docs/docs/designs/devon/options/armholedepth/readme.mdx'
+import Armholedepthfactor from '@site/docs/docs/designs/devon/options/armholedepthfactor/readme.mdx'
+import Backneckcutout from '@site/docs/docs/designs/devon/options/backneckcutout/readme.mdx'
+import Bicepsease from '@site/docs/docs/designs/devon/options/bicepsease/readme.mdx'
+import Chestease from '@site/docs/docs/designs/devon/options/chestease/readme.mdx'
+import Collarease from '@site/docs/docs/designs/devon/options/collarease/readme.mdx'
+import Cuffease from '@site/docs/docs/designs/devon/options/cuffease/readme.mdx'
+import Cuffwidth from '@site/docs/docs/designs/devon/options/cuffwidth/readme.mdx'
+import Frontarmholedeeper from '@site/docs/docs/designs/devon/options/frontarmholedeeper/readme.mdx'
+import Frontpocket from '@site/docs/docs/designs/devon/options/frontpocket/readme.mdx'
+import Fullbustadjustment from '@site/docs/docs/designs/devon/options/fullbustadjustment/readme.mdx'
+import Hemease from '@site/docs/docs/designs/devon/options/hemease/readme.mdx'
+import Legacyarmholedepth from '@site/docs/docs/designs/devon/options/legacyarmholedepth/readme.mdx'
+import Lengthbonus from '@site/docs/docs/designs/devon/options/lengthbonus/readme.mdx'
+import Neckdrop from '@site/docs/docs/designs/devon/options/neckdrop/readme.mdx'
+import S3armhole from '@site/docs/docs/designs/devon/options/s3armhole/readme.mdx'
+import S3collar from '@site/docs/docs/designs/devon/options/s3collar/readme.mdx'
+import Shoulderease from '@site/docs/docs/designs/devon/options/shoulderease/readme.mdx'
+import Shouldershift from '@site/docs/docs/designs/devon/options/shouldershift/readme.mdx'
+import Shoulderslopereduction from '@site/docs/docs/designs/devon/options/shoulderslopereduction/readme.mdx'
+import Sleevebend from '@site/docs/docs/designs/devon/options/sleevebend/readme.mdx'
+import Sleevelengthbonus from '@site/docs/docs/designs/devon/options/sleevelengthbonus/readme.mdx'
+import Sleevecapease from '@site/docs/docs/designs/devon/options/sleevecapease/readme.mdx'
+import Sleevecapheight from '@site/docs/docs/designs/devon/options/sleevecapheight/readme.mdx'
+import Waistadjustment from '@site/docs/docs/designs/devon/options/waistadjustment/readme.mdx'
+import Waistbandwidth from '@site/docs/docs/designs/devon/options/waistbandwidth/readme.mdx'
+import Yokedrop from '@site/docs/docs/designs/devon/options/yokedrop/readme.mdx'
+
+## Conditional Options {#conditional}
+### Armhole depth factor (legacy) {#armholedepthfactor}
+
+**Controls the depth of the armhole. Higher values make a deeper armhole. This option only applies to the legacy (v2) way of calculating the armhole depth.**
+- Type: **Percentage**
+- Default: **55%**
+- Minimum: **50%**
+- Maximum: **70%**
+
+<Armholedepthfactor />
+
+### Armhole depth {#armholedepth}
+
+**Controls the depth of the armhole. Higher values make a deeper armhole.**
+- Type: **Percentage**
+- Default: **12%**
+- Minimum: **-10%**
+- Maximum: **50%**
+
+<Armholedepth />
+
+## Fit {#fit}
+### Biceps ease {#bicepsease}
+
+**The amount of ease at your upper arm. Note that while we try to respect this, fitting the sleeve to the armhole takes precedence over respecting the exact amount of ease.**
+- Type: **Percentage**
+- Default: **15%**
+- Minimum: **0%**
+- Maximum: **50%**
+
+<Bicepsease />
+
+### Chest ease {#chestease}
+
+**The amount of ease at your chest.**
+- Type: **Percentage**
+- Default: **20%**
+- Minimum: **0%**
+- Maximum: **35%**
+
+<Chestease />
+
+### Collar ease {#collarease}
+
+**The amount of ease around your neck**
+- Type: **Percentage**
+- Default: **5%**
+- Minimum: **0%**
+- Maximum: **10%**
+
+<Collarease />
+
+### Cuff ease {#cuffease}
+
+**The amount of ease at your wrist.**
+- Type: **Percentage**
+- Default: **40%**
+- Minimum: **0%**
+- Maximum: **200%**
+
+<Cuffease />
+
+### Hem ease {#hemease}
+
+**The amount of ease at the hem.**
+- Type: **Percentage**
+- Default: **12%**
+- Minimum: **0%**
+- Maximum: **20%**
+
+<Hemease />
+
+### Shoulder ease {#shoulderease}
+
+**The amount of ease at your shoulder. This increases the shoulder to shoulder distance to accommodate additional layers or thickness.**
+- Type: **Percentage**
+- Default: **20%**
+- Minimum: **-2%**
+- Maximum: **26%**
+
+<Shoulderease />
+
+### Sleeve bend {#sleevebend}
+
+**The angle of the sleeve at the elbow.**
+- Type: **Degrees**
+- Default: **10°**
+- Minimum: **0°**
+- Maximum: **20°**
+
+<Sleevebend />
+
+## Style {#style}
+### Cuff width {#cuffwidth}
+
+**The width of the cuff.**
+- Type: **Percentage**
+- Default: **7.5%**
+- Minimum: **0%**
+- Maximum: **10%**
+
+<Cuffwidth />
+
+### Front pocket {#frontpocket}
+
+**Enable this option to create a front pocket**
+- Type: **Boolean**
+- Default: **true**
+
+<Frontpocket />
+
+### Full Bust Adjustment {#fullbustadjustment}
+
+**Tries to adjust the jacket to better fit a full bust.**
+- Type: **Boolean**
+- Default: **false**
+
+<Fullbustadjustment />
+
+### Length bonus {#lengthbonus}
+
+**The amount to lengthen the garment. A negative value will shorten it.**
+- Type: **Percentage**
+- Default: **9%**
+- Minimum: **0%**
+- Maximum: **40%**
+
+<Lengthbonus />
+
+### Neck drop {#neckdrop}
+
+**The amount the front of the neck will drop.**
+- Type: **Percentage**
+- Default: **6%**
+- Minimum: **0%**
+- Maximum: **10%**
+
+<Neckdrop />
+
+### undefined {#s3armhole}
+
+**undefined**
+- Type: **Percentage**
+- Default: **75%**
+- Minimum: **0%**
+- Maximum: **100%**
+
+<S3armhole />
+
+### undefined {#s3collar}
+
+**undefined**
+- Type: **Percentage**
+- Default: **75%**
+- Minimum: **0%**
+- Maximum: **100%**
+
+<S3collar />
+
+### Shoulder shift {#shouldershift}
+
+**This controls how far the shoulder seam is shifted to the front.**
+- Type: **Percentage**
+- Default: **2.6%**
+- Minimum: **0%**
+- Maximum: **6%**
+
+<Shouldershift />
+
+### Sleeve length bonus {#sleevelengthbonus}
+
+**The amount to lengthen the sleeve. A negative value will shorten it.**
+- Type: **Percentage**
+- Default: **3%**
+- Minimum: **-10%**
+- Maximum: **10%**
+
+<Sleevelengthbonus />
+
+### Waist/Hips adjustment {#waistadjustment}
+
+**Adjusts the bottom of the denim jacket to match the hips measurement.**
+- Type: **Boolean**
+- Default: **true**
+
+<Waistadjustment />
+
+### Waistband width {#waistbandwidth}
+
+**The width of the waistband.**
+- Type: **Percentage**
+- Default: **4.67%**
+- Minimum: **1%**
+- Maximum: **10%**
+
+<Waistbandwidth />
+
+### Yoke drop {#yokedrop}
+
+**How far the yoke will drop down. Percentage of back neck-to-waist.**
+- Type: **Percentage**
+- Default: **33.5%**
+- Minimum: **17%**
+- Maximum: **50%**
+
+<Yokedrop />
+
+## Advanced {#advanced}
+### Across back factor {#acrossbackfactor}
+
+**Controls your across back width as a factor of your shoulder to shoulder measurement.**
+- Type: **Percentage**
+- Default: **98%**
+- Minimum: **93%**
+- Maximum: **100%**
+
+<Acrossbackfactor />
+
+### Back neck cutout {#backneckcutout}
+
+**How deep the neck is cut out at the back**
+- Type: **Percentage**
+- Default: **5%**
+- Minimum: **2%**
+- Maximum: **8%**
+
+<Backneckcutout />
+
+### Front armhole extra cutout {#frontarmholedeeper}
+
+**How much do you want the front armhole to be cut out deeper than the back.**
+- Type: **Percentage**
+- Default: **0.2%**
+- Minimum: **0%**
+- Maximum: **0.5%**
+
+<Frontarmholedeeper />
+
+### Legacy armhole depth {#legacyarmholedepth}
+
+**Enable this option to use the legacy way to calculate the armhole depth (using biceps circumference) rather than the v3 way (using the waist to armpit measurement)**
+- Type: **Boolean**
+- Default: **false**
+
+<Legacyarmholedepth />
+
+### Shoulder slope reduction {#shoulderslopereduction}
+
+**The amount by which the shoulder slope is reduced to allow for shoulder padding.**
+- Type: **Percentage**
+- Default: **0%**
+- Minimum: **0%**
+- Maximum: **80%**
+
+<Shoulderslopereduction />
+
+### Sleevecap ease {#sleevecapease}
+
+**The amount by which the sleevecap seam is longer than the armhole seam.**
+- Type: **Percentage**
+- Default: **1%**
+- Minimum: **0%**
+- Maximum: **10%**
+
+<Sleevecapease />
+
+### Sleevecap height {#sleevecapheight}
+
+**Controls the height of the sleevecap.**
+- Type: **Percentage**
+- Default: **45%**
+- Minimum: **40%**
+- Maximum: **60%**
+
+<Sleevecapheight />

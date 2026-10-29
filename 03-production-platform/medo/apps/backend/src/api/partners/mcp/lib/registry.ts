@@ -1,0 +1,3925 @@
+/**
+ * Declarative registry of Partner API endpoints exposed as MCP / chat tools.
+ *
+ * Each entry maps one tool -> one `/partners/*` route. The dispatcher (see
+ * dispatch.ts) is a thin loopback proxy: it forwards the tool arguments to the
+ * real partner route (proxy.ts), so every tool inherits the route's
+ * `authenticate("partner", …)` ownership scoping, `validateAndTransformBody`
+ * validators, and workflow logic — for free. Wrapping a new endpoint is one row.
+ *
+ * Input schemas are plain JSON Schema (not zod) on purpose: they are returned
+ * verbatim to MCP clients in `tools/list`, and the chat route wraps them with
+ * the AI-SDK `jsonSchema()` helper — so there is a single source of truth that
+ * feeds both the external MCP endpoint and the in-app assistant.
+ *
+ * Two safety rails the dispatcher enforces from these flags:
+ *  - `dry_run` (accepted by EVERY tool): return the planned request — and, for
+ *    writes with a `previewPath`, the current object — WITHOUT executing. Lets
+ *    the model rehearse a mutation and inspect live data before firing.
+ *  - `sensitive` (+ every DELETE): require an explicit `confirm: true` before
+ *    executing. Called without it, the tool returns `requires_confirmation` so
+ *    the UI can surface an approval card. Everything else executes directly.
+ */
+
+import type { McpToolDef } from "../../../../lib/mcp-core"
+import {
+  PHYSICAL_AND_CUSTOMS_BODY_PARAMS,
+  physicalAndCustomsSchemaProps,
+} from "../../../../lib/product-attributes/tool-schema"
+import {
+  PRODUCT_SPEC_BODY_PARAMS,
+  PRODUCT_SPEC_WRITE_GUIDANCE,
+  productSpecSchemaProps,
+} from "../../../../modules/product-spec/tool-schema"
+/**
+ * The quote vocabulary is shared with the admin surface (#1439). Both surfaces
+ * mint, and a body list written out twice is one edit away from the two
+ * assistants believing different things about what a quote is — the shape of
+ * #1348, where an MCP row and its route validator disagreed and the field was
+ * dropped in silence.
+ */
+import {
+  QUOTE_MINT_BODY_PARAMS,
+  QUOTE_MINT_READINESS_BODY_PARAMS,
+  QUOTE_MINT_WRITE_GUIDANCE,
+  quoteMintSchemaProps,
+  quoteReadinessSchemaProps,
+} from "../../../../modules/partner-quote/tool-schema"
+// The page + block vocabulary comes from the validator that enforces it, never a copy.
+import {
+  PAGE_STATUSES,
+  PAGE_TYPES,
+} from "../../../admin/websites/[id]/pages/validators"
+import {
+  BLOCK_STATUSES,
+  BLOCK_TYPES,
+} from "../../../admin/websites/[id]/pages/[pageId]/blocks/validators"
+
+/**
+ * Partner tool definition. The declarative model now lives in the shared
+ * mcp-core (one type reused by store/partner/admin); `PartnerMcpToolDef` stays
+ * as the surface-local alias so existing imports keep working.
+ */
+export type PartnerMcpToolDef = McpToolDef
+
+/**
+ * Fold the declarative guidance fields (`sideEffects`, `nextSteps`) into a
+ * short suffix appended to the model-facing description. Re-exported from the
+ * shared core so the chat route AND the MCP server render identical guidance.
+ */
+export { renderToolGuidance } from "../../../../lib/mcp-core"
+
+// ---- Reusable JSON-Schema fragments ---------------------------------------
+
+const STR = (description: string) => ({ type: "string", description })
+const BOOL = (description: string) => ({ type: "boolean", description })
+const INT = (description: string) => ({ type: "integer", description })
+
+/** Pagination props shared by list tools. */
+const PAGINATION = {
+  limit: { type: "integer", description: "Max results (default 20)." },
+  offset: { type: "integer", description: "Pagination offset." },
+  q: { type: "string", description: "Free-text search filter." },
+} as const
+
+const obj = (
+  properties: Record<string, any>,
+  required: string[] = []
+): Record<string, any> => ({
+  type: "object",
+  properties,
+  ...(required.length ? { required } : {}),
+  additionalProperties: false,
+})
+
+/**
+ * Page vocabulary, taken from the route's validator rather than restated, so
+ * the values offered are exactly the values accepted.
+ */
+const PAGE_TYPE_ENUM = {
+  type: "string",
+  description: "Page type. Capitalised — these are the only accepted values.",
+  enum: [...PAGE_TYPES],
+} as const
+
+const PAGE_STATUS_ENUM = {
+  type: "string",
+  description:
+    "Page status. Capitalised. 'Published' is LIVE on the storefront; new pages should be 'Draft' unless the partner asked to publish.",
+  enum: [...PAGE_STATUSES],
+} as const
+
+/**
+ * Block vocabulary, taken from the blocks validator rather than restated.
+ * `Hero` + `MainContent` are what the storefront actually renders (a heading
+ * band, then prose sections); the unique types may only appear once per page.
+ */
+const BLOCK_TYPE_ENUM = {
+  type: "string",
+  description:
+    "Block type. Use 'Hero' for the top heading band and 'MainContent' for body prose — these are the two the storefront renders as designed. Other values render as a fallback dump.",
+  enum: [...BLOCK_TYPES],
+} as const
+
+const BLOCK_STATUS_ENUM = {
+  type: "string",
+  description: "Block status. Leave as 'Active' so the block shows on the page.",
+  enum: [...BLOCK_STATUSES],
+} as const
+
+/** One block's content, keyed by type. */
+const BLOCK_SCHEMA = obj(
+  {
+    name: STR("Internal label shown in the editor's block list, e.g. 'Hero' or 'Our story'."),
+    type: BLOCK_TYPE_ENUM,
+    content: {
+      type: "object",
+      additionalProperties: true,
+      description:
+        "Block content, keyed by type. Hero: { title, subtitle?, align? ('left'|'center') }. MainContent: { title?, body } where body is plain text and blank lines split paragraphs.",
+    },
+    settings: { type: "object", additionalProperties: true },
+    order: { type: "integer", description: "Render order (0-based). Omit to append after existing blocks." },
+    status: BLOCK_STATUS_ENUM,
+    metadata: { type: "object", additionalProperties: true },
+  },
+  ["name", "type", "content"]
+)
+
+const BLOCKS_ARRAY = {
+  type: "array",
+  minItems: 1,
+  maxItems: 12,
+  items: BLOCK_SCHEMA,
+  description:
+    "The blocks to add, in render order. First ask the partner what they want in each section.",
+} as const
+
+/** Unit-of-measure enum shared by consumption-log tools. */
+const UOM = {
+  type: "string",
+  description: "Unit of measure.",
+  enum: [
+    "Meter", "Yard", "Kilogram", "Gram", "Piece", "Roll",
+    "kWh", "Liter", "Cubic_Meter", "Hour", "Other",
+  ],
+} as const
+
+/** Consumption category enum shared by consumption-log tools. */
+const CONSUMPTION_TYPE = {
+  type: "string",
+  description: "What the consumption represents.",
+  enum: [
+    "sample", "production", "wastage",
+    "energy_electricity", "energy_water", "energy_gas", "labor",
+  ],
+} as const
+
+/** Body params + schema for a consumption-log write (design & production run). */
+const CONSUMPTION_LOG_BODY = [
+  "inventoryItemId", "rawMaterialId", "productionRunId", "quantity",
+  "unitCost", "unitOfMeasure", "consumptionType", "notes", "locationId", "metadata",
+]
+/**
+ * The run-scoped tool carries the run in its path, so it never offers
+ * `productionRunId` as an argument — and must not claim to forward one.
+ */
+const RUN_CONSUMPTION_LOG_BODY = CONSUMPTION_LOG_BODY.filter(
+  (k) => k !== "productionRunId"
+)
+const consumptionLogSchema = (withRun: boolean) =>
+  obj(
+    {
+      inventoryItemId: STR("Inventory item consumed, e.g. 'iitem_...'."),
+      rawMaterialId: STR("Optional raw-material id."),
+      ...(withRun ? { productionRunId: STR("Optional production-run id.") } : {}),
+      quantity: { type: "number", description: "Quantity consumed (> 0)." },
+      unitCost: { type: "number", description: "Optional unit cost." },
+      unitOfMeasure: UOM,
+      consumptionType: CONSUMPTION_TYPE,
+      notes: STR("Optional notes."),
+      locationId: STR("Optional stock-location id."),
+      metadata: { type: "object", additionalProperties: true },
+    },
+    ["inventoryItemId", "quantity"]
+  )
+
+// ---- The registry ----------------------------------------------------------
+
+export const PARTNER_MCP_TOOLS: PartnerMcpToolDef[] = [
+  // ===== Profile & persona (onboarding) =====================================
+  {
+    name: "add_person_from_id_card",
+    description:
+      "Read a photo of a worker's identity document (Aadhaar, PAN, passport, driving licence, voter ID) and add them to your people. Run it WITHOUT persist first and show the operator the draft and its warnings; only persist:true with confirm:true creates the record. The document number is kept masked to its last four digits, and nothing here verifies an identity. Sensitive — requires confirmation.",
+    method: "POST",
+    path: "/partners/people/id-extraction",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "image_url",
+      "notes",
+      "id_number_policy",
+      "persist",
+      "confirm",
+      "person_type_ids",
+    ],
+    inputSchema: obj(
+      {
+        image_url: STR("URL or data URI of the identity document photo."),
+        notes: STR("Context from the operator, e.g. 'the card is glary on the left'."),
+        id_number_policy: {
+          type: "string",
+          enum: ["mask", "discard"],
+          description:
+            "What to keep of the document number. 'mask' (default) keeps only the last four digits; 'discard' keeps none. Storing the full number is deliberately not offered.",
+        },
+        persist: {
+          type: "boolean",
+          description: "Create the person. Default false — preview the draft first, always.",
+        },
+        confirm: {
+          type: "boolean",
+          description:
+            "Required alongside persist. Creating a person from a photograph is not undoable by the caller.",
+        },
+        person_type_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Person-type ids to attach to the created person.",
+        },
+      },
+      ["image_url"]
+    ),
+    sideEffects:
+      "Without persist: reads the image with a vision model and returns a draft. Stores nothing. With persist+confirm: creates ONE person, links it to YOUR partner (taken from the session, never from the body) and best-effort creates their address. Relay the draft's warnings verbatim — they are the only signal that a field was dropped or doubted.",
+  },
+  {
+    name: "create_id_extraction_batch",
+    description:
+      "Read MANY identity documents together as one paced background job. Use this instead of calling add_person_from_id_card in a loop whenever the operator has shared more than one card — the photos are read one at a time on a rate limit, and the job survives being left alone. Pass the photo URLs already shared in this conversation. Returns immediately with a batch_id; NOTHING has been read yet when it returns. Roughly 20 seconds per photograph, so ten cards is about three minutes. It produces DRAFTS only — no person exists until approve_id_extraction_batch. Tell the operator how many photographs and roughly how long, then STOP — do not poll, and never say it has finished, because the reading happens after this tool returns. Sensitive — requires confirmation, because reading a stack of cards costs real provider budget.",
+    method: "POST",
+    path: "/partners/people/id-extraction/batch",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "image_urls",
+      "notes",
+      "id_number_policy",
+      "person_type_ids",
+      "interval_ms",
+      "auto_confirm",
+    ],
+    inputSchema: obj(
+      {
+        image_urls: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "The identity-document photos, as URLs or data URIs, in the order the operator shared them. Capped at 50.",
+        },
+        notes: STR("Context from the operator, e.g. 'these are the weavers at the Islampur unit'."),
+        id_number_policy: {
+          type: "string",
+          enum: ["mask", "discard"],
+          description:
+            "What to keep of each document number. 'mask' (default) keeps only the last four digits; 'discard' keeps none. Storing the full number is deliberately not offered.",
+        },
+        person_type_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Person-type ids to attach to every person created from this batch.",
+        },
+        interval_ms: INT(
+          "Milliseconds between photographs. Clamped server-side between 5000 and 600000; leave unset for the 20000 default."
+        ),
+        auto_confirm: BOOL(
+          "Start reading immediately. Pass true when the operator has already said to go ahead; otherwise leave it out and call confirm_id_extraction_batch after they have checked the photos are the right ones."
+        ),
+      },
+      ["image_urls"]
+    ),
+    sideEffects:
+      "Creates a batch and starts reading in the background when confirmed. Creates NO people — every photograph becomes a draft that a human approves separately. Costs one vision call per photograph.",
+    nextSteps: ["get_id_extraction_batch"],
+  },
+  {
+    name: "list_id_extraction_batches",
+    description:
+      "List this partner's ID-card batches, newest first, each with its counts (total, completed, failed, approved, pending). Use it when the operator asks about 'the batch' without saying which, or to find one they started in an earlier conversation.",
+    method: "GET",
+    path: "/partners/people/id-extraction/batch",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({
+      limit: INT("Max batches to return (default 20, max 100)."),
+      offset: INT("Pagination offset."),
+    }),
+  },
+  {
+    name: "get_id_extraction_batch",
+    description:
+      "The full report for one batch: its status, every photograph's own status, the draft read from each, and any per-item error. This is how you answer 'how is my batch going' and 'what did it find'. Report the three numbers that matter — completed, failed and OUTSTANDING — and read `outstanding` rather than trusting `status`: a batch whose background loop was killed still says 'running', and outstanding is the field that disagrees. Relay each draft's warnings verbatim; they are the only signal that a name was kept whole or a field was doubted. If drafts are waiting, show them WITH their warnings and ask which to approve — never approve on the operator's behalf.",
+    method: "GET",
+    path: "/partners/people/id-extraction/batch/:id",
+    pathParams: ["id"],
+    inputSchema: obj(
+      { id: STR("The batch id returned by create_id_extraction_batch.") },
+      ["id"]
+    ),
+    nextSteps: ["retry_id_extraction_batch", "approve_id_extraction_batch"],
+  },
+  {
+    name: "confirm_id_extraction_batch",
+    description:
+      "Start reading a batch that was created without auto_confirm. Use it once the operator has confirmed the photos are the right people. Reading then runs in the background.",
+    method: "POST",
+    path: "/partners/people/id-extraction/batch/:id/confirm",
+    pathParams: ["id"],
+    write: true,
+    inputSchema: obj({ id: STR("The batch id.") }, ["id"]),
+  },
+  {
+    name: "retry_id_extraction_batch",
+    description:
+      "Re-run the photographs in a batch that have not been read yet. scope 'failed' re-reads only the ones that errored; scope 'pending' finishes a batch whose background loop stopped early — which is what to use when get_id_extraction_batch reports outstanding items on a batch that claims to be finished. A retry RESUMES; it never re-reads a photograph that already produced a draft.",
+    method: "POST",
+    path: "/partners/people/id-extraction/batch/:id/retry",
+    pathParams: ["id"],
+    queryParams: ["scope"],
+    write: true,
+    inputSchema: obj(
+      {
+        id: STR("The batch id."),
+        scope: {
+          type: "string",
+          enum: ["failed", "pending"],
+          description:
+            "'failed' re-reads the errored photographs; 'pending' picks up ones never attempted. Default 'pending'.",
+        },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "approve_id_extraction_batch",
+    description:
+      "Turn approved drafts into real people on this partner's roster, each linked to the partner and given the address read from their card. This is the ONLY door from a draft to a person. Show the operator every draft first — especially the ones carrying warnings — and pass `corrections` for any name they fix; a correction can also rescue a draft the reader itself refused. Omit item_ids to approve every usable draft, which you should only do after the operator has actually seen them. Sensitive — requires confirmation, and creating people from photographs is not undoable by you.",
+    method: "POST",
+    path: "/partners/people/id-extraction/batch/:id/approve",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["item_ids", "corrections"],
+    inputSchema: obj(
+      {
+        id: STR("The batch id."),
+        item_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Which items to approve. Omit to approve every item that has a usable draft.",
+        },
+        corrections: {
+          type: "object",
+          additionalProperties: true,
+          description:
+            "Per-item field overrides, keyed by item id, e.g. {\"<item_id>\": {\"first_name\": \"Tapas\", \"last_name\": \"Ghosh\"}}. Use it whenever the operator corrects a name you read back to them.",
+        },
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Creates one person per approved draft, links each to YOUR partner (taken from the session, never the body), and best-effort creates their address. Records the source photo and the reader's confidence on the person so a wrong name can be traced back to the card.",
+  },
+  {
+    name: "get_partner_profile",
+    description:
+      "Get the current partner's profile (name, handle, workspace_type/persona, status, metadata). Call this first to understand who you are helping and how far onboarding has progressed.",
+    method: "GET",
+    path: "/partners/me",
+    inputSchema: obj({}),
+  },
+  {
+    name: "update_partner_profile",
+    description:
+      "Update the current partner's profile: name, handle, workspace_type (persona: 'seller' | 'manufacturer' | 'individual' | 'designer'), whatsapp_number, country_code (2-letter), currency_code (3-letter), or metadata. Only pass the fields you want to change. Use this to set the partner's persona during onboarding.",
+    method: "PUT",
+    path: "/partners/update",
+    write: true,
+    previewPath: "/partners/me",
+    bodyParams: [
+      "name",
+      "handle",
+      "workspace_type",
+      "whatsapp_number",
+      "country_code",
+      "currency_code",
+      "metadata",
+    ],
+    inputSchema: obj({
+      name: STR("Business / partner display name."),
+      handle: STR("URL handle (careful: changing it can affect storefront URLs)."),
+      workspace_type: {
+        type: "string",
+        enum: ["seller", "manufacturer", "individual", "designer"],
+        description: "Persona. Determines the default sidebar/home layout.",
+      },
+      whatsapp_number: STR("WhatsApp number in international format."),
+      country_code: STR("2-letter country code, e.g. 'in'."),
+      currency_code: STR("3-letter currency code, e.g. 'inr'."),
+      metadata: {
+        type: "object",
+        description:
+          "Arbitrary metadata. NOTE: this REPLACES the metadata column — always merge with existing metadata from get_partner_profile first. Set metadata.onboarding_essentials_done=true once name + persona are set.",
+        additionalProperties: true,
+      },
+    }),
+  },
+  {
+    name: "get_onboarding_profile",
+    description:
+      "Read the partner's onboarding questionnaire (what they sell, price range, person_type, team size, payment/selling mode, completion flag). Returns null-ish if the wizard hasn't been started.",
+    method: "GET",
+    path: "/partners/onboarding-profile",
+    inputSchema: obj({}),
+  },
+  {
+    name: "update_onboarding_profile",
+    description:
+      "Upsert the partner's onboarding questionnaire. Only supplied fields are written (partial progress is fine). Use during a guided onboarding conversation to record the partner's answers.",
+    method: "PUT",
+    path: "/partners/onboarding-profile",
+    write: true,
+    previewPath: "/partners/onboarding-profile",
+    bodyParams: [
+      "what_they_sell",
+      "price_range",
+      "has_inventory_info",
+      "does_stock",
+      "does_weaving",
+      "person_type",
+      "team_size",
+      "payment_collection",
+      "selling_mode",
+      "commission_bps",
+      "supplies_to_platform",
+      "completed",
+    ],
+    inputSchema: obj({
+      what_they_sell: {
+        type: "string",
+        enum: ["apparel", "home_textiles", "fabric", "yarn", "accessories", "other"],
+      },
+      price_range: {
+        type: "string",
+        enum: ["economy", "mid", "premium", "luxury"],
+      },
+      has_inventory_info: BOOL("Whether they can share inventory info."),
+      does_stock: BOOL("Whether they hold stock."),
+      does_weaving: BOOL("Whether they weave themselves."),
+      person_type: {
+        type: "string",
+        enum: [
+          "individual",
+          "business",
+          "manufacturer",
+          "wholesaler",
+          "retailer",
+          "artisan",
+          "other",
+        ],
+      },
+      team_size: INT("Team size (0–100000)."),
+      payment_collection: {
+        type: "string",
+        enum: ["through_us", "themselves"],
+      },
+      selling_mode: {
+        type: "string",
+        enum: ["dedicated_storefront", "core_channel_listing"],
+      },
+      commission_bps: INT("Commission in basis points (0–10000)."),
+      supplies_to_platform: BOOL("Whether they supply to the platform."),
+      completed: BOOL("Mark the questionnaire complete."),
+    }),
+  },
+
+  // ===== UI layout personalization =========================================
+  {
+    name: "list_layout_configurations",
+    description:
+      "List all of the partner's saved UI layout configurations across zones (e.g. 'sidebar.main', 'home'), including personal overrides and partner-wide defaults.",
+    method: "GET",
+    path: "/partners/layouts/configurations",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_layout_configuration",
+    description:
+      "Get the partner's layout configuration for one zone (personal + default + which scope is active). Zones: 'sidebar.main', 'home'.",
+    method: "GET",
+    path: "/partners/layouts/:zone/configuration",
+    pathParams: ["zone"],
+    inputSchema: obj(
+      { zone: STR("Layout zone, e.g. 'sidebar.main' or 'home'.") },
+      ["zone"]
+    ),
+  },
+  {
+    name: "set_layout_configuration",
+    description:
+      "Set the partner's layout configuration for a zone. `configuration.widgets` is a map of widgetId -> { hidden?, section?, order? }. is_default=false sets a personal override; is_default=true sets the partner-wide default. Use this to reorder/hide sidebar or home widgets.",
+    method: "POST",
+    path: "/partners/layouts/:zone/configuration",
+    pathParams: ["zone"],
+    write: true,
+    previewPath: "/partners/layouts/:zone/configuration",
+    bodyParams: ["is_default", "configuration"],
+    inputSchema: obj(
+      {
+        zone: STR("Layout zone, e.g. 'sidebar.main' or 'home'."),
+        is_default: BOOL("True = partner-wide default; false = personal override."),
+        configuration: {
+          type: "object",
+          description:
+            "{ widgets: Record<widgetId, { hidden?: boolean, section?: string, order?: number }> }",
+          additionalProperties: true,
+        },
+      },
+      ["zone", "configuration"]
+    ),
+  },
+  {
+    name: "reset_layout_configuration",
+    description:
+      "Remove the partner's personal layout override for a zone (reset to the default). The partner-wide default row is left intact.",
+    method: "DELETE",
+    path: "/partners/layouts/:zone/configuration",
+    pathParams: ["zone"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      { zone: STR("Layout zone to reset, e.g. 'sidebar.main' or 'home'.") },
+      ["zone"]
+    ),
+  },
+
+  // ===== Read-only breadth across partner resources ========================
+  {
+    name: "list_orders",
+    description:
+      "List the partner's orders (paginated). Supports free-text search via q. Pass kind to switch between retail, design or inventory work-orders. Filter by status, date range, region or sales channel.",
+    method: "GET",
+    path: "/partners/orders",
+    queryParams: ["limit", "offset", "q", "status", "kind", "created_at", "updated_at", "region_id", "sales_channel_id", "order"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR("Optional order status filter."),
+      kind: STR(
+        "Which order family to list: 'retail' (default) | 'design' | 'inventory' | 'all'."
+      ),
+      created_at: STR("Date filter (ISO string, optionally with $gt/$lt/$gte/$lte operators)."),
+      updated_at: STR("Date filter (ISO string, optionally with $gt/$lt/$gte/$lte operators)."),
+      region_id: STR("Filter to orders in a specific region (retail only)."),
+      sales_channel_id: STR("Filter to orders in a specific sales channel (retail only)."),
+      order: STR("Sort field with optional leading '-' for DESC, e.g. '-created_at' (default) or 'display_id'."),
+    }),
+  },
+  {
+    name: "list_products",
+    description:
+      "List the partner's products (paginated). Supports free-text search via q. Prefer list_store_products with a store_id for store-scoped / sales-channel-filtered results.",
+    method: "GET",
+    path: "/partners/products",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_product",
+    description: "Get a single partner product by id.",
+    method: "GET",
+    path: "/partners/products/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Product id, e.g. 'prod_...'.") }, ["id"]),
+  },
+  {
+    name: "list_stores",
+    description: "List the partner's storefronts / stores.",
+    method: "GET",
+    path: "/partners/stores",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "create_store",
+    description:
+      "Create a storefront/store for the partner. This is a multi-part setup done in ONE call: it provisions the store, a default sales channel, a region (with its countries + currency), and a stock location (with the partner's address). Use it during onboarding once you know the store name, currency, selling countries, and address. Country codes in `region.countries` are lower-case ISO-2 (e.g. ['in']); `location.address.country_code` is upper-case ISO-2 (e.g. 'IN'). Sensitive — requires confirmation.",
+    method: "POST",
+    path: "/partners/stores",
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/stores",
+    bodyParams: ["store", "sales_channel", "region", "location"],
+    inputSchema: obj(
+      {
+        store: obj(
+          {
+            name: STR("Store display name, e.g. 'HR Handloom'."),
+            supported_currencies: {
+              type: "array",
+              description: "At least one currency; mark one is_default.",
+              minItems: 1,
+              items: obj(
+                {
+                  currency_code: STR("3-letter code, e.g. 'inr'."),
+                  is_default: BOOL("Whether this is the default currency."),
+                },
+                ["currency_code"]
+              ),
+            },
+            metadata: {
+              type: "object",
+              description: "Optional store metadata.",
+              additionalProperties: true,
+            },
+          },
+          ["name", "supported_currencies"]
+        ),
+        sales_channel: obj({
+          name: STR("Optional sales-channel name (defaults are applied)."),
+          description: STR("Optional sales-channel description."),
+        }),
+        region: obj(
+          {
+            name: STR("Region name, e.g. 'India'."),
+            currency_code: STR("3-letter code, e.g. 'inr'."),
+            countries: {
+              type: "array",
+              description: "Lower-case ISO-2 country codes, e.g. ['in'].",
+              minItems: 1,
+              items: { type: "string", minLength: 2 },
+            },
+            payment_providers: {
+              type: "array",
+              description: "Optional payment provider ids.",
+              items: { type: "string" },
+            },
+          },
+          ["name", "currency_code", "countries"]
+        ),
+        location: obj(
+          {
+            name: STR("Stock location / warehouse name."),
+            address: obj(
+              {
+                address_1: STR("Street address."),
+                address_2: STR("Optional second address line."),
+                city: STR("City."),
+                province: STR("State / province."),
+                postal_code: STR("Postal / PIN code."),
+                country_code: STR("UPPER-case ISO-2, e.g. 'IN'."),
+              },
+              ["address_1", "country_code"]
+            ),
+          },
+          ["name", "address"]
+        ),
+      },
+      ["store", "region", "location"]
+    ),
+  },
+  {
+    name: "list_designs",
+    description:
+      "List the partner's designs / design briefs (paginated). Filter by status or bucket (incoming / in_progress / completed / yours).",
+    method: "GET",
+    path: "/partners/designs",
+    queryParams: ["limit", "offset", "q", "status", "bucket"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR("Filter designs by status (e.g. 'In_Development', 'Approved')."),
+      bucket: {
+        type: "string",
+        description: "Action-oriented bucket: 'all' (default) | 'incoming' | 'in_progress' | 'completed' | 'yours'.",
+      },
+    }),
+  },
+  {
+    name: "list_inventory_items",
+    description: "List the partner's inventory items (paginated).",
+    method: "GET",
+    path: "/partners/inventory-items",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "list_notifications",
+    description: "List the partner's notifications.",
+    method: "GET",
+    path: "/partners/notifications",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+
+  // ===== Design workflow ====================================================
+  {
+    name: "get_design",
+    description: "Get a single design/brief by id, with its details.",
+    method: "GET",
+    path: "/partners/designs/:designId",
+    pathParams: ["designId"],
+    inputSchema: obj({ designId: STR("Design id, e.g. 'design_...'.") }, ["designId"]),
+  },
+  {
+    name: "update_design",
+    description:
+      "Update a design's fields. Pass only the fields to change, at the top level — not wrapped in a `design` object.",
+    method: "PUT",
+    path: "/partners/designs/:designId",
+    pathParams: ["designId"],
+    write: true,
+    previewPath: "/partners/designs/:designId",
+    // The single `design` wrapper this used to advertise was not a key the
+    // validator has: the route spreads its flat validatedBody straight into
+    // updateDesignWorkflow. A .strict() 400 on every call.
+    bodyParams: [
+      "name",
+      "description",
+      "design_type",
+      "product_type",
+      "status",
+      "priority",
+      "target_completion_date",
+      "tags",
+      "designer_notes",
+    ],
+    inputSchema: obj(
+      {
+        designId: STR("Design id to update."),
+        name: STR("Design name."),
+        description: STR("Design description."),
+        design_type: {
+          type: "string",
+          enum: ["Original", "Derivative", "Custom", "Collaboration"],
+        },
+        product_type: STR(
+          "What the design IS — the garment category ('trousers', 'saree', 'kurta'). Distinct from design_type, which is how ORIGINAL the design is. Normalised server-side; setting it marks the type as human-set so AI inference will not overwrite it. Send null to clear it and let inference suggest one."
+        ),
+        status: {
+          type: "string",
+          enum: [
+            "Conceptual",
+            "In_Development",
+            "Technical_Review",
+            "Sample_Production",
+            "Revision",
+            "Approved",
+            "Rejected",
+            "On_Hold",
+            "Commerce_Ready",
+            "Superseded",
+          ],
+        },
+        priority: { type: "string", enum: ["Low", "Medium", "High", "Urgent"] },
+        target_completion_date: STR("ISO-8601 datetime."),
+        tags: { type: "array", items: { type: "string" } },
+        designer_notes: STR("Free-text notes from the designer."),
+      },
+      ["designId"]
+    ),
+  },
+  {
+    name: "get_design_cost",
+    description: "Get a design's computed cost breakdown.",
+    method: "GET",
+    path: "/partners/designs/:designId/cost",
+    pathParams: ["designId"],
+    inputSchema: obj({ designId: STR("Design id.") }, ["designId"]),
+  },
+  {
+    name: "recalculate_design_cost",
+    description:
+      "Recompute a design's cost from its current consumption logs + material prices. Use after logging consumption.",
+    method: "POST",
+    path: "/partners/designs/:designId/recalculate-cost",
+    pathParams: ["designId"],
+    write: true,
+    inputSchema: obj({ designId: STR("Design id.") }, ["designId"]),
+  },
+  {
+    name: "list_design_consumption_logs",
+    description: "List the raw-material/energy/labor consumption logged against a design.",
+    method: "GET",
+    path: "/partners/designs/:designId/consumption-logs",
+    pathParams: ["designId"],
+    inputSchema: obj({ designId: STR("Design id.") }, ["designId"]),
+  },
+  {
+    name: "log_design_consumption",
+    description:
+      "Record material/energy/labor consumed for a design (feeds its cost). Quantity must be > 0. inventoryItemId is required.",
+    method: "POST",
+    path: "/partners/designs/:designId/consumption-logs",
+    pathParams: ["designId"],
+    write: true,
+    bodyParams: CONSUMPTION_LOG_BODY,
+    inputSchema: {
+      ...consumptionLogSchema(true),
+      properties: {
+        designId: STR("Design id."),
+        ...consumptionLogSchema(true).properties,
+      },
+      required: ["designId", "inventoryItemId", "quantity"],
+    },
+  },
+  {
+    name: "add_design_media",
+    description:
+      "Attach media (image URLs / uploaded media references) to a design. Body shape follows the design-media route.",
+    method: "POST",
+    path: "/partners/designs/:designId/media",
+    pathParams: ["designId"],
+    write: true,
+    bodyParams: ["media", "images", "urls"],
+    inputSchema: obj(
+      {
+        designId: STR("Design id."),
+        media: { type: "array", description: "Media items to attach.", items: { type: "object", additionalProperties: true } },
+        images: { type: "array", description: "Alternatively, image URLs.", items: { type: "string" } },
+        urls: { type: "array", description: "Alternatively, media URLs.", items: { type: "string" } },
+      },
+      ["designId"]
+    ),
+  },
+
+  // ===== Production runs =====================================================
+  {
+    name: "get_production_run_cost_summary",
+    description: "Get the cost summary (materials, energy, labor, totals) for a production run.",
+    method: "GET",
+    path: "/partners/production-runs/:id/cost-summary",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Production-run id.") }, ["id"]),
+  },
+  {
+    name: "list_production_run_consumption_logs",
+    description: "List consumption logged against a production run.",
+    method: "GET",
+    path: "/partners/production-runs/:id/consumption-logs",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Production-run id.") }, ["id"]),
+  },
+  {
+    name: "log_production_run_consumption",
+    description:
+      "Record material/energy/labor consumed by a production run. Quantity > 0; inventoryItemId required. The run may have an ASSIGNED material list — a subset of the design's bill of materials chosen when the work was given to you. If it does, consumption against anything outside that list is REFUSED; read the run first (get_production_run → materials) rather than picking from the design's full BOM.",
+    method: "POST",
+    path: "/partners/production-runs/:id/consumption-logs",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: RUN_CONSUMPTION_LOG_BODY,
+    inputSchema: {
+      ...consumptionLogSchema(false),
+      properties: {
+        id: STR("Production-run id."),
+        ...consumptionLogSchema(false).properties,
+      },
+      required: ["id", "inventoryItemId", "quantity"],
+    },
+  },
+  {
+    name: "accept_production_run",
+    description: "Accept an assigned production run (partner agrees to produce it). Sensitive.",
+    method: "POST",
+    path: "/partners/production-runs/:id/accept",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Production-run id.") }, ["id"]),
+  },
+  {
+    name: "start_production_run",
+    description: "Mark a production run as started/in-progress.",
+    method: "POST",
+    path: "/partners/production-runs/:id/start",
+    pathParams: ["id"],
+    write: true,
+    inputSchema: obj({ id: STR("Production-run id.") }, ["id"]),
+  },
+  {
+    name: "finish_production_run",
+    description: "Mark production work finished (before final completion/handover).",
+    method: "POST",
+    path: "/partners/production-runs/:id/finish",
+    pathParams: ["id"],
+    write: true,
+    inputSchema: obj({ id: STR("Production-run id.") }, ["id"]),
+  },
+  {
+    name: "complete_production_run",
+    description: "Complete a production run (final state). Sensitive — this closes it out.",
+    method: "POST",
+    path: "/partners/production-runs/:id/complete",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Production-run id.") }, ["id"]),
+  },
+  {
+    name: "decline_production_run",
+    description: "Decline an assigned production run. Sensitive — the partner refuses the job.",
+    method: "POST",
+    path: "/partners/production-runs/:id/decline",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Production-run id.") }, ["id"]),
+  },
+
+  // ===== Media upload =======================================================
+  // `initiate_media_upload` / `complete_media_upload` used to live here and are
+  // deliberately GONE. They could never have worked:
+  //
+  //   - dispatch does a bare `pick(def.bodyParams, args)` with no renaming, and
+  //     the tools sent file_name/mime_type/upload_id where the routes read
+  //     name/type/uploadId — every call 400'd on "Missing required fields";
+  //   - `complete` writes NO media record at all and `initiate` deliberately
+  //     builds a flat key at the BUCKET ROOT, so even a fixed-up call left an
+  //     object nothing could attribute — while the tool description claimed it
+  //     "returns the stored media record";
+  //   - and the middle step is a raw binary PUT to a presigned URL, which a
+  //     language model cannot perform. No amount of field-name repair makes
+  //     these callable by the thing they were exposed to.
+  //
+  // Photos now reach the assistant through POST /partners/assistant/attachments,
+  // driven by the browser (which is where the bytes are), landing in the
+  // partner's own media folder. The routes themselves are untouched.
+
+  // ===== Products (write) ===================================================
+  {
+    name: "create_product",
+    description:
+      "Create a product in one of the partner's stores. Requires store_id and a product object (title, handle, status, options, variants with prices, sales_channels, images, …). The route validator is the source of truth. Sensitive.",
+    method: "POST",
+    path: "/partners/products",
+    write: true,
+    sensitive: true,
+    bodyParams: ["store_id", "product"],
+    sideEffects:
+      "creates the product with its variants + inventory items and seeds a 0-quantity stock level at the store location. The product stays a DRAFT and stock stays 0. Set stock per variant with set_inventory_level, then publish with update_store_product (set product.status='published').",
+    nextSteps: ["set_inventory_level", "update_store_product"],
+    inputSchema: obj(
+      {
+        store_id: STR("Store to create the product in, e.g. 'store_...'."),
+        product: {
+          type: "object",
+          description:
+            "Product payload: { title, handle?, status?, description?, options?, variants?, prices?, images?, sales_channels?, … }.",
+          additionalProperties: true,
+        },
+      },
+      ["store_id", "product"]
+    ),
+    // Advise the model about post-create state from the ACTUAL result, so it
+    // reports/acts precisely instead of relying on a static rule it may forget.
+    transform: (data: any) => {
+      const p = data?.product
+      if (!p) return data
+      const warnings: string[] = []
+      if (p.status === "draft") {
+        warnings.push(
+          "Product is a DRAFT — not visible on the storefront. Publish it with update_store_product (product.status='published') when ready."
+        )
+      }
+      const managedZero = (p.variants || []).filter((v: any) => {
+        if (!v?.manage_inventory) return false
+        const levels = (v.inventory_items || []).flatMap(
+          (ii: any) => ii?.inventory?.location_levels || ii?.location_levels || []
+        )
+        const stocked = levels.reduce(
+          (s: number, l: any) => s + (Number(l?.stocked_quantity) || 0),
+          0
+        )
+        return stocked === 0
+      })
+      if (managedZero.length) {
+        warnings.push(
+          `${managedZero.length} variant(s) have 0 stock — set quantities with set_inventory_level (one per inventory item at the store location) before the product can sell.`
+        )
+      }
+      return warnings.length ? { ...data, _advisory: warnings } : data
+    },
+  },
+  {
+    name: "resubmit_product",
+    description: "Resubmit a product for review/approval after edits.",
+    method: "POST",
+    path: "/partners/products/:id/resubmit",
+    pathParams: ["id"],
+    write: true,
+    inputSchema: obj({ id: STR("Product id.") }, ["id"]),
+  },
+  {
+    name: "get_product_preview_link",
+    description: "Get a shareable storefront preview link for a product (incl. unpublished).",
+    method: "GET",
+    path: "/partners/products/:id/preview-link",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Product id.") }, ["id"]),
+  },
+  {
+    name: "get_artisan_detail",
+    description: "Get a product's artisan/made-to-order details (lead time, min order, maker story).",
+    method: "GET",
+    path: "/partners/products/:id/artisan-detail",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Product id.") }, ["id"]),
+  },
+  {
+    name: "set_artisan_detail",
+    description:
+      "Set a product's artisan/made-to-order details: made_to_order, lead_time_days (0–3650), lead_time_label, min_order_quantity (≥1), maker_story.",
+    method: "POST",
+    path: "/partners/products/:id/artisan-detail",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/products/:id/artisan-detail",
+    bodyParams: [
+      "made_to_order", "lead_time_days", "lead_time_label", "min_order_quantity", "maker_story",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Product id."),
+        made_to_order: BOOL("Whether the product is made to order."),
+        lead_time_days: INT("Lead time in days (0–3650)."),
+        lead_time_label: STR("Human label, e.g. '2–3 weeks'."),
+        min_order_quantity: INT("Minimum order quantity (≥ 1)."),
+        maker_story: STR("Story about the maker (≤ 5000 chars)."),
+      },
+      ["id"]
+    ),
+  },
+
+  // ===== Production spec (#1342 / #1346) ===================================
+  // The weave and its measured parameters, the colour palette, and whatever the
+  // catalog cannot say. The catalog read is listed FIRST deliberately: the
+  // write validates `params` against the chosen technique's ranges, so a model
+  // that guesses a GSM without reading the ranges gets a rejection, not a spec.
+  {
+    name: "get_spec_catalog",
+    description:
+      "List the weaving techniques a production spec can use — families, per-technique parameters with min/max/step/default, presets and default finishes. Read this BEFORE calling set_product_spec: the ranges shown here are the ranges the write enforces.",
+    method: "GET",
+    path: "/partners/products/spec-catalog",
+    inputSchema: obj({}),
+    nextSteps: ["get_product_spec", "set_product_spec"],
+  },
+  {
+    name: "get_product_spec",
+    description:
+      "Get a product's production spec — weave technique and parameters, colour palette, custom fields, custom-order availability. Returns null when the partner has not written one, which is the normal state for most products.",
+    method: "GET",
+    path: "/partners/products/:id/spec",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Product id.") }, ["id"]),
+    nextSteps: ["set_product_spec", "get_spec_catalog"],
+  },
+  {
+    name: "set_product_spec",
+    description: `Create or update a product's production spec: weave technique + parameters, finishes, colour palette, partner-defined fields, and custom-order availability. ${PRODUCT_SPEC_WRITE_GUIDANCE}`,
+    method: "POST",
+    path: "/partners/products/:id/spec",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/products/:id/spec",
+    bodyParams: PRODUCT_SPEC_BODY_PARAMS,
+    inputSchema: obj(
+      { id: STR("Product id."), ...productSpecSchemaProps() },
+      ["id"]
+    ),
+    sideEffects:
+      "Replaces the stored palette and custom fields when those keys are passed.",
+    nextSteps: ["get_product_spec"],
+  },
+  {
+    name: "bulk_set_product_spec",
+    description: [
+      "Write ONE production spec across MANY of your products in a single call — the normal case when a run of pieces shares a weave, a parameter set and a palette and differs only in colourway. Sensitive: requires confirm:true. ALWAYS dry_run first.",
+      "",
+      "TARGETING:",
+      "- `spec` applies to every product listed.",
+      "- `products: [{ product_id, spec }]` — a row's own `spec` wins over the batch-wide one, so you can share a weave and vary the palette in the same call.",
+      "",
+      "Creates a spec where none exists and updates where one does — you do not have to know which, and a mixed batch is fine. Each row reports which actually happened (`created` / `updated`).",
+      "",
+      `⚠️ ${"`colors`, `fields` and `options` REPLACE what is stored when present"}. Omit a key to leave those rows untouched. Across a batch this is the sharpest edge here, so the dry-run plan names, per product, exactly which of the three it would replace — read it before confirming.`,
+      "",
+      "Returns a PER-ROW outcome: one bad product id never discards the rest, so read `results` and `warnings` rather than just the status. Everything is scoped to your own catalogue — a product that isn't yours comes back as an error row.",
+      `Capped at 100 products per call. ${PRODUCT_SPEC_WRITE_GUIDANCE}`,
+    ].join("\n"),
+    method: "POST",
+    path: "/partners/products/spec-bulk",
+    write: true,
+    sensitive: true,
+    bodyParams: ["products", "spec", "dry_run"],
+    inputSchema: obj(
+      {
+        products: {
+          type: "array",
+          description:
+            "Products to write. A row's own `spec` wins over the batch-wide `spec`.",
+          items: {
+            type: "object",
+            properties: {
+              product_id: STR("Product id, e.g. 'prod_...'."),
+              spec: {
+                type: "object",
+                description:
+                  "Spec for this product only. Same shape as the batch-wide `spec`.",
+                properties: productSpecSchemaProps(),
+                additionalProperties: false,
+              },
+            },
+            required: ["product_id"],
+            additionalProperties: false,
+          },
+        },
+        spec: {
+          type: "object",
+          description:
+            "Applied to every row that carries no `spec` of its own. Provide this, or a `spec` on every row.",
+          properties: productSpecSchemaProps(),
+          additionalProperties: false,
+        },
+        dry_run: BOOL("Return the plan without writing. Do this first."),
+      },
+      ["products"]
+    ),
+    sideEffects:
+      "Replaces the stored palette, custom fields and option groups on EVERY listed product when those keys are passed.",
+    nextSteps: ["get_product_spec"],
+  },
+
+  // ===== Partner orders (detail + fulfillment) =============================
+  {
+    name: "get_order",
+    description: "Get a single partner order by id.",
+    method: "GET",
+    path: "/partners/orders/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Order id, e.g. 'order_...'.") }, ["id"]),
+  },
+  {
+    name: "get_order_preview",
+    description: "Get the computed preview of an order (totals, items, pending changes).",
+    method: "GET",
+    path: "/partners/orders/:id/preview",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Order id.") }, ["id"]),
+  },
+  {
+    name: "get_order_line_items",
+    description: "List an order's line items.",
+    method: "GET",
+    path: "/partners/orders/:id/line-items",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Order id.") }, ["id"]),
+  },
+  {
+    name: "get_order_partner_fee",
+    description: "Get the partner fee / payout breakdown for an order.",
+    method: "GET",
+    path: "/partners/orders/:id/partner-fee",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Order id.") }, ["id"]),
+  },
+  {
+    name: "create_order_fulfillment",
+    description:
+      "Create a fulfillment for an order (pick items to fulfill from a location). Body follows the fulfillment route (items, location_id, …). Sensitive.",
+    method: "POST",
+    path: "/partners/orders/:id/fulfillments",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["items", "location_id", "no_notification", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Order id."),
+        items: {
+          type: "array",
+          description: "Items to fulfill: [{ id | line_item_id, quantity }].",
+          items: { type: "object", additionalProperties: true },
+        },
+        location_id: STR("Stock location to fulfill from."),
+        no_notification: BOOL("Suppress the customer notification."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "mark_fulfillment_delivered",
+    description: "Mark a fulfillment as delivered. Sensitive.",
+    method: "POST",
+    path: "/partners/orders/:id/fulfillments/:fulfillmentId/mark-as-delivered",
+    pathParams: ["id", "fulfillmentId"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      { id: STR("Order id."), fulfillmentId: STR("Fulfillment id.") },
+      ["id", "fulfillmentId"]
+    ),
+  },
+  {
+    name: "create_fulfillment_shipment",
+    description:
+      "Create a shipment for a fulfillment (marks it shipped, optionally with tracking). Body follows the shipment route. Sensitive.",
+    method: "POST",
+    path: "/partners/orders/:id/fulfillments/:fulfillmentId/shipment",
+    pathParams: ["id", "fulfillmentId"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["items", "labels", "tracking_numbers", "no_notification", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Order id."),
+        fulfillmentId: STR("Fulfillment id."),
+        items: { type: "array", description: "Items shipped.", items: { type: "object", additionalProperties: true } },
+        labels: { type: "array", description: "Shipping labels.", items: { type: "object", additionalProperties: true } },
+        tracking_numbers: { type: "array", description: "Tracking numbers.", items: { type: "string" } },
+        no_notification: BOOL("Suppress the customer notification."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id", "fulfillmentId"]
+    ),
+  },
+
+  // ===== Broader reads (Tier 1): customers, payments, returns/claims/exchanges,
+  //   production-run list, inventory detail, currencies & reasons ===============
+  {
+    name: "list_production_runs",
+    description:
+      "List the partner's production runs (paginated). Filter by status, role, run_type ('production'|'sample') or design_id.",
+    method: "GET",
+    path: "/partners/production-runs",
+    queryParams: ["limit", "offset", "q", "status", "role", "run_type", "design_id"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR("Optional status filter."),
+      role: STR("Optional role filter."),
+      run_type: { type: "string", enum: ["production", "sample"], description: "Run type filter." },
+      design_id: STR("Filter to runs for a specific design."),
+    }),
+  },
+  {
+    name: "get_production_run",
+    description:
+      "Get one of the partner's production runs, with its tasks and — the part the list does not carry — the MATERIALS this run was assigned. `materials_constrained: true` means only those items may be consumed against the run; `false` means no selection was made and the design's whole bill of materials is available, as it always was. Read this before log_production_run_consumption.",
+    method: "GET",
+    path: "/partners/production-runs/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Production-run id.") }, ["id"]),
+  },
+  {
+    name: "list_customers",
+    description: "List the partner's store customers (paginated). Free-text search via q.",
+    method: "GET",
+    path: "/partners/customers",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_customer",
+    description: "Get a single customer by id.",
+    method: "GET",
+    path: "/partners/customers/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Customer id, e.g. 'cus_...'.") }, ["id"]),
+  },
+  {
+    name: "list_customer_groups",
+    description: "List the partner's customer groups (paginated). Free-text search via q.",
+    method: "GET",
+    path: "/partners/customer-groups",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_payment",
+    description: "Get a single payment by id, with its refunds and refund reasons.",
+    method: "GET",
+    path: "/partners/payments/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Payment id, e.g. 'pay_...'.") }, ["id"]),
+  },
+  {
+    name: "list_payment_providers",
+    description: "List the payment providers available to the partner (optionally only enabled ones).",
+    method: "GET",
+    path: "/partners/payment-providers",
+    queryParams: ["is_enabled"],
+    inputSchema: obj({
+      is_enabled: STR("Set 'true' to list only enabled providers."),
+    }),
+  },
+  {
+    name: "list_payment_submissions",
+    description: "List the partner's payout/payment submission records (paginated).",
+    method: "GET",
+    path: "/partners/payment-submissions",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_payment_submission",
+    description: "Get a single payment/payout submission by id.",
+    method: "GET",
+    path: "/partners/payment-submissions/:submissionId",
+    pathParams: ["submissionId"],
+    inputSchema: obj(
+      { submissionId: STR("Payment submission id.") },
+      ["submissionId"]
+    ),
+  },
+
+  /**
+   * What this partner may still bill for, and what they already hold (#1712).
+   *
+   * 🔑 READ ONLY, and deliberately so. A partner may see every one of these
+   * numbers; only an admin may declare a payout settled or mint a credit.
+   * Whether money already given discharges the next payout is not a partner's
+   * assertion to make — the admin surface owns link_payment_to_payout.
+   *
+   * ⚠️ None of them take a partner id. They are scoped to the AUTHENTICATED
+   * partner by the route itself; there is no way to ask about somebody else,
+   * which is the property that keeps one partner's payouts off another's
+   * screen.
+   */
+  {
+    name: "list_payable_runs",
+    description:
+      "The completed production runs YOU can still bill for — work, as opposed to goods. One row per run with its billing status (`clear` / `partly_billed` / `billed` / `unknown`), produced vs ordered quantity, the agreed rate, and how much a previous payout already claimed. ⚠️ `unknown` means the run's billing history could not be verified, not that it is unbilled. Scoped to your own runs; it takes no arguments.",
+    method: "GET",
+    path: "/partners/payment-submissions/payable-runs",
+    inputSchema: obj({}),
+    nextSteps: ["list_payable_inventory_orders", "list_payment_submissions"],
+  },
+  {
+    name: "list_payable_inventory_orders",
+    description:
+      "The inventory orders YOU can still bill for — goods, as opposed to work. Each row carries what the order is worth by RECEIPTS (a partially received order is billable only for what actually arrived), what earlier payouts already claimed, and what remains. 🔑 A `count: 0` here does not mean nothing is owed: unbilled WORK lives in list_payable_runs. Takes no arguments.",
+    method: "GET",
+    path: "/partners/payment-submissions/payable-inventory-orders",
+    inputSchema: obj({}),
+    nextSteps: ["list_payable_runs", "list_payment_submissions"],
+  },
+  {
+    name: "list_credits",
+    description:
+      "Money YOU already hold that no payout has consumed — an overpayment, an adjustment or a goodwill credit. Returns the credit rows plus `open_total` (only `Open` credits count; an `Applied` one has already reduced a payout). Read-only: a credit is applied to a payout by an admin, never claimed here. Takes no arguments.",
+    method: "GET",
+    path: "/partners/credits",
+    inputSchema: obj({}),
+    nextSteps: ["list_payment_submissions"],
+  },
+  {
+    name: "list_returns",
+    description: "List returns for the partner's sales channel (optionally filtered by order_id).",
+    method: "GET",
+    path: "/partners/returns",
+    queryParams: ["order_id"],
+    inputSchema: obj({
+      order_id: STR("Filter to returns for a specific order id."),
+    }),
+  },
+  {
+    name: "get_return",
+    description: "Get a single return by id, with its items.",
+    method: "GET",
+    path: "/partners/returns/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Return id.") }, ["id"]),
+  },
+  {
+    name: "list_claims",
+    description: "List order claims for the partner's sales channel.",
+    method: "GET",
+    path: "/partners/claims",
+    inputSchema: obj({}),
+  },
+  {
+    name: "get_claim",
+    description: "Get a single order claim by id.",
+    method: "GET",
+    path: "/partners/claims/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Claim id.") }, ["id"]),
+  },
+  {
+    name: "list_exchanges",
+    description: "List order exchanges for the partner's sales channel.",
+    method: "GET",
+    path: "/partners/exchanges",
+    inputSchema: obj({}),
+  },
+  {
+    name: "get_exchange",
+    description: "Get a single order exchange by id.",
+    method: "GET",
+    path: "/partners/exchanges/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Exchange id.") }, ["id"]),
+  },
+  {
+    name: "get_inventory_item",
+    description: "Get a single inventory item by id.",
+    method: "GET",
+    path: "/partners/inventory-items/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Inventory item id, e.g. 'iitem_...'.") }, ["id"]),
+  },
+  {
+    name: "list_inventory_levels",
+    description: "List stock levels for an inventory item (scoped to the partner's location).",
+    method: "GET",
+    path: "/partners/inventory-items/:id/levels",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Inventory item id.") }, ["id"]),
+  },
+  // ---- Inventory writes: set on-hand stock. The partner may only write their
+  // OWN stock location (the store's default_location_id) — the routes enforce
+  // it. These are what let the assistant actually stock a product after
+  // create_product (which seeds a 0-qty level). Routine writes, not sensitive.
+  {
+    name: "set_inventory_level",
+    description:
+      "Set the on-hand stock quantity for ONE inventory item at a location. Find the item via get_product/list_inventory_levels and use the store's default_location_id as location_id (only your own location is writable).",
+    method: "POST",
+    path: "/partners/inventory-items/:id/levels/:locationId",
+    pathParams: ["id", "locationId"],
+    write: true,
+    previewPath: "/partners/inventory-items/:id/levels",
+    bodyParams: ["stocked_quantity", "incoming_quantity"],
+    sideEffects:
+      "overwrites the item's on-hand quantity at that location (not a delta). Only the partner's own store location is writable.",
+    inputSchema: obj(
+      {
+        id: STR("Inventory item id (iitem_...)."),
+        locationId: STR("Stock location id — the store's default_location_id."),
+        stocked_quantity: INT("New on-hand quantity (absolute, not a delta)."),
+        incoming_quantity: INT("Optional incoming/expected quantity."),
+      },
+      ["id", "locationId", "stocked_quantity"]
+    ),
+  },
+  {
+    name: "set_inventory_levels_batch",
+    description:
+      "Set stock for MANY inventory items at once (all at the partner's own location) — use to stock every variant of a product in one call. Provide `create` for items with no level yet and `update` for existing levels.",
+    method: "POST",
+    path: "/partners/inventory-items/batch-levels",
+    write: true,
+    bodyParams: ["create", "update", "delete"],
+    sideEffects:
+      "creates/updates on-hand levels for the listed items at the partner's store location; entries for any other location are dropped.",
+    inputSchema: obj({
+      create: {
+        type: "array",
+        description:
+          "Levels to create: [{ inventory_item_id, stocked_quantity }] (location defaults to the partner's store location).",
+        items: {
+          type: "object",
+          properties: {
+            inventory_item_id: STR("Inventory item id."),
+            stocked_quantity: INT("On-hand quantity."),
+          },
+          required: ["inventory_item_id", "stocked_quantity"],
+          additionalProperties: true,
+        },
+      },
+      update: {
+        type: "array",
+        description:
+          "Levels to update: [{ inventory_item_id, stocked_quantity }] for items that already have a level.",
+        items: {
+          type: "object",
+          properties: {
+            inventory_item_id: STR("Inventory item id."),
+            stocked_quantity: INT("New on-hand quantity."),
+          },
+          required: ["inventory_item_id", "stocked_quantity"],
+          additionalProperties: true,
+        },
+      },
+      delete: {
+        type: "array",
+        description: "Level ids (ilev_...) to remove.",
+        items: { type: "string" },
+      },
+    }),
+  },
+  {
+    name: "list_raw_materials",
+    description:
+      "Browse the global raw-material catalog (media, composition, material type) for design BOMs. Free-text search via q.",
+    method: "GET",
+    path: "/partners/inventory-items/raw-materials",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_partner_details",
+    description:
+      "Get the partner's extended details (profile + store + onboarding summary). Richer than get_partner_profile when you need the full dashboard context.",
+    method: "GET",
+    path: "/partners/details",
+    inputSchema: obj({}),
+  },
+  {
+    name: "list_currencies",
+    description: "List the store's enabled currencies (paginated).",
+    method: "GET",
+    path: "/partners/currencies",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "list_refund_reasons",
+    description: "List configured refund reasons (for processing refunds). Free-text search via q.",
+    method: "GET",
+    path: "/partners/refund-reasons",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "list_return_reasons",
+    description: "List configured return reasons (for processing returns). Free-text search via q.",
+    method: "GET",
+    path: "/partners/return-reasons",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+
+  // ===== Storefront management (Tier 2): status, website, pages, domain ======
+  {
+    name: "get_storefront_status",
+    description:
+      "Get the partner's storefront status (provisioned? live? domain, website id, deployment project). Call to check whether the storefront exists before provision/redeploy.",
+    method: "GET",
+    path: "/partners/storefront",
+    inputSchema: obj({}),
+  },
+  {
+    name: "get_storefront_website",
+    description:
+      "Get the storefront website record (theme, config, blocks). The source of truth the storefront renders from.",
+    method: "GET",
+    path: "/partners/storefront/website",
+    inputSchema: obj({}),
+  },
+  {
+    name: "update_storefront_website",
+    description:
+      "Create or update the storefront website record (theme policy / website payload). Body follows the website route's validator. Write — persists the website config the storefront renders.",
+    method: "POST",
+    path: "/partners/storefront/website",
+    write: true,
+    previewPath: "/partners/storefront/website",
+    bodyParams: ["website", "theme", "metadata"],
+    inputSchema: obj(
+      {
+        website: { type: "object", description: "Website fields to upsert.", additionalProperties: true },
+        theme: { type: "object", description: "Theme policy payload.", additionalProperties: true },
+        metadata: { type: "object", additionalProperties: true },
+      }
+    ),
+  },
+  {
+    name: "get_storefront_settings",
+    description:
+      "Get the storefront's analytics configuration — provider (in_house / custom / off), custom head and body-end script blocks, and the Google site verification token. Returns settings only, NOT traffic or visit data.",
+    method: "GET",
+    path: "/partners/storefront/website/analytics",
+    inputSchema: obj({}),
+  },
+  {
+    name: "update_storefront_analytics",
+    description: "Update storefront analytics settings/integration config (e.g. provider keys).",
+    method: "PUT",
+    path: "/partners/storefront/website/analytics",
+    write: true,
+    previewPath: "/partners/storefront/website/analytics",
+    bodyParams: ["config", "provider", "metadata"],
+    inputSchema: obj({
+      config: { type: "object", additionalProperties: true },
+      provider: STR("Analytics provider id, e.g. 'google' or 'plausible'."),
+      metadata: { type: "object", additionalProperties: true },
+    }),
+  },
+  {
+    name: "list_storefront_pages",
+    description:
+      "List the storefront's pages (home, about, product lists, …). Filter by q, status, page_type.",
+    method: "GET",
+    path: "/partners/storefront/pages",
+    queryParams: ["q", "status", "page_type", "limit", "offset"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR("Optional page status filter."),
+      page_type: STR("Optional page type filter, e.g. 'home', 'product', 'collection'."),
+    }),
+  },
+  {
+    name: "get_storefront_page",
+    description: "Get a single storefront page by id (with its blocks).",
+    method: "GET",
+    path: "/partners/storefront/pages/:pageId",
+    pathParams: ["pageId"],
+    inputSchema: obj({ pageId: STR("Page id.") }, ["pageId"]),
+  },
+  {
+    name: "list_storefront_page_blocks",
+    description: "List the content blocks of a storefront page (ids, types, content, order).",
+    method: "GET",
+    path: "/partners/storefront/pages/:pageId/blocks",
+    pathParams: ["pageId"],
+    inputSchema: obj({ pageId: STR("Page id.") }, ["pageId"]),
+  },
+  // Blocks — not the page's `content` text — are what the storefront renders.
+  // A page with an empty blocks array shows only its title, so these tools are
+  // how a page actually gets its Hero + MainContent layout. The model is
+  // instructed to ASK the partner what they want in each block before calling.
+  {
+    name: "add_storefront_page_blocks",
+    description:
+      "Add content blocks to a storefront page. Blocks are what the storefront renders — a page without them shows only its title. ASK the partner what they want in each section first (the Hero heading/subtitle, then MainContent body copy), then send a `blocks` array in render order.",
+    method: "POST",
+    path: "/partners/storefront/pages/:pageId/blocks",
+    pathParams: ["pageId"],
+    write: true,
+    previewPath: "/partners/storefront/pages/:pageId/blocks",
+    bodyParams: ["blocks"],
+    inputSchema: obj(
+      {
+        pageId: STR("Page id to add blocks to."),
+        blocks: BLOCKS_ARRAY,
+      },
+      ["pageId", "blocks"]
+    ),
+    sideEffects:
+      "Appends blocks to the page. If the page is already 'Published' these changes are live immediately — confirm with the partner before editing a live page.",
+    nextSteps: ["get_storefront_page", "list_storefront_page_blocks"],
+  },
+  {
+    name: "update_storefront_page_block",
+    description:
+      "Update a block on a storefront page (its title, subtitle, body, order, …). Get the block ids from list_storefront_page_blocks, then pass only the fields that change; `content` merges over the existing content rather than replacing it. ASK the partner what changed before editing.",
+    method: "PUT",
+    path: "/partners/storefront/pages/:pageId/blocks/:blockId",
+    pathParams: ["pageId", "blockId"],
+    write: true,
+    previewPath: "/partners/storefront/pages/:pageId/blocks/:blockId",
+    bodyParams: ["name", "type", "content", "settings", "order", "status", "metadata"],
+    inputSchema: obj(
+      {
+        pageId: STR("Page id the block belongs to."),
+        blockId: STR("Block id from list_storefront_page_blocks."),
+        name: STR("Optional internal label."),
+        type: BLOCK_TYPE_ENUM,
+        content: {
+          type: "object",
+          additionalProperties: true,
+          description:
+            "Block content, keyed by type. Hero: { title, subtitle?, align? ('left'|'center') }. MainContent: { title?, body } where body is plain text and blank lines split paragraphs. Merged over the existing content.",
+        },
+        settings: { type: "object", additionalProperties: true },
+        order: { type: "integer", description: "Render order (0-based)." },
+        status: BLOCK_STATUS_ENUM,
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["pageId", "blockId"]
+    ),
+    sideEffects:
+      "Editing a block on a 'Published' page is live immediately — confirm with the partner before editing a live page.",
+  },
+  {
+    name: "delete_storefront_page_block",
+    description:
+      "Delete a block from a storefront page. Sensitive — the block is removed immediately and cannot be recovered.",
+    method: "DELETE",
+    path: "/partners/storefront/pages/:pageId/blocks/:blockId",
+    pathParams: ["pageId", "blockId"],
+    write: true,
+    inputSchema: obj(
+      {
+        pageId: STR("Page id the block belongs to."),
+        blockId: STR("Block id from list_storefront_page_blocks."),
+      },
+      ["pageId", "blockId"]
+    ),
+    sideEffects:
+      "The block is deleted permanently. On a 'Published' page this changes the live site immediately.",
+  },
+  // The two page writes below mirror `postPagesSchema` / `updatePageSchema`
+  // field for field. They did not, and the gap was invisible from here: the row
+  // never mentioned `content` (which the route REQUIRES), never required
+  // `slug`, offered lowercase 'home'/'published' against a capitalised enum,
+  // and advertised a `blocks` array that zod strips on the way through. Every
+  // create attempt came back "Field 'content' is required" — a tool that could
+  // not satisfy its own route no matter what the model sent.
+  {
+    name: "create_storefront_page",
+    description:
+      "Create a storefront page. `content` is REQUIRED — it is the page's body text, and the route rejects the call without it (write a short lead/summary; the storefront renders BLOCKS, not this field). Blocks are NOT part of this call: after creating, ASK the partner what they want in each section and lay the page out with add_storefront_page_blocks (Hero + MainContent). Call list_storefront_pages first so you do not reuse an existing slug.",
+    method: "POST",
+    path: "/partners/storefront/pages",
+    write: true,
+    bodyParams: [
+      "title", "slug", "content", "page_type", "status",
+      "meta_title", "meta_description", "meta_keywords", "metadata",
+    ],
+    inputSchema: obj(
+      {
+        title: STR("Page title."),
+        slug: STR("URL slug: lowercase-with-hyphens, no leading slash."),
+        content: STR("The page's body text. Required, and must not be empty — write real copy, not a placeholder."),
+        page_type: PAGE_TYPE_ENUM,
+        status: PAGE_STATUS_ENUM,
+        meta_title: STR("Optional SEO title."),
+        meta_description: STR("Optional one-sentence search snippet."),
+        meta_keywords: STR("Optional comma-separated keywords."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["title", "slug", "content"]
+    ),
+    sideEffects:
+      "A page created with status 'Published' is immediately visible on the live storefront. Omit status (or send 'Draft') unless the partner asked to publish.",
+    nextSteps: ["add_storefront_page_blocks", "get_storefront_page", "list_storefront_page_blocks"],
+  },
+  {
+    name: "update_storefront_page",
+    description:
+      "Update a storefront page. Every field is optional here — pass only what changes. Blocks are NOT part of this call; use add/update/delete_storefront_page_block to change the layout.",
+    method: "PUT",
+    path: "/partners/storefront/pages/:pageId",
+    pathParams: ["pageId"],
+    write: true,
+    previewPath: "/partners/storefront/pages/:pageId",
+    bodyParams: [
+      "title", "slug", "content", "page_type", "status",
+      "meta_title", "meta_description", "meta_keywords", "metadata",
+    ],
+    inputSchema: obj(
+      {
+        pageId: STR("Page id to update."),
+        title: STR("Page title."),
+        slug: STR("URL slug: lowercase-with-hyphens, no leading slash."),
+        content: STR("The page's body text. Must not be empty if sent."),
+        page_type: PAGE_TYPE_ENUM,
+        status: PAGE_STATUS_ENUM,
+        meta_title: STR("Optional SEO title."),
+        meta_description: STR("Optional one-sentence search snippet."),
+        meta_keywords: STR("Optional comma-separated keywords."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["pageId"]
+    ),
+    sideEffects:
+      "Setting status to 'Published' makes the page live immediately; setting it to 'Draft' or 'Archived' takes a live page down.",
+  },
+  {
+    name: "get_storefront_domain",
+    description: "Get the storefront's configured custom domain (if any).",
+    method: "GET",
+    path: "/partners/storefront/domain",
+    inputSchema: obj({}),
+  },
+  {
+    name: "update_storefront_domain",
+    description:
+      "Set or change the storefront's custom domain. Sensitive — affects the live storefront URL; the partner should confirm. Body: { domain }.",
+    method: "POST",
+    path: "/partners/storefront/domain",
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/storefront/domain",
+    bodyParams: ["domain"],
+    inputSchema: obj(
+      { domain: STR("The custom domain to set, e.g. 'shop.example.com'.") },
+      ["domain"]
+    ),
+  },
+  {
+    name: "verify_storefront_domain",
+    description:
+      "Trigger DNS verification for the storefront's custom domain. Sensitive — re-runs verification against the configured domain.",
+    method: "POST",
+    path: "/partners/storefront/domain/verify",
+    write: true,
+    sensitive: true,
+    inputSchema: obj({}),
+  },
+  {
+    name: "provision_storefront",
+    description:
+      "Provision the partner's storefront (creates the website, seeds default pages, kicks off deployment). Sensitive — heavy, one-time setup. Run get_storefront_status first to check it isn't already provisioned.",
+    method: "POST",
+    path: "/partners/storefront/provision",
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/storefront",
+    inputSchema: obj({}),
+  },
+  {
+    name: "redeploy_storefront",
+    description:
+      "Trigger a redeploy of the storefront (rebuild + publish). Sensitive — touches the live site. Use after content/theme changes need to go live.",
+    method: "POST",
+    path: "/partners/storefront/redeploy",
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/storefront",
+    inputSchema: obj({}),
+  },
+  {
+    name: "seed_storefront_pages",
+    description:
+      "Seed/re-seed the storefront's default pages from the template set. Sensitive — overwrites default pages; confirm with the partner first.",
+    method: "POST",
+    path: "/partners/storefront/seed-pages",
+    write: true,
+    sensitive: true,
+    inputSchema: obj({}),
+  },
+
+  // ===== Store config (Tier 3): /partners/stores/:id setup surface ===========
+  // The store id is the :id param from list_stores / create_store. These let the
+  // assistant fully configure a store (regions, products, shipping, tax, sales
+  // channels, locations) during onboarding.
+  {
+    name: "get_store",
+    description: "Get a single store by id (config, default sales channel, region, location).",
+    method: "GET",
+    path: "/partners/stores/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Store id, e.g. 'store_...'.") }, ["id"]),
+  },
+  {
+    name: "update_store",
+    description:
+      "Update a store (name, default_sales_channel_id, metadata, …). Pass only the fields to change.",
+    method: "POST",
+    path: "/partners/stores/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/stores/:id",
+    bodyParams: ["name", "default_sales_channel_id", "metadata", "supported_currencies"],
+    inputSchema: obj(
+      {
+        id: STR("Store id to update."),
+        name: STR("Store display name."),
+        default_sales_channel_id: STR("Default sales channel id."),
+        supported_currencies: { type: "array", items: { type: "object", additionalProperties: true } },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "list_store_regions",
+    description: "List a store's regions (currency + countries).",
+    method: "GET",
+    path: "/partners/stores/:id/regions",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Store id.") }, ["id"]),
+  },
+  {
+    name: "get_store_region",
+    description: "Get a single region of a store by id.",
+    method: "GET",
+    path: "/partners/stores/:id/regions/:regionId",
+    pathParams: ["id", "regionId"],
+    inputSchema: obj(
+      { id: STR("Store id."), regionId: STR("Region id (reg_...).") },
+      ["id", "regionId"]
+    ),
+  },
+  {
+    name: "add_store_region",
+    description:
+      "Add a region to a store (name, currency_code, countries, optional payment_providers). Body follows the store-region route validator.",
+    method: "POST",
+    path: "/partners/stores/:id/regions",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["name", "currency_code", "countries", "payment_providers", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        name: STR("Region name, e.g. 'India'."),
+        currency_code: STR("3-letter code, e.g. 'inr'."),
+        countries: { type: "array", description: "Lower-case ISO-2 codes, e.g. ['in'].", items: { type: "string" } },
+        payment_providers: { type: "array", items: { type: "string" } },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id", "name", "currency_code", "countries"]
+    ),
+  },
+  {
+    name: "update_store_region",
+    description: "Update a store region (name, currency, countries, providers). Pass only the fields to change.",
+    method: "POST",
+    path: "/partners/stores/:id/regions/:regionId",
+    pathParams: ["id", "regionId"],
+    write: true,
+    previewPath: "/partners/stores/:id/regions/:regionId",
+    bodyParams: ["name", "currency_code", "countries", "payment_providers", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        regionId: STR("Region id to update."),
+        name: STR("Region name."),
+        currency_code: STR("3-letter code."),
+        countries: { type: "array", items: { type: "string" } },
+        payment_providers: { type: "array", items: { type: "string" } },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id", "regionId"]
+    ),
+  },
+  {
+    name: "delete_store_region",
+    description: "Delete a region from a store. Sensitive (DELETE).",
+    method: "DELETE",
+    path: "/partners/stores/:id/regions/:regionId",
+    pathParams: ["id", "regionId"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      { id: STR("Store id."), regionId: STR("Region id to delete.") },
+      ["id", "regionId"]
+    ),
+  },
+  {
+    name: "list_store_products",
+    description: "List the products configured directly under a store (paginated).",
+    method: "GET",
+    path: "/partners/stores/:id/products",
+    pathParams: ["id"],
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ id: STR("Store id."), ...PAGINATION }, ["id"]),
+  },
+  {
+    name: "get_store_product",
+    description: "Get a single product configured under a store by id.",
+    method: "GET",
+    path: "/partners/stores/:id/products/:productId",
+    pathParams: ["id", "productId"],
+    inputSchema: obj(
+      { id: STR("Store id."), productId: STR("Product id.") },
+      ["id", "productId"]
+    ),
+  },
+  {
+    name: "add_store_product",
+    description:
+      "Add an existing product to a store's product set. Body follows the store-product route validator.",
+    method: "POST",
+    path: "/partners/stores/:id/products",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["product_id", "product", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        product_id: STR("Existing product id to add."),
+        product: { type: "object", description: "Optional product overrides.", additionalProperties: true },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "update_store_product",
+    description: "Update a store-level product config. Pass only the fields to change.",
+    method: "POST",
+    path: "/partners/stores/:id/products/:productId",
+    pathParams: ["id", "productId"],
+    write: true,
+    previewPath: "/partners/stores/:id/products/:productId",
+    bodyParams: ["product", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        productId: STR("Product id to update."),
+        product: { type: "object", additionalProperties: true },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id", "productId"]
+    ),
+  },
+  {
+    name: "bulk_update_products",
+    description: [
+      "Update MANY of your products, their variants and their stock levels in one call. Sensitive: requires confirm:true. ALWAYS rehearse with `preview: true` first — the plan names every product and variant it would touch, with the before/after quantity at each location, and there is no undo once it fires. Use `preview`, NOT `dry_run`: `dry_run` is this surface's own flag and is intercepted before the route runs, so it returns a planned request rather than the real change set. APPLIES when neither flag is given.",
+      "Returns a PER-ROW outcome: one bad id never discards the rest of the batch, so read `variants`, `products` and `warnings` rather than just the status.",
+      "",
+      "TARGETING — combine freely:",
+      "- `products: [{ product_id, update, variants }]` for named products. Omit a product's `variants` key to mean EVERY variant of it.",
+      "- `selector` for filter-based batches: `{ all: true }`, `collection_id`, `category_id`, `status`, `product_ids`. This is how 'zero my whole catalogue' is one call. `all: true` must be passed explicitly — the selector will not default to everything.",
+      "- `product_update` / `variant_update` apply to everything selected; a per-row `update` wins over them.",
+      "",
+      "INVENTORY — `set_inventory: { quantity, ensure_managed }`:",
+      "- `quantity` is ABSOLUTE, not a delta. 0 zeroes the stock.",
+      "- 🔑 `ensure_managed: true` is what makes this work on untracked variants. Medusa CANNOT turn inventory tracking on for a variant that already exists — core only ever turns it off — so a variant with `manage_inventory: false` has no inventory item and nothing to stock. With this flag the tool creates the inventory item, links it to the variant, seeds the levels, then writes the quantity. Without it, untracked variants come back `skipped` and their stock is untouched.",
+      "- Stock always lands on YOUR store's own location; any other location you name is dropped with a warning.",
+      "",
+      "Everything is scoped to your own catalogue — a product that isn't yours comes back as an error row, never silently applied.",
+      "⚠️ `manage_inventory: false` is REFUSED here. Core dismisses the variant's inventory item and its levels with it, with no undo. Use `update_product_variant` one variant at a time.",
+      "Capped at 200 products per call.",
+    ].join("\n"),
+    method: "POST",
+    path: "/partners/stores/:id/products/bulk-update",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    // `preview`, NOT `dry_run` — the dispatcher consumes `dry_run` before the
+    // route runs, so the real per-row plan was unreachable here too (#1877).
+    bodyParams: [
+      "products",
+      "selector",
+      "product_update",
+      "variant_update",
+      "set_inventory",
+      "preview",
+      "dry_run",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        preview: {
+          type: "boolean",
+          description:
+            "Rehearse without writing — returns the route's REAL per-row plan. Use this, not `dry_run`, which the dispatcher intercepts before the route runs. Defaults to false: omitting it APPLIES.",
+        },
+        products: {
+          type: "array",
+          description:
+            "Named products. Omit a row's `variants` to target every variant of it.",
+          items: {
+            type: "object",
+            properties: {
+              product_id: STR("Product id, e.g. 'prod_...'."),
+              update: {
+                type: "object",
+                description:
+                  "Product fields to change (title, subtitle, description, handle, status, material, hs_code, weight, metadata, …).",
+                additionalProperties: true,
+              },
+              variants: {
+                type: "array",
+                description:
+                  "Specific variants only. Omit the key entirely to mean all of them.",
+                items: {
+                  type: "object",
+                  properties: {
+                    variant_id: STR("Variant id, e.g. 'variant_...'."),
+                    update: {
+                      type: "object",
+                      description:
+                        "Variant fields to change (title, sku, hs_code, origin_country, material, allow_backorder, weight, metadata, …).",
+                      additionalProperties: true,
+                    },
+                  },
+                  required: ["variant_id"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["product_id"],
+            additionalProperties: false,
+          },
+        },
+        selector: {
+          type: "object",
+          description:
+            "Filter-based targeting, always confined to your own catalogue. Must narrow something; pass all: true to mean your whole catalogue.",
+          properties: {
+            all: BOOL("Every product in your store. Say this explicitly."),
+            product_ids: { type: "array", items: { type: "string" }, description: "Specific product ids." },
+            collection_id: { type: "array", items: { type: "string" }, description: "Restrict to these collections." },
+            category_id: { type: "array", items: { type: "string" }, description: "Restrict to these categories." },
+            status: { type: "array", items: { type: "string" }, description: "Restrict to these product statuses." },
+          },
+          additionalProperties: false,
+        },
+        product_update: {
+          type: "object",
+          description: "Product fields applied to every selected product.",
+          additionalProperties: true,
+        },
+        variant_update: {
+          type: "object",
+          description:
+            "Variant fields applied to every selected variant. manage_inventory: false is refused.",
+          additionalProperties: true,
+        },
+        set_inventory: {
+          type: "object",
+          description: "Stock to write on every selected variant.",
+          properties: {
+            quantity: INT("Absolute on-hand quantity. NOT a delta; 0 zeroes it."),
+            ensure_managed: BOOL(
+              "Turn inventory tracking on where it is off, creating the inventory item, link and levels core never makes for an existing variant. Untracked variants are skipped without this."
+            ),
+            location_ids: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Optional. Only your own store location is writable; anything else is dropped.",
+            },
+          },
+          required: ["quantity"],
+          additionalProperties: false,
+        },
+        dry_run: BOOL("Return the plan without writing. Do this first."),
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Overwrites live catalogue fields and on-hand stock across many of your products at once. Enabling tracking creates inventory items and levels. Setting a quantity below a variant's reserved stock oversells open orders — the response warns, it does not block.",
+    nextSteps: ["list_store_products", "get_store_product"],
+  },
+  {
+    name: "delete_store_product",
+    description: "Remove a product from a store's product set. Sensitive (DELETE).",
+    method: "DELETE",
+    path: "/partners/stores/:id/products/:productId",
+    pathParams: ["id", "productId"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      { id: STR("Store id."), productId: STR("Product id to remove.") },
+      ["id", "productId"]
+    ),
+  },
+  {
+    name: "list_store_product_variants",
+    description: "List the product variants available in a store (paginated).",
+    method: "GET",
+    path: "/partners/stores/:id/product-variants",
+    pathParams: ["id"],
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ id: STR("Store id."), ...PAGINATION }, ["id"]),
+  },
+  // ---- Product option + variant writes: edit a product after create_product
+  // (add a colour/size, fix a price, remove a variant). Options must exist
+  // before variants can reference them. Routine writes except DELETE.
+  {
+    name: "list_option_palettes",
+    description:
+      "List the curated option vocabularies (e.g. Colour) with their allowed values and hex codes. Call this BEFORE add_product_option whenever the option is a colour — the palette is the vocabulary, and a value outside it is refused unless you supply a hex for it.",
+    method: "GET",
+    path: "/partners/option-palettes",
+    inputSchema: obj({}, []),
+  },
+  {
+    name: "add_product_option",
+    description:
+      "Add an option (e.g. Size, Colour) with its values to a product. Add every option a variant will name BEFORE calling add_product_variant, or it fails on the option count. Safe to call again for an option the product already has — the new values are merged into it. Colour is a CURATED option shared by every partner: pass values from list_option_palettes, and to use a colour that is not in the palette pass an object with a hex, e.g. { value: 'Sea Green', hex: '#2E8B57' }.",
+    method: "POST",
+    path: "/partners/stores/:id/products/:productId/options",
+    pathParams: ["id", "productId"],
+    write: true,
+    bodyParams: ["title", "values"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        productId: STR("Product id."),
+        title: STR("Option name, e.g. 'Size' or 'Colour'."),
+        values: {
+          type: "array",
+          description:
+            "Option values. Strings for existing values, e.g. ['S','M','L'] or ['Ivory','Terracotta']. For a colour outside the curated palette, an object: { value: 'Sea Green', hex: '#2E8B57' }.",
+          items: {
+            anyOf: [
+              { type: "string" },
+              {
+                type: "object",
+                properties: {
+                  value: STR("The value's name, e.g. 'Sea Green'."),
+                  hex: STR("6-digit hex for a new colour, e.g. '#2E8B57'."),
+                },
+                required: ["value"],
+                additionalProperties: true,
+              },
+            ],
+          },
+        },
+      },
+      ["id", "productId", "title", "values"]
+    ),
+  },
+  {
+    name: "add_product_variant",
+    description:
+      "Add a variant to an existing product. `options` maps each product option to a value, e.g. { Size: 'M', Colour: 'Ivory' }. Provide `prices` as [{ amount, currency_code }]. Creates an inventory item — seed its stock with set_inventory_level afterward. A variant needs a value for EVERY option the product has, so adding an option to a product that already has variants leaves those variants incomplete — add the option first, then fix or replace the variants. ⚠️ Do NOT create a variant per colour to cover a palette: with 2 options that is options×colours variants, each carrying a price in every currency, and it is almost never what the partner wants. A colour a partner offers made-to-order belongs in the production spec's palette (set_product_spec `colors`), not in a variant. Make a colour a variant ONLY when that exact colour is separately stocked or separately priced.",
+    method: "POST",
+    path: "/partners/stores/:id/products/:productId/variants",
+    pathParams: ["id", "productId"],
+    write: true,
+    bodyParams: [
+      "title",
+      "sku",
+      "options",
+      "prices",
+      "manage_inventory",
+      "allow_backorder",
+      // A variant born without a weight cannot be quoted for freight, and the
+      // partner has to come back and fix it through a second tool. Setting it
+      // at creation is the only way the data is right by default.
+      ...PHYSICAL_AND_CUSTOMS_BODY_PARAMS,
+    ],
+    sideEffects:
+      "creates the variant + its inventory item; the new variant starts at 0 stock.",
+    nextSteps: ["set_inventory_level"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        productId: STR("Product id."),
+        title: STR("Variant title, e.g. 'Red / M'."),
+        sku: STR("Stock-keeping unit."),
+        ...physicalAndCustomsSchemaProps(),
+        options: {
+          type: "object",
+          description: "Option→value map, e.g. { Size: 'M', Color: 'Red' }.",
+          additionalProperties: true,
+        },
+        prices: {
+          type: "array",
+          description: "Prices: [{ amount, currency_code }].",
+          items: {
+            type: "object",
+            properties: {
+              amount: INT("Price amount in the currency's minor/major unit per store convention."),
+              currency_code: STR("ISO currency code, e.g. 'usd'."),
+            },
+            required: ["amount", "currency_code"],
+            additionalProperties: true,
+          },
+        },
+        manage_inventory: BOOL("Track stock for this variant (default true)."),
+        allow_backorder: BOOL("Allow ordering beyond stock."),
+      },
+      ["id", "productId", "title"]
+    ),
+  },
+  {
+    name: "update_product_variant",
+    description:
+      "Update a variant (title, sku, prices, options, inventory flags). Pass only the fields to change. Prices are [{ amount, currency_code }].",
+    method: "POST",
+    path: "/partners/stores/:id/products/:productId/variants/:variantId",
+    pathParams: ["id", "productId", "variantId"],
+    write: true,
+    previewPath: "/partners/stores/:id/products/:productId/variants/:variantId",
+    bodyParams: [
+      "title",
+      "sku",
+      "options",
+      "prices",
+      "manage_inventory",
+      "allow_backorder",
+      // Physical + customs fields. The route already spreads the whole body
+      // into updateProductVariantsWorkflow, so these have always persisted —
+      // they were simply never exposed. The customs trio was added first (it
+      // blocked international labels); `weight` and the dimensions were left
+      // out in the same way and blocked every freight quote, silently, because
+      // the dispatcher drops unlisted keys without a word. See
+      // lib/product-attributes/tool-schema.ts.
+      ...PHYSICAL_AND_CUSTOMS_BODY_PARAMS,
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        productId: STR("Product id."),
+        variantId: STR("Variant id to update."),
+        title: STR("New variant title."),
+        sku: STR("New SKU."),
+        ...physicalAndCustomsSchemaProps(),
+        options: {
+          type: "object",
+          description: "Option→value map to change.",
+          additionalProperties: true,
+        },
+        prices: {
+          type: "array",
+          description: "Replacement prices: [{ amount, currency_code }].",
+          items: {
+            type: "object",
+            properties: {
+              amount: INT("Price amount."),
+              currency_code: STR("ISO currency code."),
+            },
+            required: ["amount", "currency_code"],
+            additionalProperties: true,
+          },
+        },
+        manage_inventory: BOOL("Track stock for this variant."),
+        allow_backorder: BOOL("Allow ordering beyond stock."),
+      },
+      ["id", "productId", "variantId"]
+    ),
+  },
+  // ===== Customs / HS codes (mirrors the admin pair) ======================
+  {
+    name: "list_missing_hs_codes",
+    description:
+      "List items in YOUR store that have NO HS/HSN customs code at any level and would therefore fail an international shipping label. Each row carries the product title, description, material, type and categories so you can propose an accurate code, plus `suggested_target` telling you exactly which level and id to write it to. Read-only.",
+    method: "GET",
+    path: "/partners/stores/:id/customs/hs-codes/missing",
+    pathParams: ["id"],
+    queryParams: ["limit", "offset"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        limit: INT("Max products to scan (default 50, max 200)."),
+        offset: INT("Pagination offset over products."),
+      },
+      ["id"]
+    ),
+    nextSteps: ["bulk_set_hs_codes"],
+  },
+  {
+    name: "bulk_set_hs_codes",
+    description: [
+      "Assign HS/HSN customs codes to many items in your store at once. Returns a PER-ROW outcome — a bad id never discards the rest of the batch, so read `results`, not just the status. Ids outside your own catalogue are rejected per-row.",
+      "",
+      "WHERE to write a code matters: a label reads the levels in a fixed order (variant → the variant's inventory item → the product), so a code written at the wrong level is invisible to it.",
+      "- Variant manages its own inventory → write at `inventory_item`.",
+      "- Product HAS variants but none of them manage inventory → write at `product`. The code then covers every sibling variant at once; writing per-variant there means N rows to maintain and N chances for one to drift.",
+      "- Write at `variant` only when one specific variant genuinely differs from its siblings.",
+      "`list_missing_hs_codes` already computes this for you as `suggested_target` — prefer it over deciding yourself.",
+      "",
+      "NEVER guess a code from an id or a SKU. Classify from the product title, description, material and category. If those don't identify the goods well enough, say so and ask — this is a customs declaration, and a wrong one is a misdeclaration.",
+    ].join("\n"),
+    method: "POST",
+    path: "/partners/stores/:id/customs/hs-codes",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["assignments"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        assignments: {
+          type: "array",
+          description: "The codes to write (max 200 per call).",
+          items: {
+            type: "object",
+            properties: {
+              level: {
+                type: "string",
+                enum: ["variant", "inventory_item", "product"],
+                description: "Which catalogue level to write the code to.",
+              },
+              id: STR("Id of the variant / inventory item / product."),
+              hs_code: STR(
+                "The HS/HSN code. 6 digits internationally; India's HSN runs to 8 and some tariff lines to 10."
+              ),
+              origin_country: STR("Optional ISO-2 country of manufacture."),
+              material: STR("Optional material description for customs."),
+            },
+            required: ["level", "id", "hs_code"],
+            additionalProperties: false,
+          },
+        },
+      },
+      ["id", "assignments"]
+    ),
+    sideEffects:
+      "Writes customs codes onto live catalogue records. Labels resolve HSN from the DB at generation time, so this immediately affects EXISTING orders too — no backfill needed.",
+  },
+  {
+    name: "delete_product_variant",
+    description: "Delete a variant from a product.",
+    method: "DELETE",
+    path: "/partners/stores/:id/products/:productId/variants/:variantId",
+    pathParams: ["id", "productId", "variantId"],
+    write: true,
+    previewPath: "/partners/stores/:id/products/:productId/variants/:variantId",
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        productId: STR("Product id."),
+        variantId: STR("Variant id to delete."),
+      },
+      ["id", "productId", "variantId"]
+    ),
+  },
+  {
+    name: "list_store_shipping_options",
+    description: "List the shipping options configured for a store.",
+    method: "GET",
+    path: "/partners/stores/:id/shipping-options",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Store id.") }, ["id"]),
+  },
+  {
+    name: "add_store_shipping_option",
+    description:
+      "Add a shipping option to a store. Needs a service zone, and prices are an array — one entry per currency or region, not a single amount. The shipping profile is set by the server (the partner shipping profile, #1983) and cannot be chosen.",
+    method: "POST",
+    path: "/partners/stores/:id/shipping-options",
+    pathParams: ["id"],
+    write: true,
+    // This tool could never succeed: it advertised `amount` and `metadata`,
+    // neither of which the validator has, and omitted service_zone_id,
+    // shipping_profile_id and prices, all three of which it REQUIRES. The
+    // tool's own `required` list said ["id","name"], so the #1371 required-args
+    // gate had nothing to catch — the lie was in the list itself.
+    bodyParams: [
+      "name",
+      "provider_id",
+      "price_type",
+      "service_zone_id",
+      "prices",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        name: STR("Shipping option name."),
+        provider_id: STR("Fulfillment provider id."),
+        price_type: STR("Price type, e.g. 'flat'."),
+        service_zone_id: STR("Service zone this option serves."),
+        prices: {
+          type: "array",
+          description:
+            "One price per currency or region. At least one entry is required.",
+          items: {
+            type: "object",
+            properties: {
+              amount: { type: "number", description: "Price amount." },
+              currency_code: { type: "string", description: "e.g. 'inr'." },
+              region_id: { type: "string", description: "Region-scoped price." },
+            },
+            required: ["amount"],
+            additionalProperties: false,
+          },
+        },
+      },
+      [
+        "id",
+        "name",
+        "price_type",
+        "provider_id",
+        "service_zone_id",
+        "prices",
+      ]
+    ),
+  },
+  {
+    name: "list_store_tax_regions",
+    description: "List the tax regions configured for a store.",
+    method: "GET",
+    path: "/partners/stores/:id/tax-regions",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Store id.") }, ["id"]),
+  },
+  {
+    name: "add_store_tax_region",
+    description:
+      "Add a tax region to a store. The rate is nested under default_tax_rate, not top level. A root region (no parent) requires provider_id.",
+    method: "POST",
+    path: "/partners/stores/:id/tax-regions",
+    pathParams: ["id"],
+    write: true,
+    // `rate` used to be advertised at the top level, where the validator has no
+    // such key — a .strict() 400 on every call. And `provider_id` was never
+    // advertised at all, though the validator's .refine() requires it for any
+    // root region, so no root tax region could be created through this tool.
+    bodyParams: ["country_code", "province_code", "provider_id", "default_tax_rate"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        country_code: STR("ISO-2 country code, e.g. 'in'."),
+        province_code: STR("Optional province/state code."),
+        provider_id: STR(
+          "Tax provider id. Required unless this is a province-level region under a parent."
+        ),
+        default_tax_rate: {
+          type: "object",
+          description: "The region's default rate.",
+          properties: {
+            rate: { type: "number", description: "Tax rate, e.g. 5 for 5%." },
+            code: { type: "string", description: "Rate code." },
+            name: { type: "string", description: "Human-readable rate name." },
+            is_combinable: { type: "boolean" },
+          },
+          additionalProperties: false,
+        },
+      },
+      ["id", "country_code"]
+    ),
+  },
+  {
+    name: "list_store_sales_channels",
+    description: "List the sales channels of a store.",
+    method: "GET",
+    path: "/partners/stores/:id/sales-channels",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Store id.") }, ["id"]),
+  },
+  {
+    name: "add_store_sales_channel",
+    description: "Add a sales channel to a store. Body follows the route validator.",
+    method: "POST",
+    path: "/partners/stores/:id/sales-channels",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["name", "description", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        name: STR("Sales channel name."),
+        description: STR("Optional description."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id", "name"]
+    ),
+  },
+  {
+    name: "list_store_locations",
+    description: "List the stock locations linked to a store.",
+    method: "GET",
+    path: "/partners/stores/:id/locations",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Store id.") }, ["id"]),
+  },
+  {
+    name: "add_store_location",
+    description: "Link/create a stock location for a store (name, address). Body follows the route validator.",
+    method: "POST",
+    path: "/partners/stores/:id/locations",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["name", "address", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Store id."),
+        name: STR("Location / warehouse name."),
+        address: { type: "object", description: "Address payload.", additionalProperties: true },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id", "name"]
+    ),
+  },
+  {
+    name: "list_store_payment_providers",
+    description: "List the payment providers enabled for a store's regions.",
+    method: "GET",
+    path: "/partners/stores/:id/payment-providers",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Store id.") }, ["id"]),
+  },
+
+  // ===== Sensitive mutations + order/payment edits (Tier 4) ===================
+  // These touch live orders/payments. High-stakes ones are flagged `sensitive`
+  // → the dispatcher returns `requires_confirmation` so the chat surfaces an
+  // approval card rather than acting unilaterally.
+  {
+    name: "list_order_changes",
+    description: "List the pending order changes (edits/fulfillment/returns) for an order.",
+    method: "GET",
+    path: "/partners/orders/:id/changes",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Order id.") }, ["id"]),
+  },
+  {
+    name: "get_fulfillment_tracking",
+    description: "Get tracking numbers/links for an order's fulfillment.",
+    method: "GET",
+    path: "/partners/orders/:id/fulfillments/:fulfillmentId/tracking",
+    pathParams: ["id", "fulfillmentId"],
+    inputSchema: obj(
+      { id: STR("Order id."), fulfillmentId: STR("Fulfillment id.") },
+      ["id", "fulfillmentId"]
+    ),
+  },
+  {
+    name: "list_assigned_tasks",
+    description: "List the tasks assigned to the partner (paginated).",
+    method: "GET",
+    path: "/partners/assigned-tasks",
+    queryParams: ["limit", "offset", "status"],
+    inputSchema: obj({ ...PAGINATION, status: STR("Optional status filter.") }),
+  },
+  {
+    name: "get_assigned_task",
+    description: "Get a single assigned task by id (with subtasks + comments).",
+    method: "GET",
+    path: "/partners/assigned-tasks/:taskId",
+    pathParams: ["taskId"],
+    inputSchema: obj({ taskId: STR("Task id.") }, ["taskId"]),
+  },
+  {
+    name: "cancel_order",
+    description:
+      "Cancel a partner order. Sensitive — the order stops being fulfillable. Confirm with the partner first.",
+    method: "POST",
+    path: "/partners/orders/:id/cancel",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/orders/:id",
+    inputSchema: obj({ id: STR("Order id to cancel.") }, ["id"]),
+  },
+  {
+    name: "transfer_order",
+    description:
+      "Transfer an order's fulfillment to another location/partner. Sensitive — affects who fulfills the order. Body follows the route (e.g. location_id).",
+    method: "POST",
+    path: "/partners/orders/:id/transfer",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/orders/:id",
+    bodyParams: ["location_id", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Order id to transfer."),
+        location_id: STR("Destination stock location id."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "cancel_fulfillment",
+    description:
+      "Cancel a fulfillment (un-ship it). Sensitive — reverses a shipment. Confirm with the partner first.",
+    method: "POST",
+    path: "/partners/orders/:id/fulfillments/:fulfillmentId/cancel",
+    pathParams: ["id", "fulfillmentId"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      { id: STR("Order id."), fulfillmentId: STR("Fulfillment id to cancel.") },
+      ["id", "fulfillmentId"]
+    ),
+  },
+  {
+    name: "capture_payment",
+    description:
+      "Capture an authorized payment. Sensitive — moves money. Confirm with the partner first. Optional body: { amount } for partial capture.",
+    method: "POST",
+    path: "/partners/payments/:id/capture",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["amount"],
+    inputSchema: obj(
+      { id: STR("Payment id, e.g. 'pay_...'."), amount: { type: "number", description: "Optional partial capture amount." } },
+      ["id"]
+    ),
+  },
+  {
+    name: "refund_payment",
+    description:
+      "Refund a payment (full or partial). Sensitive — returns money to the customer. Body follows the refund workflow (amount, reason_id, note, …).",
+    method: "POST",
+    path: "/partners/payments/:id/refund",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["amount", "reason_id", "note", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Payment id to refund."),
+        amount: { type: "number", description: "Refund amount." },
+        reason_id: STR("Refund reason id (from list_refund_reasons)."),
+        note: STR("Optional internal note."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "mark_payment_collection_paid",
+    description:
+      "Mark a payment collection as paid (manual/offline payment). Sensitive — affects order/payment accounting.",
+    method: "POST",
+    path: "/partners/payment-collections/:id/mark-as-paid",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Payment collection id (paycol_...).") }, ["id"]),
+  },
+  {
+    name: "request_order_edit",
+    description:
+      "Begin an order edit (request changes to items/quantities/prices). Body follows the order-edit route (order_id, …). Write — opens the edit, doesn't apply it yet.",
+    method: "POST",
+    path: "/partners/order-edits",
+    write: true,
+    bodyParams: ["order_id", "metadata"],
+    inputSchema: obj(
+      {
+        order_id: STR("Order id to edit."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["order_id"]
+    ),
+  },
+  {
+    name: "confirm_order_edit",
+    description:
+      "Confirm/apply a pending order edit (applies the staged changes to the order). Sensitive — mutates the live order.",
+    method: "POST",
+    path: "/partners/order-edits/:id/confirm",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Order edit id to confirm.") }, ["id"]),
+  },
+  {
+    name: "accept_task",
+    description:
+      "Accept a task assigned to the partner. Sensitive — commits the partner to the work.",
+    method: "POST",
+    path: "/partners/tasks/:taskId/accept",
+    pathParams: ["taskId"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ taskId: STR("Task id to accept.") }, ["taskId"]),
+  },
+  {
+    name: "finish_task",
+    description: "Mark an accepted task as finished.",
+    method: "POST",
+    path: "/partners/tasks/:taskId/finish",
+    pathParams: ["taskId"],
+    write: true,
+    inputSchema: obj({ taskId: STR("Task id to finish.") }, ["taskId"]),
+  },
+
+  // ===== Platform discovery + AI (Tier 5) ====================================
+  // Discovery = browsing products across OTHER partners' sales channels so a
+  // partner can copy a product template into their own store. AI = read-only
+  // usage stats + a vision describe tool.
+  {
+    name: "discover_products",
+    description:
+      "Browse products across OTHER partners' sales channels (platform discovery). Use to find product templates the partner can copy into their own store. Paginated, free-text search via q.",
+    method: "GET",
+    path: "/partners/discover/products",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "copy_discover_product",
+    description:
+      "Deep-copy a discovered product into the partner's own store/sales channel. Sensitive — creates products in the partner's catalog from a source product. Pass the source product id from discover_products.",
+    method: "POST",
+    path: "/partners/discover/products/:id/copy",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      { id: STR("Source product id to copy (from discover_products).") },
+      ["id"]
+    ),
+  },
+  {
+    name: "get_ai_usage",
+    description: "Get the partner's AI feature usage stats (tokens, calls, cost) for the billing period.",
+    method: "GET",
+    path: "/partners/ai/usage",
+    queryParams: ["start", "end"],
+    inputSchema: obj({
+      start: STR("Optional ISO start date."),
+      end: STR("Optional ISO end date."),
+    }),
+  },
+  {
+    name: "describe_image",
+    description:
+      "Run vision AI on an image URL to get a structured description (garment/material attributes) — useful before creating a design or product from a photo. Body: { imageUrl, hint? }.",
+    method: "POST",
+    path: "/partners/ai/describe-image",
+    write: true,
+    bodyParams: ["imageUrl", "hint"],
+    inputSchema: obj(
+      {
+        imageUrl: STR("Public URL of the image to describe."),
+        hint: STR("Optional hint, e.g. 'describe the weave and color'."),
+      },
+      ["imageUrl"]
+    ),
+  },
+
+  // ===== Inventory orders (Tier 6) — raw-material purchase orders ============
+  // The partner's own purchase orders for raw materials / inventory. Lifecycle:
+  //   list → get → start → (submit-payment) → shiprocket-rates / ready-for-delivery
+  //   → shipment → complete
+  //
+  // `transform` flattens the most useful nested fields (partner_info, totals,
+  // order_lines_count) onto the row itself so the chat's ToolData table can
+  // surface them as columns — the table renderer skips nested objects. The
+  // original nested objects are preserved for the raw-JSON disclosure.
+  {
+    name: "list_inventory_orders",
+    description:
+      "List the partner's inventory (purchase) orders — raw-material purchases from suppliers. Paginated, free-text search via q, optional status filter. Returns each order with status, quantity, total_price, expected delivery date, supplier (partner) status, and order-lines count.",
+    method: "GET",
+    path: "/partners/inventory-orders",
+    queryParams: ["limit", "offset", "q", "status"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR("Optional status filter."),
+    }),
+    transform: (data: any) => {
+      const orders = Array.isArray(data?.inventory_orders) ? data.inventory_orders : []
+      const flattened = orders.map((o: any) => ({
+        ...o,
+        partner_status: o?.partner_info?.partner_status,
+        supplier_name: o?.partner_info?.partner_name,
+        order_lines_count: o?.order_lines_count ?? o?.orderlines?.length ?? 0,
+        stock_location: o?.stock_location ?? o?.stock_locations?.[0]?.name,
+      }))
+      return { ...data, inventory_orders: flattened }
+    },
+  },
+  {
+    name: "get_inventory_order",
+    description:
+      "Get a single inventory (purchase) order by id, with its lines, supplier (partner) info, payments, and shipments. Flattens partner/supplier info and line totals to the top level for easy reading.",
+    method: "GET",
+    path: "/partners/inventory-orders/:orderId",
+    pathParams: ["orderId"],
+    inputSchema: obj({ orderId: STR("Inventory order id.") }, ["orderId"]),
+    transform: (data: any) => {
+      const o = data?.inventoryOrder
+      if (!o) return data
+      const lines = Array.isArray(o.order_lines) ? o.order_lines : []
+      const lineTotal = lines.reduce(
+        (sum: number, l: any) => sum + (Number(l?.price) || 0) * (Number(l?.quantity) || 0),
+        0
+      )
+      return {
+        ...data,
+        inventoryOrder: {
+          ...o,
+          partner_status: o?.partner_info?.partner_status,
+          supplier_name: o?.partner_info?.partner_name,
+          supplier_handle: o?.partner_info?.partner_handle,
+          line_items_count: lines.length,
+          line_total: lineTotal,
+          payments_count: Array.isArray(o.payments) ? o.payments.length : 0,
+          shipments_count: Array.isArray(o.shipments) ? o.shipments.length : 0,
+        },
+      }
+    },
+  },
+  {
+    name: "start_inventory_order",
+    description:
+      "Start an inventory (purchase) order — moves it from draft/placed into in-progress (supplier is making/shipping). Body follows the route validator.",
+    method: "POST",
+    path: "/partners/inventory-orders/:orderId/start",
+    pathParams: ["orderId"],
+    write: true,
+    previewPath: "/partners/inventory-orders/:orderId",
+    bodyParams: ["metadata"],
+    inputSchema: obj(
+      {
+        orderId: STR("Inventory order id to start."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["orderId"]
+    ),
+  },
+  {
+    name: "submit_inventory_order_payment",
+    description:
+      "Record a payment made to a supplier for an inventory order (Bank/Cash/Digital_Wallet), with optional receipts. Sensitive — moves/reconciles money. Supports an idempotency_key for safe retries.",
+    method: "POST",
+    path: "/partners/inventory-orders/:orderId/submit-payment",
+    pathParams: ["orderId"],
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/inventory-orders/:orderId",
+    bodyParams: [
+      "amount", "payment_type", "payment_date", "note",
+      "paid_to_id", "attachments", "idempotency_key",
+    ],
+    inputSchema: obj(
+      {
+        orderId: STR("Inventory order id."),
+        amount: { type: "number", description: "Amount paid (> 0). Required." },
+        payment_type: {
+          type: "string",
+          enum: ["Bank", "Cash", "Digital_Wallet"],
+          description: "How the supplier was paid.",
+        },
+        payment_date: STR("ISO date the payment was made."),
+        note: STR("Optional note."),
+        paid_to_id: STR("Optional recipient id."),
+        attachments: { type: "array", description: "Receipt/invoice file attachments.", items: { type: "object", additionalProperties: true } },
+        idempotency_key: STR("Optional idempotency key to dedupe retries."),
+      },
+      ["orderId", "amount"]
+    ),
+  },
+  {
+    name: "get_inventory_order_shiprocket_rates",
+    description:
+      "Get live Shiprocket shipping rates/quotes for an inventory order (carrier options + cost). Read.",
+    method: "GET",
+    path: "/partners/inventory-orders/:orderId/shiprocket-rates",
+    pathParams: ["orderId"],
+    inputSchema: obj({ orderId: STR("Inventory order id.") }, ["orderId"]),
+  },
+  {
+    name: "get_inventory_order_fulfillment_rates",
+    description:
+      "Alias for get_inventory_order_shiprocket_rates (fulfillment-rate quotes). Read.",
+    method: "GET",
+    path: "/partners/inventory-orders/:orderId/fulfillment-rates",
+    pathParams: ["orderId"],
+    inputSchema: obj({ orderId: STR("Inventory order id.") }, ["orderId"]),
+  },
+  {
+    name: "ready_inventory_order_for_delivery",
+    description:
+      "Mark an inventory order ready for delivery / pickup. Sensitive — changes the order's fulfillment state. Body follows the route validator.",
+    method: "POST",
+    path: "/partners/inventory-orders/:orderId/ready-for-delivery",
+    pathParams: ["orderId"],
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/inventory-orders/:orderId",
+    bodyParams: ["metadata"],
+    inputSchema: obj(
+      {
+        orderId: STR("Inventory order id."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["orderId"]
+    ),
+  },
+  {
+    name: "create_inventory_order_shipment",
+    description:
+      "Create a shipment for an inventory order (book the carrier, optionally set pickup location/weight/dimensions/delivered quantities). Body follows the shipment route. Sensitive — books shipping and changes fulfillment state.",
+    method: "POST",
+    path: "/partners/inventory-orders/:orderId/shipment",
+    pathParams: ["orderId"],
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/inventory-orders/:orderId",
+    bodyParams: [
+      "carrier", "pickup_stock_location_id", "weight_grams",
+      "dimensions_cm", "preferred_courier_id", "delivered_quantities", "pickup_date",
+    ],
+    inputSchema: obj(
+      {
+        orderId: STR("Inventory order id to ship."),
+        carrier: STR("Optional carrier override."),
+        pickup_stock_location_id: STR("Stock location to pick up from."),
+        weight_grams: { type: "number", description: "Shipment weight in grams." },
+        dimensions_cm: {
+          type: "object",
+          description: "Optional { length, breadth, height } in cm.",
+          additionalProperties: true,
+        },
+        preferred_courier_id: STR("Optional preferred courier id."),
+        delivered_quantities: { type: "object", description: "Map of line id -> delivered qty.", additionalProperties: true },
+        pickup_date: STR("Requested pickup date (YYYY-MM-DD)."),
+      },
+      ["orderId"]
+    ),
+  },
+  {
+    name: "complete_inventory_order",
+    description:
+      "Record what you DISPATCHED on an inventory (purchase) order, per line. This posts NO stock: stock lands only when the receiver counts the goods (#2289). Fully dispatched → Shipped; part → Partial. Sensitive.",
+    method: "POST",
+    path: "/partners/inventory-orders/:orderId/complete",
+    pathParams: ["orderId"],
+    write: true,
+    sensitive: true,
+    previewPath: "/partners/inventory-orders/:orderId",
+    // #2289 — `lines` is required by the route; forwarding only `metadata`
+    // meant this tool could never succeed.
+    bodyParams: ["lines", "notes", "delivery_date", "tracking_number"],
+    inputSchema: obj(
+      {
+        orderId: STR("Inventory order id to complete."),
+        lines: {
+          type: "array",
+          description: "Per line: the order line id and the quantity dispatched now (> 0).",
+          items: {
+            type: "object",
+            properties: {
+              order_line_id: { type: "string" },
+              quantity: { type: "number" },
+            },
+            required: ["order_line_id", "quantity"],
+          },
+        },
+        notes: STR("Optional dispatch notes."),
+        delivery_date: STR("Expected delivery date (YYYY-MM-DD)."),
+        tracking_number: STR("Carrier tracking number, if any."),
+      },
+      ["orderId", "lines"]
+    ),
+  },
+
+  // ===== Tier B: catalog organisation (categories / collections / tags / types / price prefs) ===
+  {
+    name: "list_product_categories",
+    description: "List the store's product categories (paginated, free-text q).",
+    method: "GET",
+    path: "/partners/product-categories",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "create_product_category",
+    description: "Create a product category to organise the catalog.",
+    method: "POST",
+    path: "/partners/product-categories",
+    write: true,
+    bodyParams: ["name", "description", "handle", "is_active", "is_internal", "parent_category_id"],
+    inputSchema: obj(
+      {
+        name: STR("Category name."),
+        description: STR("Optional description."),
+        handle: STR("Optional URL handle."),
+        is_active: BOOL("Whether the category is active/visible."),
+        is_internal: BOOL("Internal-only category."),
+        parent_category_id: STR("Optional parent category id (for nesting)."),
+      },
+      ["name"]
+    ),
+  },
+  {
+    name: "update_product_category",
+    description: "Update a product category. Pass only the fields to change.",
+    method: "POST",
+    path: "/partners/product-categories/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/product-categories/:id",
+    bodyParams: ["name", "description", "handle", "is_active", "is_internal", "parent_category_id"],
+    inputSchema: obj(
+      {
+        id: STR("Category id."),
+        name: STR("New name."),
+        description: STR("New description."),
+        handle: STR("New handle."),
+        is_active: BOOL("Active/visible."),
+        is_internal: BOOL("Internal-only."),
+        parent_category_id: STR("Parent category id."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "delete_product_category",
+    description: "Delete a product category.",
+    method: "DELETE",
+    path: "/partners/product-categories/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/product-categories/:id",
+    inputSchema: obj({ id: STR("Category id.") }, ["id"]),
+  },
+  {
+    name: "set_category_products",
+    description: "Add and/or remove products from a category. `add`/`remove` are arrays of product ids.",
+    method: "POST",
+    path: "/partners/product-categories/:id/products",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["add", "remove"],
+    inputSchema: obj(
+      {
+        id: STR("Category id."),
+        add: { type: "array", description: "Product ids to add.", items: { type: "string" } },
+        remove: { type: "array", description: "Product ids to remove.", items: { type: "string" } },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "list_product_collections",
+    description: "List the store's product collections (paginated, free-text q).",
+    method: "GET",
+    path: "/partners/product-collections",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "create_product_collection",
+    description: "Create a product collection (a merchandising group of products).",
+    method: "POST",
+    path: "/partners/product-collections",
+    write: true,
+    bodyParams: ["title", "handle", "metadata"],
+    inputSchema: obj(
+      {
+        title: STR("Collection title."),
+        handle: STR("Optional URL handle."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["title"]
+    ),
+  },
+  {
+    name: "update_product_collection",
+    description: "Update a product collection. Pass only the fields to change.",
+    method: "POST",
+    path: "/partners/product-collections/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/product-collections/:id",
+    bodyParams: ["title", "handle", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Collection id."),
+        title: STR("New title."),
+        handle: STR("New handle."),
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "delete_product_collection",
+    description: "Delete a product collection.",
+    method: "DELETE",
+    path: "/partners/product-collections/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/product-collections/:id",
+    inputSchema: obj({ id: STR("Collection id.") }, ["id"]),
+  },
+  {
+    name: "set_collection_products",
+    description: "Add and/or remove products from a collection. `add`/`remove` are arrays of product ids.",
+    method: "POST",
+    path: "/partners/product-collections/:id/products",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["add", "remove"],
+    inputSchema: obj(
+      {
+        id: STR("Collection id."),
+        add: { type: "array", description: "Product ids to add.", items: { type: "string" } },
+        remove: { type: "array", description: "Product ids to remove.", items: { type: "string" } },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "list_product_tags",
+    description: "List product tags (paginated, free-text q).",
+    method: "GET",
+    path: "/partners/product-tags",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "create_product_tag",
+    description: "Create a product tag (a label products can be filtered by).",
+    method: "POST",
+    path: "/partners/product-tags",
+    write: true,
+    bodyParams: ["value"],
+    inputSchema: obj({ value: STR("Tag text, e.g. 'handloom'.") }, ["value"]),
+  },
+  {
+    name: "list_product_types",
+    description: "List product types (paginated, free-text q).",
+    method: "GET",
+    path: "/partners/product-types",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "create_product_type",
+    description: "Create a product type (e.g. 'Fabric', 'Garment').",
+    method: "POST",
+    path: "/partners/product-types",
+    write: true,
+    bodyParams: ["value"],
+    inputSchema: obj({ value: STR("Type name.") }, ["value"]),
+  },
+  {
+    name: "update_product_type",
+    description: "Update a product type.",
+    method: "POST",
+    path: "/partners/product-types/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/product-types/:id",
+    bodyParams: ["value"],
+    inputSchema: obj({ id: STR("Type id."), value: STR("New type name.") }, ["id"]),
+  },
+  {
+    name: "delete_product_type",
+    description: "Delete a product type.",
+    method: "DELETE",
+    path: "/partners/product-types/:id",
+    pathParams: ["id"],
+    write: true,
+    inputSchema: obj({ id: STR("Type id.") }, ["id"]),
+  },
+  {
+    name: "list_price_preferences",
+    description:
+      "List pricing preferences (tax-inclusive settings per currency/region). Scoped: returns only preferences for this partner's own regions and their store's supported currencies.",
+    method: "GET",
+    path: "/partners/price-preferences",
+    inputSchema: obj({}),
+  },
+  {
+    name: "create_price_preference",
+    description:
+      "Create a pricing preference — mark prices tax-inclusive for a REGION this partner owns exclusively. `attribute` must be 'region_id'; `value` is the region id. Currency-level preferences are refused: they apply to every store pricing in that currency, not just this one. A region shared with another partner is refused too.",
+    method: "POST",
+    path: "/partners/price-preferences",
+    write: true,
+    bodyParams: ["attribute", "value", "is_tax_inclusive"],
+    inputSchema: obj(
+      {
+        attribute: STR("Must be 'region_id'. Currency-level preferences are platform-wide and are refused."),
+        value: STR("The region id the preference applies to. Must be a region this partner owns exclusively."),
+        is_tax_inclusive: BOOL("Whether prices for this attribute include tax."),
+      },
+      ["attribute", "value"]
+    ),
+  },
+  {
+    name: "update_price_preference",
+    description:
+      "Update a pricing preference. Only preferences on a region this partner owns exclusively can be changed; currency-level and shared-region preferences are refused with the reason.",
+    method: "POST",
+    path: "/partners/price-preferences/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/price-preferences/:id",
+    bodyParams: ["attribute", "value", "is_tax_inclusive"],
+    inputSchema: obj(
+      {
+        id: STR("Price preference id."),
+        attribute: STR("Must be 'region_id'; currency-level preferences are refused."),
+        value: STR("Region id — must be exclusively this partner's."),
+        is_tax_inclusive: BOOL("Whether prices include tax."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "delete_price_preference",
+    description:
+      "Delete a pricing preference. Only preferences on a region this partner owns exclusively can be deleted.",
+    method: "DELETE",
+    path: "/partners/price-preferences/:id",
+    pathParams: ["id"],
+    write: true,
+    inputSchema: obj({ id: STR("Price preference id.") }, ["id"]),
+  },
+
+  // ===== Tier C: inventory items + reservations =====
+  {
+    name: "create_inventory_item",
+    description:
+      "Create a standalone inventory item (usually variants get one automatically; use this for raw materials or unlinked stock).",
+    method: "POST",
+    path: "/partners/inventory-items",
+    write: true,
+    bodyParams: ["sku", "title", "description", "requires_shipping", "hs_code", "origin_country", "material", "weight"],
+    inputSchema: obj(
+      {
+        sku: STR("Stock-keeping unit."),
+        title: STR("Item title."),
+        description: STR("Optional description."),
+        requires_shipping: BOOL("Whether the item ships physically."),
+        hs_code: STR("Optional HS/customs code."),
+        origin_country: STR("Optional origin country code."),
+        material: STR("Optional material."),
+        weight: INT("Optional weight."),
+      },
+      ["sku"]
+    ),
+  },
+  {
+    name: "update_inventory_item",
+    description: "Update an inventory item's attributes (sku, title, shipping, customs, …).",
+    method: "POST",
+    path: "/partners/inventory-items/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/inventory-items/:id",
+    bodyParams: ["sku", "title", "description", "requires_shipping", "hs_code", "origin_country", "material", "weight"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory item id."),
+        sku: STR("New SKU."),
+        title: STR("New title."),
+        description: STR("New description."),
+        requires_shipping: BOOL("Whether the item ships physically."),
+        hs_code: STR("HS/customs code."),
+        origin_country: STR("Origin country code."),
+        material: STR("Material."),
+        weight: INT("Weight."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "delete_inventory_item",
+    description: "Delete an inventory item.",
+    method: "DELETE",
+    path: "/partners/inventory-items/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/inventory-items/:id",
+    inputSchema: obj({ id: STR("Inventory item id.") }, ["id"]),
+  },
+  {
+    name: "list_reservations",
+    description: "List stock reservations (quantity held against orders), paginated.",
+    method: "GET",
+    path: "/partners/reservations",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_reservation",
+    description: "Get a single stock reservation by id.",
+    method: "GET",
+    path: "/partners/reservations/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Reservation id.") }, ["id"]),
+  },
+  {
+    name: "create_reservation",
+    description:
+      "Reserve stock: hold a quantity of an inventory item at a location (against an order). location_id must be the partner's own location.",
+    method: "POST",
+    path: "/partners/reservations",
+    write: true,
+    bodyParams: ["inventory_item_id", "location_id", "quantity", "description"],
+    inputSchema: obj(
+      {
+        inventory_item_id: STR("Inventory item to reserve from."),
+        location_id: STR("Stock location id (the store's default_location_id)."),
+        quantity: INT("Quantity to reserve (> 0)."),
+        description: STR("Optional note."),
+      },
+      ["inventory_item_id", "location_id", "quantity"]
+    ),
+  },
+  {
+    name: "update_reservation",
+    description: "Update a reservation's quantity/location/description.",
+    method: "POST",
+    path: "/partners/reservations/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/reservations/:id",
+    bodyParams: ["quantity", "location_id", "description"],
+    inputSchema: obj(
+      {
+        id: STR("Reservation id."),
+        quantity: INT("New quantity."),
+        location_id: STR("New location id."),
+        description: STR("New note."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "delete_reservation",
+    description: "Release a stock reservation.",
+    method: "DELETE",
+    path: "/partners/reservations/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/reservations/:id",
+    inputSchema: obj({ id: STR("Reservation id.") }, ["id"]),
+  },
+
+  // ===== Tier D: CRM (customers + groups) =====
+  {
+    name: "create_customer",
+    description: "Create a customer record.",
+    method: "POST",
+    path: "/partners/customers",
+    write: true,
+    bodyParams: ["email", "first_name", "last_name", "phone", "company_name"],
+    inputSchema: obj(
+      {
+        email: STR("Customer email."),
+        first_name: STR("First name."),
+        last_name: STR("Last name."),
+        phone: STR("Phone."),
+        company_name: STR("Company name."),
+      },
+      ["email"]
+    ),
+  },
+  {
+    name: "update_customer",
+    description: "Update a customer. Pass only the fields to change.",
+    method: "POST",
+    path: "/partners/customers/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/customers/:id",
+    bodyParams: ["email", "first_name", "last_name", "phone", "company_name"],
+    inputSchema: obj(
+      {
+        id: STR("Customer id."),
+        email: STR("New email."),
+        first_name: STR("First name."),
+        last_name: STR("Last name."),
+        phone: STR("Phone."),
+        company_name: STR("Company name."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "delete_customer",
+    description: "Delete a customer.",
+    method: "DELETE",
+    path: "/partners/customers/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/customers/:id",
+    inputSchema: obj({ id: STR("Customer id.") }, ["id"]),
+  },
+  {
+    name: "add_customer_address",
+    description: "Add an address to a customer.",
+    method: "POST",
+    path: "/partners/customers/:id/addresses",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["first_name", "last_name", "address_1", "address_2", "city", "province", "postal_code", "country_code", "phone", "company"],
+    inputSchema: obj(
+      {
+        id: STR("Customer id."),
+        first_name: STR("First name."),
+        last_name: STR("Last name."),
+        address_1: STR("Address line 1."),
+        address_2: STR("Address line 2."),
+        city: STR("City."),
+        province: STR("State/province."),
+        postal_code: STR("Postal/ZIP code."),
+        country_code: STR("ISO country code, e.g. 'in'."),
+        phone: STR("Phone."),
+        company: STR("Company."),
+      },
+      ["id", "address_1", "city", "country_code"]
+    ),
+  },
+  {
+    name: "create_customer_group",
+    description: "Create a customer group (segment).",
+    method: "POST",
+    path: "/partners/customer-groups",
+    write: true,
+    bodyParams: ["name"],
+    inputSchema: obj({ name: STR("Group name.") }, ["name"]),
+  },
+  {
+    name: "get_customer_group",
+    description: "Get a single customer group by id.",
+    method: "GET",
+    path: "/partners/customer-groups/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Customer group id.") }, ["id"]),
+  },
+  {
+    name: "update_customer_group",
+    description: "Update a customer group.",
+    method: "POST",
+    path: "/partners/customer-groups/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/customer-groups/:id",
+    bodyParams: ["name"],
+    inputSchema: obj({ id: STR("Customer group id."), name: STR("New name.") }, ["id"]),
+  },
+  {
+    name: "delete_customer_group",
+    description: "Delete a customer group.",
+    method: "DELETE",
+    path: "/partners/customer-groups/:id",
+    pathParams: ["id"],
+    write: true,
+    previewPath: "/partners/customer-groups/:id",
+    inputSchema: obj({ id: STR("Customer group id.") }, ["id"]),
+  },
+  {
+    name: "add_customers_to_group",
+    description: "Add and/or remove customers from a group. `add`/`remove` are arrays of customer ids.",
+    method: "POST",
+    path: "/partners/customer-groups/:id/customers",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["add", "remove"],
+    inputSchema: obj(
+      {
+        id: STR("Customer group id."),
+        add: { type: "array", description: "Customer ids to add.", items: { type: "string" } },
+        remove: { type: "array", description: "Customer ids to remove.", items: { type: "string" } },
+      },
+      ["id"]
+    ),
+  },
+
+  // ===== Tier F: returns (create only — the rest of the RMA workflow, with its
+  // many sensitive multi-step actions, stays in the dashboard) =====
+  {
+    name: "create_return",
+    description:
+      "Begin a return (RMA) for an order. Provide order_id and the items to return. High-stakes — reverses a sale — so it requires confirmation. Further RMA steps (receive, refund) are done from the dashboard.",
+    method: "POST",
+    path: "/partners/returns",
+    write: true,
+    sensitive: true,
+    bodyParams: ["order_id", "items", "location_id", "note"],
+    inputSchema: obj(
+      {
+        order_id: STR("Order to return items from."),
+        items: {
+          type: "array",
+          description: "Items to return: [{ id (order line id), quantity }].",
+          items: {
+            type: "object",
+            properties: {
+              id: STR("Order line item id."),
+              quantity: INT("Quantity to return."),
+            },
+            required: ["id", "quantity"],
+            additionalProperties: true,
+          },
+        },
+        location_id: STR("Optional return location id."),
+        note: STR("Optional note."),
+      },
+      ["order_id", "items"]
+    ),
+  },
+  // ===== B2B quotes (#1439) =================================================
+  //
+  // 🔑 `mint_quote` is the only tool on this surface that freezes prices into a
+  // real price list, emails a buyer and hands them something they can pay a
+  // deposit against. It is `sensitive` for that reason and not because it is
+  // hard to undo — revoking works — but because the buyer has already been
+  // told a number by the time anyone notices.
+  {
+    name: "list_quotes",
+    description:
+      "List the partner's B2B quotes (status, buyer, totals, expiry, whether the buyer has viewed or accepted). Read.",
+    method: "GET",
+    path: "/partners/quotes",
+    queryParams: ["limit", "offset", "q", "status"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR(
+        "Filter by status: 'active' | 'accepted' | 'revoked' | 'superseded' | 'expired'."
+      ),
+    }),
+  },
+  {
+    name: "get_quote",
+    description:
+      "Get one B2B quote in full: its lines and frozen prices, freight, tax, any DDP undertaking, and the buyer's view/acceptance state. Read.",
+    method: "GET",
+    path: "/partners/quotes/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Quote id, e.g. 'quo_...' / '01M0...'.") }, ["id"]),
+  },
+  {
+    name: "list_quotable_designs",
+    description:
+      "List the designs this partner may quote, with the variant each one is sold through. Use it to turn a design the partner names in conversation into a line — a design that resolves to no single variant cannot be quoted and is reported here rather than at mint. Read.",
+    method: "GET",
+    path: "/partners/quotes/designs",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "check_quote_readiness",
+    description:
+      "Dry-run a quote: price the basket, rate the freight, resolve the tax, and report EVERY blocking problem at once — without minting anything, emailing anyone or freezing a price. Always call this before `mint_quote`.",
+    method: "POST",
+    path: "/partners/quotes/readiness",
+    /**
+     * 🔑 A POST that is not a write, declared the same way `resolve_admin_query`
+     * is: no `write` flag. The verb is a POST only because a basket does not fit
+     * in a query string — the route freezes nothing, sends nothing and stores
+     * nothing.
+     *
+     * That matters beyond tidiness. Flagging it `write` would put the rehearsal
+     * behind the write gate and the confirm rail, which is how an assistant
+     * ends up skipping the preflight and minting blind — and would deny it
+     * outright to a read-scoped credential, which is precisely the caller who
+     * most needs to check a quote before asking a human to mint it.
+     */
+    bodyParams: QUOTE_MINT_READINESS_BODY_PARAMS,
+    inputSchema: obj(quoteReadinessSchemaProps(), [
+      "lines",
+      "destination_country_code",
+      "currency_code",
+    ]),
+    sideEffects:
+      "Writes nothing and sends nothing. Prices the basket live and rates freight with the carrier, so it can be slow and it does consume a carrier rate call.",
+    nextSteps: ["mint_quote"],
+  },
+  {
+    name: "mint_quote",
+    description:
+      "Mint a B2B quote: freeze prices into a price list scoped to this buyer, and email them a link they can accept and pay a deposit against. " +
+      QUOTE_MINT_WRITE_GUIDANCE,
+    method: "POST",
+    path: "/partners/quotes",
+    write: true,
+    sensitive: true,
+    bodyParams: QUOTE_MINT_BODY_PARAMS,
+    inputSchema: obj(quoteMintSchemaProps(), [
+      "buyer_email",
+      "lines",
+      "destination_country_code",
+      "currency_code",
+    ]),
+    sideEffects:
+      "Creates a customer-group-scoped price list with a real expiry, sends the buyer an email containing the only copy of the quote link, and makes the quote acceptable into a cart. Re-quoting the same buyer SUPERSEDES their previous quote: its price list is expired and its status becomes 'superseded', so the newest quote is the one that prices their cart. The buyer's older link stops working — do not re-mint to 'correct' a quote the buyer is mid-conversation about without telling them.",
+    nextSteps: ["get_quote", "list_quotes", "revoke_quote"],
+  },
+  {
+    name: "revoke_quote",
+    description:
+      "Withdraw a quote the partner should not have sent: delete its frozen price list and make the buyer's link 404. Use it to CORRECT a mistake — a wrong price, a wrong buyer, a wrong lane — rather than re-minting, because re-minting emails the buyer a second number they never asked for. Not needed merely to re-quote the same buyer: minting already supersedes their previous quote. Sensitive.",
+    method: "POST",
+    path: "/partners/quotes/:id/revoke",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    /**
+     * 🔴 No `bodyParams`, and no `reason` field — the route reads no body at
+     * all. Advertising one would be the #1348 defect exactly: the dispatcher's
+     * body assembly is an allowlist walk, so the model would supply a reason,
+     * get `ok: true`, and the reason would reach nothing. Better to offer
+     * nothing than to offer something that goes nowhere.
+     */
+    inputSchema: obj({ id: STR("Quote id, e.g. 'quo_...' / '01M0...'.") }, ["id"]),
+    sideEffects:
+      "Deletes the price list this quote froze, so the buyer stops getting the quoted prices in any cart, and their link 404s from then on. Not reversible: re-offering the same terms means minting a new quote, which emails them again. An ALREADY-ACCEPTED quote is refused here — the accepted cart is priced from it, so unwinding a live deal is an operator's call, not this tool's.",
+    nextSteps: ["get_quote", "list_quotes"],
+  },
+
+  // ===== Design inquiries (#1531 / #1543) ===================================
+  //
+  // "Can you make this?" — a designer's spec turned into questions, asked of
+  // several partners at once. The wizard in partner-ui walks a partner through
+  // them a screen at a time; these tools let the ASSISTANT do the same walk in
+  // conversation, which is the point: the questions arrive on WhatsApp, and a
+  // partner standing at a loom answers in a sentence, not in a form.
+  //
+  // 🔑 The assistant must ASK, not answer. `get_design_inquiry` returns the
+  // questions with their `kind` and `options`; the model's job is to put them
+  // to the partner in their own words and record what comes back verbatim.
+  // Inventing a lead time or a price from context would put a number in front
+  // of a designer that no maker ever said.
+  //
+  // 🔴 What is deliberately absent: no tool here can see another partner's
+  // answers. Several partners are asked the same questions and their lead
+  // times and prices are the most commercially sensitive thing either of them
+  // says. The routes refuse to serve them; these tools do not ask.
+  {
+    name: "list_design_inquiries",
+    description:
+      "List the design inquiries this partner has been asked — 'can you make this?', one per design. Shows which are still open and which have already been answered. Read.",
+    method: "GET",
+    path: "/partners/inquiries",
+    queryParams: ["status", "limit", "offset"],
+    inputSchema: obj({
+      status: STR("Filter by 'open' or 'closed'. Omit for both."),
+      limit: INT("Max results (default 20)."),
+      offset: INT("Pagination offset."),
+    }),
+    nextSteps: ["get_design_inquiry"],
+  },
+  {
+    name: "get_design_inquiry",
+    description:
+      "Get one design inquiry in full: the design and its reference images, EVERY question with its kind and allowed values, and whatever the partner has answered so far. Call this before answering anything — the questions are generated from the designer's spec and are not guessable. Read.",
+    method: "GET",
+    path: "/partners/inquiries/:inquiryId",
+    pathParams: ["inquiryId"],
+    inputSchema: obj(
+      { inquiryId: STR("Inquiry id, e.g. 'dsgn_inq_...' / '01M0...'.") },
+      ["inquiryId"]
+    ),
+    sideEffects:
+      "Read-only. `questions[].kind` decides what a valid answer looks like: 'yes_no' takes a boolean, 'number' a number, 'colour_select'/'select' one of the listed options, 'text' a string, and 'photo' takes NO value at all — the photograph IS the answer, attached via capability_sample_ids. `questions[].step` is the spec category the question came from (Materials, Measurements, Construction, Colours): ask a step at a time and save it before moving on, the way the wizard does — a partner answering on a phone at a loom abandons a twenty-question run and finishes a three-question one. `answers` is what has been recorded so far, so a half-finished inquiry resumes rather than restarts.",
+    nextSteps: [
+      "answer_design_inquiry",
+      "list_capability_samples",
+      "submit_design_inquiry",
+    ],
+  },
+  {
+    name: "answer_design_inquiry",
+    description:
+      "Record answers to a design inquiry's questions, without submitting. Save as you go — a partner who drops off mid-conversation keeps what they already said, and nothing is shown to the designer as a reply until `submit_design_inquiry` runs. Answer in the partner's own words: `note` carries the sentence after the answer, which is usually the useful part ('not in that GSM, but I can do 90').",
+    method: "POST",
+    path: "/partners/inquiries/:inquiryId/answers",
+    pathParams: ["inquiryId"],
+    write: true,
+    bodyParams: ["answers"],
+    previewPath: "/partners/inquiries/:inquiryId",
+    inputSchema: obj(
+      {
+        inquiryId: STR("Inquiry id the answers belong to."),
+        answers: {
+          type: "array",
+          description:
+            "One entry per question answered. Send only the questions actually answered — an untouched question must be left out, because 'not answered yet' and 'answered with nothing' are different things and only one of them is worth showing the designer.",
+          items: {
+            type: "object",
+            properties: {
+              question_id: STR(
+                "The question's id, from `get_design_inquiry`. Not its text."
+              ),
+              value: {
+                description:
+                  "The answer, shaped by the question's `kind`: boolean for 'yes_no', number for 'number', one of the listed options for a select, string for 'text'. Omit entirely for a 'photo' question.",
+              },
+              note: STR(
+                "The partner's own words about this answer. Send it on a yes as readily as on a no — 'yes, but only in cotton' is an answer a bare true throws away."
+              ),
+              capability_sample_ids: {
+                type: "array",
+                items: { type: "string" },
+                description:
+                  "Capability samples evidencing this answer — the photographs. Get ids from `list_capability_samples` or `create_capability_sample`. This is the ONLY answer a 'photo' question has.",
+              },
+            },
+            required: ["question_id"],
+          },
+        },
+      },
+      ["inquiryId", "answers"]
+    ),
+    sideEffects:
+      "Saves the answers and NOTHING else: the response carries no verdict until it is submitted, so a half-filled inquiry still reads as silence to the designer rather than as a reply. Re-sending the same question_id overwrites that answer. Refused once the inquiry is closed.",
+    nextSteps: ["submit_design_inquiry", "get_design_inquiry"],
+  },
+  {
+    name: "submit_design_inquiry",
+    description:
+      "Send the partner's answer to the designer: the verdict, and optionally a lead time, an indicative price and a closing note. 'with_changes' is the most useful verdict and the one a yes/no would throw away — use it whenever the partner can make something CLOSE to what was asked, and say what would have to change. Sensitive: this is what the designer reads.",
+    method: "POST",
+    path: "/partners/inquiries/:inquiryId/submit",
+    pathParams: ["inquiryId"],
+    write: true,
+    sensitive: true,
+    /**
+     * 🔴 Every key here exists on `PartnerPostInquirySubmitReq`, and every key
+     * on that schema that a conversation can fill is here. The dispatcher
+     * assembles the body by walking THIS allowlist, so a field the model is
+     * offered but that is missing from this array is accepted, reported `ok`,
+     * and dropped in silence — #1348 exactly. Keep the two in step.
+     */
+    bodyParams: [
+      "verdict",
+      "lead_time_days",
+      "indicative_price",
+      "currency_code",
+      "notes",
+      "answers",
+    ],
+    previewPath: "/partners/inquiries/:inquiryId",
+    inputSchema: obj(
+      {
+        inquiryId: STR("Inquiry id being answered."),
+        verdict: {
+          type: "string",
+          enum: ["can_make", "cannot_make", "with_changes"],
+          description:
+            "'can_make' = as specified, with what they have. 'with_changes' = yes, but something must change — say what in `notes`. 'cannot_make' = no, which costs nothing to say and saves everyone a week. Never infer this: it is the one thing the inquiry is asking for.",
+        },
+        lead_time_days: INT(
+          "Working days from order to ready, as the partner states it. Leave out rather than guessing."
+        ),
+        indicative_price: {
+          type: "number",
+          description:
+            "A rough price per piece. It is NOT a quote and nothing is ordered from it — but it is shown to the designer, so it must be a number the partner actually said.",
+        },
+        currency_code: STR(
+          "ISO-3 currency of `indicative_price`, e.g. 'inr'. Send it whenever a price is sent."
+        ),
+        notes: STR(
+          "Anything else the designer should know. On 'with_changes' this is where the answer actually lives."
+        ),
+        answers: {
+          type: "array",
+          description:
+            "A last batch of answers, saved with the verdict in one round trip so a submit cannot half-land. Same shape as `answer_design_inquiry`.",
+          items: {
+            type: "object",
+            properties: {
+              question_id: STR("The question's id."),
+              value: { description: "Shaped by the question's kind." },
+              note: STR("The partner's own words."),
+              capability_sample_ids: {
+                type: "array",
+                items: { type: "string" },
+                description: "Capability samples evidencing this answer.",
+              },
+            },
+            required: ["question_id"],
+          },
+        },
+      },
+      ["inquiryId", "verdict"]
+    ),
+    sideEffects:
+      "Stamps the response as submitted and makes it visible to the designer beside every other partner's. Re-running updates the answer rather than sending a second one. Refused once the inquiry is closed.",
+    nextSteps: ["get_design_inquiry", "list_design_inquiries"],
+  },
+
+  // ---- The capability library: the photographs a partner answers WITH ------
+  //
+  // A sample OUTLIVES the inquiry that produced it, which is why attaching one
+  // is two steps and not one: the partner may point at something they made
+  // last year instead of taking a new photograph. Always LIST before offering
+  // to create.
+  {
+    name: "list_capability_samples",
+    description:
+      "List the partner's capability samples — photographs of things they have actually made, with the technique and material beside each. Search these BEFORE asking for a new photograph: the partner has usually already shown you the thing they are being asked about. Read.",
+    method: "GET",
+    path: "/partners/capabilities",
+    queryParams: ["q", "technique", "material", "limit", "offset"],
+    inputSchema: obj({
+      q: STR("Free-text search over title and notes."),
+      technique: STR("Filter by technique, e.g. 'jamawar', 'block print'."),
+      material: STR("Filter by material, e.g. 'pashmina', 'cotton'."),
+      limit: INT("Max results (default 20)."),
+      offset: INT("Pagination offset."),
+    }),
+    sideEffects:
+      "Read-only. Each sample carries a renderable `media` array — render from THAT, never from `media_file_ids`. An id is not a URL: a surface that reaches for the ids shows the photo it just uploaded and empty squares after every reload.",
+    nextSteps: ["answer_design_inquiry", "create_capability_sample"],
+  },
+  {
+    name: "create_capability_sample",
+    description:
+      "Record a capability sample: a photograph of something the partner has made, with the textile facts beside it. The photograph itself must be UPLOADED FIRST — this tool takes the resulting media ids, it cannot receive a file. Ask the partner to attach the photo in the chat composer (or send it on WhatsApp), then pass the ids it returns as `media_file_ids`.",
+    method: "POST",
+    path: "/partners/capabilities",
+    write: true,
+    bodyParams: [
+      "title",
+      "technique",
+      "material",
+      "media_file_ids",
+      "notes",
+      "captured_at",
+    ],
+    inputSchema: obj(
+      {
+        title: STR("What the thing is, in the partner's words."),
+        technique: STR("How it was made, e.g. 'kani weave', 'sozni'."),
+        material: STR("What it is made of, e.g. 'pashmina', 'mulberry silk'."),
+        media_file_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Ids of already-uploaded photographs. 🔴 There is no way to pass a file through this tool — uploading is a multipart request the composer makes (`POST /partners/capabilities/uploads`, images only, max 10). Without ids the sample is a title with no evidence, which is exactly what the library exists to stop.",
+        },
+        notes: STR("Anything worth saying about it."),
+        captured_at: STR(
+          "ISO date the photograph was TAKEN. Ask — do not default it silently. A photo typed up three weeks later describes a capability that may already be gone, and the library is only trustworthy if it says how stale it is. When it is omitted the route defaults it to now and says so in `captured_at_defaulted`."
+        ),
+      },
+      ["title"]
+    ),
+    sideEffects:
+      "Adds a permanent sample to the partner's library — it outlives the inquiry that prompted it and can be attached to later answers. Does NOT attach itself to anything: pass the returned sample id as `capability_sample_ids` on `answer_design_inquiry` to make it the answer to a question.",
+    nextSteps: ["answer_design_inquiry", "list_capability_samples"],
+  },
+]

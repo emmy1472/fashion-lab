@@ -1,0 +1,379 @@
+/**
+ * @file Admin API routes for managing production runs
+ * @description Provides endpoints for creating and listing production runs in the JYT Commerce platform
+ * @module API/Admin/ProductionRuns
+ */
+
+/**
+ * @typedef {Object} AdminCreateProductionRunReq
+ * @property {string} design_id.required - The ID of the design to be produced
+ * @property {string} [partner_id] - The ID of the production partner
+ * @property {number} quantity.required - The quantity to be produced
+ * @property {string} product_id.required - The ID of the product
+ * @property {string} variant_id.required - The ID of the product variant
+ * @property {string} [order_id] - The ID of the associated order
+ * @property {string} [order_line_item_id] - The ID of the associated order line item
+ * @property {Object} [metadata] - Additional metadata for the production run
+ */
+
+/**
+ * @typedef {Object} ProductionRunResponse
+ * @property {string} id - The unique identifier of the production run
+ * @property {string} design_id - The ID of the design
+ * @property {string} partner_id - The ID of the production partner
+ * @property {number} quantity - The quantity to be produced
+ * @property {string} product_id - The ID of the product
+ * @property {string} variant_id - The ID of the product variant
+ * @property {string} order_id - The ID of the associated order
+ * @property {string} order_line_item_id - The ID of the associated order line item
+ * @property {Object} metadata - Additional metadata
+ * @property {string} status - The status of the production run
+ * @property {Date} created_at - When the production run was created
+ * @property {Date} updated_at - When the production run was last updated
+ */
+
+/**
+ * Create a new production run
+ * @route POST /admin/production-runs
+ * @group ProductionRun - Operations related to production runs
+ * @param {AdminCreateProductionRunReq} request.body.required - Production run data to create
+ * @returns {Object} 201 - Created production run object
+ * @throws {MedusaError} 400 - Invalid input data
+ * @throws {MedusaError} 401 - Unauthorized
+ * @throws {MedusaError} 500 - Failed to create production run
+ *
+ * @example request
+ * POST /admin/production-runs
+ * {
+ *   "design_id": "design_123456789",
+ *   "partner_id": "partner_987654321",
+ *   "quantity": 100,
+ *   "product_id": "prod_1122334455",
+ *   "variant_id": "variant_5544332211",
+ *   "order_id": "order_9988776655",
+ *   "order_line_item_id": "item_5566778899",
+ *   "metadata": {
+ *     "priority": "high",
+ *     "notes": "Urgent production"
+ *   }
+ * }
+ *
+ * @example response 201
+ * {
+ *   "production_run": {
+ *     "id": "run_123456789",
+ *     "design_id": "design_123456789",
+ *     "partner_id": "partner_987654321",
+ *     "quantity": 100,
+ *     "product_id": "prod_1122334455",
+ *     "variant_id": "variant_5544332211",
+ *     "order_id": "order_9988776655",
+ *     "order_line_item_id": "item_5566778899",
+ *     "metadata": {
+ *       "priority": "high",
+ *       "notes": "Urgent production"
+ *     },
+ *     "status": "pending",
+ *     "created_at": "2023-01-01T00:00:00Z",
+ *     "updated_at": "2023-01-01T00:00:00Z"
+ *   }
+ * }
+ */
+
+/**
+ * List production runs with pagination and filtering
+ * @route GET /admin/production-runs
+ * @group ProductionRun - Operations related to production runs
+ * @param {number} [offset=0] - Pagination offset
+ * @param {number} [limit=20] - Number of items to return
+ * @param {string} [q] - Free-text search over run ID and the name of the design, partner or product the run is for
+ * @param {string} [design_id] - Filter by design ID
+ * @param {string} [status] - Filter by status
+ * @param {string} [partner_id] - Filter by partner ID
+ * @param {string} [parent_run_id] - Filter by parent run ID
+ * @returns {Object} 200 - Paginated list of production runs
+ * @throws {MedusaError} 401 - Unauthorized
+ * @throws {MedusaError} 500 - Internal server error
+ *
+ * @example request
+ * GET /admin/production-runs?offset=0&limit=10&status=pending
+ *
+ * @example response 200
+ * {
+ *   "production_runs": [
+ *     {
+ *       "id": "run_123456789",
+ *       "design_id": "design_123456789",
+ *       "partner_id": "partner_987654321",
+ *       "quantity": 100,
+ *       "product_id": "prod_1122334455",
+ *       "variant_id": "variant_5544332211",
+ *       "order_id": "order_9988776655",
+ *       "order_line_item_id": "item_5566778899",
+ *       "metadata": {
+ *         "priority": "high"
+ *       },
+ *       "status": "pending",
+ *       "created_at": "2023-01-01T00:00:00Z",
+ *       "updated_at": "2023-01-01T00:00:00Z"
+ *     }
+ *   ],
+ *   "count": 50,
+ *   "offset": 0,
+ *   "limit": 10
+ * }
+ */
+import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
+
+import { buildQSearchFilter } from "../../../lib/list-search-filters"
+import { runIdsOnWorkOrder, workOrderReadsEnabled } from "../../../lib/work-orders/read-work-orders"
+import {
+  createProductionRunWorkflow,
+} from "../../../workflows/production-runs/create-production-run"
+
+import type { AdminCreateProductionRunReq } from "./validators"
+
+/**
+ * #1172 — the referents a free-text search resolves through.
+ *
+ * A production run has no name of its own; what an operator types is the name
+ * of the thing the run is *for*. query.graph can't express a name match on a
+ * linked entity inside an `$or` (it only joins one hop — /admin/abandoned-carts
+ * hits the same wall and drops customer-name search for it), so the matching
+ * referent ids are resolved first and folded into an id-based `$or` on the run.
+ */
+const RUN_SEARCH_REFS = [
+  { entity: "design", field: "design_id", fields: ["name"] },
+  { entity: "partner", field: "partner_id", fields: ["name", "handle"] },
+  // #1112 — a product-only run has design_id null, so the product spine is the
+  // only name it can be found by.
+  { entity: "product", field: "product_id", fields: ["title", "handle"] },
+] as const
+
+/**
+ * Cap on referents folded into one search. A term matching more designs than
+ * this isn't a search any more, and the `$in` list shouldn't grow unbounded.
+ */
+const RUN_SEARCH_REF_LIMIT = 200
+
+/** Build the `$or` clauses for `?q=`, resolving referent names to ids first. */
+const buildRunSearchClauses = async (
+  query: any,
+  search: string
+): Promise<Record<string, any>[]> => {
+  const clauses: Record<string, any>[] = [{ id: { $ilike: `%${search}%` } }]
+
+  const matches = await Promise.all(
+    RUN_SEARCH_REFS.map(async (ref) => {
+      const { data } = await query.graph({
+        entity: ref.entity,
+        fields: ["id"],
+        filters: buildQSearchFilter(search, [...ref.fields]),
+        pagination: { skip: 0, take: RUN_SEARCH_REF_LIMIT },
+      })
+      return {
+        field: ref.field,
+        ids: ((data as any[]) || []).map((row) => row.id),
+      }
+    })
+  )
+
+  for (const { field, ids } of matches) {
+    // Omit referents with no match rather than emitting `$in: []` — an empty
+    // branch can never match, so leaving it out keeps the SQL to what we mean.
+    if (ids.length) {
+      clauses.push({ [field]: ids })
+    }
+  }
+
+  return clauses
+}
+
+export const POST = async (
+  req: MedusaRequest<AdminCreateProductionRunReq>,
+  res: MedusaResponse
+) => {
+  const body = (req as any).validatedBody || req.body
+
+  const { result, errors } = await createProductionRunWorkflow(req.scope).run({
+    input: {
+      design_id: body.design_id,
+      partner_id: body.partner_id ?? null,
+      quantity: body.quantity,
+      run_type: body.run_type,
+      product_id: body.product_id,
+      variant_id: body.variant_id,
+      order_id: body.order_id,
+      order_line_item_id: body.order_line_item_id,
+      metadata: body.metadata,
+      materials: body.materials ?? undefined,
+      planned_output: body.planned_output ?? undefined,
+    },
+  })
+
+  if (errors?.length) {
+    throw new MedusaError(
+      MedusaError.Types.UNEXPECTED_STATE,
+      `Failed to create production run: ${errors
+        .map((e: any) => e?.error?.message || String(e))
+        .join(", ")}`
+    )
+  }
+
+  return res.status(201).json({ production_run: result })
+}
+
+export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
+  const q = req.query as any
+  const limit = Number(q.limit) || 20
+  const offset = Number(q.offset) || 0
+
+  const filters: any = {}
+  if (q.design_id) {
+    filters.design_id = q.design_id
+  }
+  // #1112 — filter by product so the product-detail widget can render the
+  // full production-run "design trail" hung off the product spine, INCLUDING
+  // product-only runs (design_id null) minted on retail fulfillment.
+  if (q.product_id) {
+    filters.product_id = q.product_id
+  }
+  // #826 — filter by the COMMISSIONING order (the customer order that caused
+  // the work) so the admin design-order detail can list all the per-design runs
+  // a produce fanned out for that one order.
+  //
+  // ⚠️ This is `run.order_id`, and it is NOT the collated work-order. Since
+  // #826 S3a a design work-order is a SEPARATE `kind=design` order that holds
+  // the runs through the order↔production_run LINK, while `run.order_id` keeps
+  // pointing at the commissioning order. Passing a work-order id here therefore
+  // matched nothing and returned an empty list — indistinguishable from "that
+  // order has no runs". `work_order_id` below answers the other question.
+  if (q.order_id) {
+    filters.order_id = q.order_id
+  }
+  if (q.status) {
+    filters.status = q.status
+  }
+  if (q.partner_id) {
+    filters.partner_id = q.partner_id
+  }
+  if (q.parent_run_id) {
+    filters.parent_run_id = q.parent_run_id
+  }
+  if (q.exclude_children === "true" || q.exclude_children === true) {
+    filters.parent_run_id = null
+  }
+  if (q.run_type) {
+    filters.run_type = q.run_type
+  }
+  /**
+   * #1805 — the output-review queue.
+   *
+   * `"none"` is a real answer and the one the queue is built on: a completed
+   * run nobody has decided about yet. It cannot be spelled by omitting the
+   * param (that means "any"), and `null` cannot travel in a query string —
+   * hence the word.
+   */
+  if (q.approval_decision) {
+    filters.approval_decision =
+      q.approval_decision === "none" ? null : q.approval_decision
+  }
+
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+
+  // Filter by the COLLATED work-order — the runs reachable through the
+  // order↔production_run link rather than through `run.order_id`. Resolved to
+  // ids first because the link is what holds the relation; there is no column
+  // to filter on. An unknown/unlinked work-order yields an id list of `[]`,
+  // which must produce an empty page rather than an unfiltered one.
+  let workOrderRunIds: string[] | null = null
+  if (q.work_order_id) {
+    const { data: linked } = await (query as any).graph({
+      entity: "order",
+      fields: ["id", "production_runs.id"],
+      filters: { id: q.work_order_id },
+    })
+    const node = (linked || [])[0]
+    const linkedRuns = Array.isArray(node?.production_runs)
+      ? node.production_runs
+      : node?.production_runs
+      ? [node.production_runs]
+      : []
+    workOrderRunIds = linkedRuns
+      .map((r: any) => r?.id)
+      .filter(Boolean) as string[]
+    // #2264 S2c — work_order's own run link when reads are flipped; the
+    // mirror's list stays as the fallback for an id work_order does not know.
+    if (workOrderReadsEnabled()) {
+      const fromWorkOrder = await runIdsOnWorkOrder(req.scope, String(q.work_order_id))
+      if (fromWorkOrder) workOrderRunIds = fromWorkOrder
+    }
+    if (!workOrderRunIds!.length) {
+      return res.status(200).json({
+        production_runs: [],
+        count: 0,
+        limit,
+        offset,
+      })
+    }
+    filters.id = workOrderRunIds
+  }
+
+  // #1172 — `q` was not read at all, so a search term was dropped without error
+  // and the caller got back an unfiltered first page. Sits alongside the
+  // equality filters above (top-level keys are AND-ed with `$or`).
+  const search = typeof q.q === "string" ? q.q.trim() : ""
+  if (search) {
+    filters.$or = await buildRunSearchClauses(query, search)
+  }
+
+  const includeTasks = q.include_tasks === "true"
+
+  const { data: runs, metadata } = await query.graph({
+    entity: "production_runs",
+    fields: includeTasks ? ["*", "tasks.*"] : ["*"],
+    filters,
+    pagination: { skip: offset, take: limit },
+  })
+
+  const list = (runs || []) as any[]
+
+  // When listing parent runs only, resolve partner_id from the first child
+  // for any parent that has no partner of its own (the approve+assign flow
+  // puts the partner on the child, not the parent).
+  if (q.exclude_children === "true" || q.exclude_children === true) {
+    const parentIdsNeedingResolution = list
+      .filter((r) => !r.partner_id)
+      .map((r) => r.id)
+
+    if (parentIdsNeedingResolution.length) {
+      const { data: children } = await query.graph({
+        entity: "production_runs",
+        fields: ["id", "parent_run_id", "partner_id"],
+        filters: { parent_run_id: parentIdsNeedingResolution },
+        pagination: { take: parentIdsNeedingResolution.length },
+      })
+
+      // Map first child's partner_id back to its parent
+      const childByParent = new Map<string, string>()
+      for (const child of children || []) {
+        if (child.parent_run_id && child.partner_id && !childByParent.has(child.parent_run_id)) {
+          childByParent.set(child.parent_run_id, child.partner_id)
+        }
+      }
+      for (const run of list) {
+        if (!run.partner_id && childByParent.has(run.id)) {
+          run.partner_id = childByParent.get(run.id)
+        }
+      }
+    }
+  }
+
+  return res.status(200).json({
+    production_runs: list,
+    count: (metadata as any)?.count ?? list.length,
+    limit,
+    offset,
+  })
+}

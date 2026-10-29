@@ -1,0 +1,320 @@
+import { FetchError } from "@medusajs/js-sdk"
+import { HttpTypes, PaginatedResponse } from "@medusajs/types"
+import {
+  QueryKey,
+  UseMutationOptions,
+  UseQueryOptions,
+  useMutation,
+  useQuery,
+} from "@tanstack/react-query"
+import { sdk } from "../../lib/client"
+import { queryClient } from "../../lib/query-client"
+import { queryKeysFactory } from "../../lib/query-key-factory"
+import { customerGroupsQueryKeys } from "./customer-groups"
+
+const CUSTOMERS_QUERY_KEY = "customers" as const
+export const customersQueryKeys = queryKeysFactory(CUSTOMERS_QUERY_KEY)
+export const customerAddressesQueryKeys = queryKeysFactory(
+  `${CUSTOMERS_QUERY_KEY}-addresses`
+)
+
+export const useCustomer = (
+  id: string,
+  query?: Record<string, any>,
+  options?: Omit<
+    UseQueryOptions<
+      { customer: HttpTypes.AdminCustomer },
+      FetchError,
+      { customer: HttpTypes.AdminCustomer },
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryKey: customersQueryKeys.detail(id),
+    queryFn: async () =>
+      sdk.client.fetch<{ customer: HttpTypes.AdminCustomer }>(
+        `/partners/customers/${id}`,
+        { method: "GET", query }
+      ),
+    ...options,
+  })
+
+  return { ...data, ...rest }
+}
+
+export const useCustomers = (
+  query?: Record<string, any>,
+  options?: Omit<
+    UseQueryOptions<
+      PaginatedResponse<{ customers: HttpTypes.AdminCustomer[] }>,
+      FetchError,
+      PaginatedResponse<{ customers: HttpTypes.AdminCustomer[] }>,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: () =>
+      sdk.client.fetch<PaginatedResponse<{ customers: HttpTypes.AdminCustomer[] }>>(
+        "/partners/customers",
+        { method: "GET", query }
+      ),
+    queryKey: customersQueryKeys.list(query),
+    ...options,
+  })
+
+  return { ...data, ...rest }
+}
+
+/**
+ * 🔑 The response carries more than a customer (#1515).
+ *
+ * A buyer who already exists ANYWHERE on the platform cannot be created again
+ * — core's unique index on `(email, has_account)` is platform-wide — so the
+ * route adopts the existing row into this store instead of refusing. When it
+ * does, `adopted` is true and the returned profile is the one ANOTHER store
+ * collected: the fields just typed into this form were deliberately not
+ * written over it. Callers must say so rather than reporting a create.
+ */
+export type PartnerCustomerCreateResponse = {
+  customer: HttpTypes.AdminCustomer
+  adopted?: boolean
+  already_in_store?: boolean
+}
+
+export const useCreateCustomer = (
+  options?: UseMutationOptions<
+    PartnerCustomerCreateResponse,
+    FetchError,
+    HttpTypes.AdminCreateCustomer
+  >
+) => {
+  return useMutation({
+    mutationFn: (payload) =>
+      sdk.client.fetch<PartnerCustomerCreateResponse>(
+        "/partners/customers",
+        { method: "POST", body: payload }
+      ),
+    onSuccess: (data, variables, context) => {
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.lists() })
+      options?.onSuccess?.(data, variables, context)
+    },
+    ...options,
+  })
+}
+
+export const useUpdateCustomer = (
+  id: string,
+  options?: UseMutationOptions<
+    { customer: HttpTypes.AdminCustomer },
+    FetchError,
+    HttpTypes.AdminUpdateCustomer
+  >
+) => {
+  return useMutation({
+    mutationFn: (payload) =>
+      sdk.client.fetch<{ customer: HttpTypes.AdminCustomer }>(
+        `/partners/customers/${id}`,
+        { method: "POST", body: payload }
+      ),
+    onSuccess: (data, variables, context) => {
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.detail(id) })
+
+      options?.onSuccess?.(data, variables, context)
+    },
+    ...options,
+  })
+}
+
+export const useDeleteCustomer = (
+  id: string,
+  options?: UseMutationOptions<
+    HttpTypes.AdminCustomerDeleteResponse,
+    FetchError,
+    void
+  >
+) => {
+  return useMutation({
+    mutationFn: () =>
+      sdk.client.fetch<HttpTypes.AdminCustomerDeleteResponse>(
+        `/partners/customers/${id}`,
+        { method: "DELETE" }
+      ),
+    onSuccess: (data, variables, context) => {
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.lists() })
+      queryClient.invalidateQueries({
+        queryKey: customersQueryKeys.detail(id),
+      })
+
+      options?.onSuccess?.(data, variables, context)
+    },
+    ...options,
+  })
+}
+
+export const useBatchCustomerCustomerGroups = (
+  id: string,
+  options?: UseMutationOptions<
+    HttpTypes.AdminCustomerResponse,
+    FetchError,
+    HttpTypes.AdminBatchLink
+  >
+) => {
+  return useMutation({
+    mutationFn: (payload) =>
+      sdk.client.fetch<HttpTypes.AdminCustomerResponse>(
+        `/partners/customers/${id}/customer-groups`,
+        { method: "POST", body: payload }
+      ),
+    onSuccess: (data, variables, context) => {
+      queryClient.invalidateQueries({
+        queryKey: customerGroupsQueryKeys.details(),
+      })
+      queryClient.invalidateQueries({
+        queryKey: customerGroupsQueryKeys.lists(),
+      })
+
+      queryClient.invalidateQueries({
+        queryKey: customersQueryKeys.lists(),
+      })
+      queryClient.invalidateQueries({
+        queryKey: customersQueryKeys.details(),
+      })
+
+      options?.onSuccess?.(data, variables, context)
+    },
+    ...options,
+  })
+}
+
+export const useCreateCustomerAddress = (
+  id: string,
+  options?: UseMutationOptions<
+    HttpTypes.AdminCustomerResponse,
+    FetchError,
+    HttpTypes.AdminCreateCustomerAddress
+  >
+) => {
+  return useMutation({
+    mutationFn: (payload) =>
+      sdk.client.fetch<HttpTypes.AdminCustomerResponse>(
+        `/partners/customers/${id}/addresses`,
+        { method: "POST", body: payload }
+      ),
+    onSuccess: (data, variables, context) => {
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.detail(id) })
+      queryClient.invalidateQueries({
+        queryKey: customerAddressesQueryKeys.list(id),
+      })
+
+      options?.onSuccess?.(data, variables, context)
+    },
+    ...options,
+  })
+}
+
+export const useUpdateCustomerAddress = (
+  id: string,
+  addressId: string,
+  options?: UseMutationOptions<
+    HttpTypes.AdminCustomerResponse,
+    FetchError,
+    HttpTypes.AdminUpdateCustomerAddress
+  >
+) => {
+  return useMutation({
+    mutationFn: (payload) =>
+      sdk.client.fetch<HttpTypes.AdminCustomerResponse>(
+        `/partners/customers/${id}/addresses/${addressId}`,
+        { method: "POST", body: payload }
+      ),
+    onSuccess: (data, variables, context) => {
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.detail(id) })
+      queryClient.invalidateQueries({
+        queryKey: customerAddressesQueryKeys.list(id),
+      })
+
+      options?.onSuccess?.(data, variables, context)
+    },
+    ...options,
+  })
+}
+
+export const useDeleteCustomerAddress = (
+  id: string,
+  options?: UseMutationOptions<
+    HttpTypes.AdminCustomerResponse,
+    FetchError,
+    string
+  >
+) => {
+  return useMutation({
+    mutationFn: (addressId: string) =>
+      sdk.client.fetch<HttpTypes.AdminCustomerResponse>(
+        `/partners/customers/${id}/addresses/${addressId}`,
+        { method: "DELETE" }
+      ),
+    onSuccess: (data, variables, context) => {
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: customersQueryKeys.detail(id) })
+      queryClient.invalidateQueries({
+        queryKey: customerAddressesQueryKeys.list(id),
+      })
+
+      options?.onSuccess?.(data, variables, context)
+    },
+    ...options,
+  })
+}
+
+export const useListCustomerAddresses = (
+  id: string,
+  query?: Record<string, any>,
+  options?: UseQueryOptions<
+    HttpTypes.AdminCustomerResponse,
+    FetchError,
+    HttpTypes.AdminCustomerResponse,
+    QueryKey
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: () =>
+      sdk.client.fetch<HttpTypes.AdminCustomerResponse>(
+        `/partners/customers/${id}/addresses`,
+        { method: "GET", query }
+      ),
+    queryKey: customerAddressesQueryKeys.list(id),
+    ...options,
+  })
+
+  return { ...data, ...rest }
+}
+
+export const useCustomerAddress = (
+  id: string,
+  addressId: string,
+  options?: UseQueryOptions<
+    HttpTypes.AdminCustomerResponse,
+    FetchError,
+    HttpTypes.AdminCustomerResponse,
+    QueryKey
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: () =>
+      sdk.client.fetch<HttpTypes.AdminCustomerResponse>(
+        `/partners/customers/${id}/addresses/${addressId}`,
+        { method: "GET" }
+      ),
+    queryKey: customerAddressesQueryKeys.detail(id),
+    ...options,
+  })
+
+  return { ...data, ...rest }
+}

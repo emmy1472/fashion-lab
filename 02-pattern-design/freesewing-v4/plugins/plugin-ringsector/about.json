@@ -1,0 +1,5 @@
+{
+  "id": "plugin-ringsector",
+  "description": "A FreeSewing plugin to draft a ring sector (think part of a donut)",
+  "version": "4.2.0"
+}

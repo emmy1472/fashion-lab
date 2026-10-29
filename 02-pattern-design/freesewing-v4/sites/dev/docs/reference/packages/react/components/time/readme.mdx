@@ -1,0 +1,44 @@
+---
+title: Time
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.time.mjs'
+import { TimeToGoExample, TimeAgoExample, TimeToGoBriefExample, TimeAgoBriefExample, DateAndTimeExample } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Table** component family provides the following components:
+
+- [DateAndTime](#dateandtime)
+- [TimeAgo](#timeago)
+- [TimeAgoBrief](#timeagobrief)
+- [TimeToGo](#timetogo)
+- [TimeToGoBrief](#timetogobrief)
+
+### DateAndTime
+
+<ComponentDocs docs={jsdoc.jsdocDateAndTime} example={DateAndTimeExample} />
+
+### TimeAgo
+
+<ComponentDocs docs={jsdoc.jsdocTimeAgo} example={TimeAgoExample} />
+
+### TimeAgoBrief
+
+<ComponentDocs docs={jsdoc.jsdocTimeAgoBrief} example={TimeAgoBriefExample} />
+
+### TimeToGo
+
+<ComponentDocs docs={jsdoc.jsdocTimeToGo} example={TimeToGoExample} />
+
+### TimeToGoBrief
+
+<ComponentDocs docs={jsdoc.jsdocTimeToGoBrief} example={TimeToGoBriefExample} />
+
+</DocusaurusDoc>

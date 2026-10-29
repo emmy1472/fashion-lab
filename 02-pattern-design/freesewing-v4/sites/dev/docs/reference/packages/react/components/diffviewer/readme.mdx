@@ -1,0 +1,48 @@
+---
+title: DiffViewer
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { FunctionDocs } from '@site/src/components/function-docs.js'
+import * as fndoc from '@site/prebuild/jsdoc/functions.diffviewer.mjs'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+- [Functions](#functions)
+
+:::tip
+
+#### Not FreeSewing code
+
+This component family only contains re-exports of code by other maintainers.\
+Since they are a dependency, we provide them as part of the <code>@freesewing/react</code> package for convenience.
+
+Please refer to the documentation for [react-diff-viewer-continued][dv] and [jsdiff][jsd].
+:::
+
+## Components
+
+The **DiffViewer** component family provides the following components:
+
+- [DiffViewer](#diffviewer): A re-export of [react-diff-viewer-continued][dv]
+
+## Functions
+
+The **DiffViewer** family also exports the following functions:
+
+- [diffJSON](#diffjson): A re-export of the [diffJson][jsd] function of the [jsdiff package][jsd]
+- [diffCheck](#diffcheck): A re-export of the [diffWords][jsd] function of the [jsdiff package][jsd]
+
+### diffJSON
+
+<FunctionDocs docs={fndoc.jsdocdiffJSON} />
+
+### diffCheck
+
+<FunctionDocs docs={fndoc.jsdocdiffCheck} />
+
+</DocusaurusDoc>
+
+[dv]: https://github.com/aeolun/react-diff-viewer-continued?tab=readme-ov-file#usage
+[jsd]: https://github.com/kpdecker/jsdiff

@@ -1,0 +1,97 @@
+---
+title: '@freesewing/snapseries'
+---
+
+import * as all from '@freesewing/snapseries'
+
+FreeSewing's **snapseries** package provides data for FreeSewing's [snapped
+percentage options](/reference/api/part/config/options/pct/snap/).
+
+It is published on NPM as [@freesewing/snapseries
+](https://www.npmjs.com/package/@freesewing/snapseries).\
+The source code for this package is available in [our monorepo on Codeberg
+](https://codeberg.org/freesewing/freesewing) under [packages/snapseries
+](https://codeberg.org/freesewing/freesewing/src/branch/develop/packages/snapseries).
+
+:::note
+This package does not provide a default export.
+:::
+
+## Installation
+
+```sh
+npm install --save @freesewing/snapseries
+```
+
+## Notes
+
+All exports are plain objects with `metric` and `imperial` properties
+that can be used as the `snap` property for snapped percentage options.
+All measurements are in mm.
+
+Some exports have `metric` and `imperial` properties that are
+arrays of numbers.
+These exports and their properties are:
+
+- `elastics`: Arrays of common elastic widths
+- `zippers`: Arrays of common zipper lengths
+
+Other exports have `metric` and `imperial` properties that are
+numbers to allow options to be _snapped_ to multiples of the value.
+These exports and properties are:
+
+- `smallSteps`: Intervals of 1 mm or 1/32 inch
+- `steps`: Intervals of 5 mm or 1/8 inch
+- `bigSteps`: Intervals of 10 mm or 1/2 inch
+
+## Named Exports
+
+### bigSteps
+
+Holds configuration for snapped percentage options in big steps, which is 1cm or 1/2 inch.
+
+```js
+import { bigSteps } from '@freesewing/snapseries'
+```
+
+<ConsoleButton data={all.bigSteps} />
+
+### elastics
+
+Holds configuration for snapped percentage options for commons sizes of elastic widths.
+
+```js
+import { elastics } from '@freesewing/snapseries'
+```
+
+<ConsoleButton data={all.elastics} />
+
+### smallSteps
+
+Holds configuration for snapped percentage options in small steps, which is 5mm or 1/8 inch.
+
+```js
+import { smallSteps } from '@freesewing/snapseries'
+```
+
+<ConsoleButton data={all.smallSteps} />
+
+### steps
+
+Holds configuration for snapped percentage options in default steps, which is 1cm or 1/2 inch.
+
+```js
+import { bigSteps } from '@freesewing/snapseries'
+```
+
+<ConsoleButton data={all.steps} />
+
+### zippers
+
+Holds configuration for snapped percentage options for commons sizes of zipper widths.
+
+```js
+import { zippers } from '@freesewing/snapseries'
+```
+
+<ConsoleButton data={all.zippers} />

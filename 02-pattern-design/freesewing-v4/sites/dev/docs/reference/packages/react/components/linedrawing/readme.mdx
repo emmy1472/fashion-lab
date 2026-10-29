@@ -1,0 +1,656 @@
+---
+title: Linedrawing
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.linedrawing.mjs'
+import { ConstantDocs } from '@site/src/components/constant-docs.js'
+import * as cdoc from '@site/prebuild/jsdoc/constants.linedrawing.mjs'
+import {
+  AaronExample,
+  AlbertExample,
+  BeeExample,
+  BellaExample,
+  BenjaminExample,
+  BentExample,
+  BibiExample,
+  BobExample,
+  BreannaExample,
+  BrianExample,
+  BruceExample,
+  CarlitaExample,
+  CarltonExample,
+  CathrinExample,
+  CharlieExample,
+  CorneliusExample,
+  DianaExample,
+  FlorenceExample,
+  FlorentExample,
+  GozerExample,
+  HiExample,
+  HolmesExample,
+  HortensiaExample,
+  HueyExample,
+  HugoExample,
+  JaneExample,
+  LucyExample,
+  LuminaExample,
+  LumiraExample,
+  LunetiusExample,
+  NobleExample,
+  SimonExample,
+  TeaganExample,
+  TristanExample,
+  UmaExample,
+  UmbraExample,
+  WahidExample,
+  AaronFrontExample,
+  AlbertFrontExample,
+  BeeFrontExample,
+  BellaFrontExample,
+  BenjaminFrontExample,
+  BentFrontExample,
+  BibiFrontExample,
+  BobFrontExample,
+  BreannaFrontExample,
+  BrianFrontExample,
+  BruceFrontExample,
+  CarlitaFrontExample,
+  CarltonFrontExample,
+  CathrinFrontExample,
+  CharlieFrontExample,
+  CorneliusFrontExample,
+  DianaFrontExample,
+  FlorenceFrontExample,
+  FlorentFrontExample,
+  GozerFrontExample,
+  HiFrontExample,
+  HolmesFrontExample,
+  HortensiaFrontExample,
+  HueyFrontExample,
+  HugoFrontExample,
+  JaneFrontExample,
+  LucyFrontExample,
+  LuminaFrontExample,
+  LumiraFrontExample,
+  LunetiusFrontExample,
+  NobleFrontExample,
+  SimonFrontExample,
+  TeaganFrontExample,
+  TristanFrontExample,
+  UmaFrontExample,
+  UmbraFrontExample,
+  WahidFrontExample,
+  AaronBackExample,
+  BellaBackExample,
+  BentBackExample,
+  BibiBackExample,
+  BobBackExample,
+  BreannaBackExample,
+  BrianBackExample,
+  BruceBackExample,
+  CarlitaBackExample,
+  CarltonBackExample,
+  CathrinBackExample,
+  CharlieBackExample,
+  CorneliusBackExample,
+  DianaBackExample,
+  GozerBackExample,
+  HueyBackExample,
+  HugoBackExample,
+  JaneBackExample,
+  LuminaBackExample,
+  LumiraBackExample,
+  NobleBackExample,
+  SimonBackExample,
+  TeaganBackExample,
+  TristanBackExample,
+  UmaBackExample,
+  UmbraBackExample,
+  WahidBackExample,
+} from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+- [Constants](#constants)
+
+## Components
+
+:::warning
+All FreeSewing designs SHOULD have the full and front line drawing component.
+The back component is optional.
+
+If there is no specific front component, the front component MUST be exported as a copy of the full component.
+:::
+
+The **LineDrawing** component family provides the following components:
+
+- [AaronBack](#aaronback)
+- [AaronFront](#aaronfront)
+- [Aaron](#aaron)
+- [AlbertFront](#albertfront)
+- [Albert](#albert)
+- [BeeFront](#beefront)
+- [Bee](#bee)
+- [BellaBack](#bellaback)
+- [BellaFront](#bellafront)
+- [Bella](#bella)
+- [BenjaminFront](#benjaminfront)
+- [Benjamin](#benjamin)
+- [BentBack](#bentback)
+- [BentFront](#bentfront)
+- [Bent](#bent)
+- [BibiBack](#bibiback)
+- [BibiFront](#bibifront)
+- [Bibi](#bibi)
+- [BobBack](#bobback)
+- [BobFront](#bobfront)
+- [Bob](#bob)
+- [BreannaBack](#breannaback)
+- [BreannaFront](#breannafront)
+- [Breanna](#breanna)
+- [BrianBack](#brianback)
+- [BrianFront](#brianfront)
+- [Brian](#brian)
+- [BruceBack](#bruceback)
+- [BruceFront](#brucefront)
+- [Bruce](#bruce)
+- [CarlitaBack](#carlitaback)
+- [CarlitaFront](#carlitafront)
+- [Carlita](#carlita)
+- [CarltonBack](#carltonback)
+- [CarltonFront](#carltonfront)
+- [Carlton](#carlton)
+- [CathrinBack](#cathrinback)
+- [CathrinFront](#cathrinfront)
+- [Cathrin](#cathrin)
+- [CharlieBack](#charlieback)
+- [CharlieFront](#charliefront)
+- [Charlie](#charlie)
+- [CorneliusBack](#corneliusback)
+- [CorneliusFront](#corneliusfront)
+- [Cornelius](#cornelius)
+- [DianaBack](#dianaback)
+- [DianaFront](#dianafront)
+- [Diana](#diana)
+- [FlorenceFront](#florencefront)
+- [Florence](#florence)
+- [FlorentFront](#florentfront)
+- [Florent](#florent)
+- [GozerBack](#gozerback)
+- [GozerFront](#gozerfront)
+- [Gozer](#gozer)
+- [HiFront](#hifront)
+- [Hi](#hi)
+- [HolmesFront](#holmesfront)
+- [Holmes](#holmes)
+- [HortensiaFront](#hortensiafront)
+- [Hortensia](#hortensia)
+- [HueyBack](#hueyback)
+- [HueyFront](#hueyfront)
+- [Huey](#huey)
+- [HugoBack](#hugoback)
+- [HugoFront](#hugofront)
+- [Hugo](#hugo)
+- [JaneBack](#janeback)
+- [JaneFront](#janefront)
+- [Jane](#jane)
+- [LucyFront](#lucyfront)
+- [Lucy](#lucy)
+- [LuminaBack](#luminaback)
+- [LuminaFront](#luminafront)
+- [Lumina](#lumina)
+- [LumiraBack](#lumiraback)
+- [LumiraFront](#lumirafront)
+- [Lumira](#lumira)
+- [LunetiusFront](#lunetiusfront)
+- [Lunetius](#lunetius)
+- [NobleBack](#nobleback)
+- [NobleFront](#noblefront)
+- [Noble](#noble)
+- [SimonBack](#simonback)
+- [SimonFront](#simonfront)
+- [Simon](#simon)
+- [TeaganBack](#teaganback)
+- [TeaganFront](#teaganfront)
+- [Teagan](#teagan)
+- [TristanBack](#tristanback)
+- [TristanFront](#tristanfront)
+- [Tristan](#tristan)
+- [UmaBack](#umaback)
+- [UmaFront](#umafront)
+- [Uma](#uma)
+- [UmbraBack](#umbraback)
+- [UmbraFront](#umbrafront)
+- [Umbra](#umbra)
+- [WahidBack](#wahidback)
+- [WahidFront](#wahidfront)
+- [Wahid](#wahid)
+
+### Aaron
+
+<ComponentDocs docs={jsdoc.jsdocAaron} example={AaronExample} />
+
+### AaronBack
+
+<ComponentDocs docs={jsdoc.jsdocAaronBack} example={AaronBackExample} />
+
+### AaronFront
+
+<ComponentDocs docs={jsdoc.jsdocAaronFront} example={AaronFrontExample} />
+
+### Albert
+
+<ComponentDocs docs={jsdoc.jsdocAlbert} example={AlbertExample} />
+
+### AlbertFront
+
+<ComponentDocs docs={jsdoc.jsdocAlbertFront} example={AlbertFrontExample} />
+
+### Bee
+
+<ComponentDocs docs={jsdoc.jsdocBee} example={BeeExample} />
+
+### BeeFront
+
+<ComponentDocs docs={jsdoc.jsdocBeeFront} example={BeeFrontExample} />
+
+### Bella
+
+<ComponentDocs docs={jsdoc.jsdocBella} example={BellaExample} />
+
+### BellaBack
+
+<ComponentDocs docs={jsdoc.jsdocBellaBack} example={BellaBackExample} />
+
+### BellaFront
+
+<ComponentDocs docs={jsdoc.jsdocBellaFront} example={BellaFrontExample} />
+
+### Benjamin
+
+<ComponentDocs docs={jsdoc.jsdocBenjamin} example={BenjaminExample} />
+
+### BenjaminFront
+
+<ComponentDocs docs={jsdoc.jsdocBenjaminFront} example={BenjaminFrontExample} />
+
+### Bent
+
+<ComponentDocs docs={jsdoc.jsdocBent} example={BentExample} />
+
+### BentBack
+
+<ComponentDocs docs={jsdoc.jsdocBentBack} example={BentBackExample} />
+
+### BentFront
+
+<ComponentDocs docs={jsdoc.jsdocBentFront} example={BentFrontExample} />
+
+### Bibi
+
+<ComponentDocs docs={jsdoc.jsdocBibi} example={BibiExample} />
+
+### BibiBack
+
+<ComponentDocs docs={jsdoc.jsdocBibiBack} example={BibiBackExample} />
+
+### BibiFront
+
+<ComponentDocs docs={jsdoc.jsdocBibiFront} example={BibiFrontExample} />
+
+### Bob
+
+<ComponentDocs docs={jsdoc.jsdocBob} example={BobExample} />
+
+### BobBack
+
+<ComponentDocs docs={jsdoc.jsdocBobBack} example={BobBackExample} />
+
+### BobFront
+
+<ComponentDocs docs={jsdoc.jsdocBobFront} example={BobFrontExample} />
+
+### Breanna
+
+<ComponentDocs docs={jsdoc.jsdocBreanna} example={BreannaExample} />
+
+### BreannaBack
+
+<ComponentDocs docs={jsdoc.jsdocBreannaBack} example={BreannaBackExample} />
+
+### BreannaFront
+
+<ComponentDocs docs={jsdoc.jsdocBreannaFront} example={BreannaFrontExample} />
+
+### Brian
+
+<ComponentDocs docs={jsdoc.jsdocBrian} example={BrianExample} />
+
+### BrianBack
+
+<ComponentDocs docs={jsdoc.jsdocBrianBack} example={BrianBackExample} />
+
+### BrianFront
+
+<ComponentDocs docs={jsdoc.jsdocBrianFront} example={BrianFrontExample} />
+
+### Bruce
+
+<ComponentDocs docs={jsdoc.jsdocBruce} example={BruceExample} />
+
+### BruceBack
+
+<ComponentDocs docs={jsdoc.jsdocBruceBack} example={BruceBackExample} />
+
+### BruceFront
+
+<ComponentDocs docs={jsdoc.jsdocBruceFront} example={BruceFrontExample} />
+
+### Carlita
+
+<ComponentDocs docs={jsdoc.jsdocCarlita} example={CarlitaExample} />
+
+### CarlitaBack
+
+<ComponentDocs docs={jsdoc.jsdocCarlitaBack} example={CarlitaBackExample} />
+
+### CarlitaFront
+
+<ComponentDocs docs={jsdoc.jsdocCarlitaFront} example={CarlitaFrontExample} />
+
+### Carlton
+
+<ComponentDocs docs={jsdoc.jsdocCarlton} example={CarltonExample} />
+
+### CarltonBack
+
+<ComponentDocs docs={jsdoc.jsdocCarltonBack} example={CarltonBackExample} />
+
+### CarltonFront
+
+<ComponentDocs docs={jsdoc.jsdocCarltonFront} example={CarltonFrontExample} />
+
+### Cathrin
+
+<ComponentDocs docs={jsdoc.jsdocCathrin} example={CathrinExample} />
+
+### CathrinBack
+
+<ComponentDocs docs={jsdoc.jsdocCathrinBack} example={CathrinBackExample} />
+
+### CathrinFront
+
+<ComponentDocs docs={jsdoc.jsdocCathrinFront} example={CathrinFrontExample} />
+
+### Charlie
+
+<ComponentDocs docs={jsdoc.jsdocCharlie} example={CharlieExample} />
+
+### CharlieBack
+
+<ComponentDocs docs={jsdoc.jsdocCharlieBack} example={CharlieBackExample} />
+
+### CharlieFront
+
+<ComponentDocs docs={jsdoc.jsdocCharlieFront} example={CharlieFrontExample} />
+
+### Cornelius
+
+<ComponentDocs docs={jsdoc.jsdocCornelius} example={CorneliusExample} />
+
+### CorneliusBack
+
+<ComponentDocs docs={jsdoc.jsdocCorneliusBack} example={CorneliusBackExample} />
+
+### CorneliusFront
+
+<ComponentDocs docs={jsdoc.jsdocCorneliusFront} example={CorneliusFrontExample} />
+
+### Diana
+
+<ComponentDocs docs={jsdoc.jsdocDiana} example={DianaExample} />
+
+### DianaBack
+
+<ComponentDocs docs={jsdoc.jsdocDianaBack} example={DianaBackExample} />
+
+### DianaFront
+
+<ComponentDocs docs={jsdoc.jsdocDianaFront} example={DianaFrontExample} />
+
+### Florence
+
+<ComponentDocs docs={jsdoc.jsdocFlorence} example={FlorenceExample} />
+
+### FlorenceFront
+
+<ComponentDocs docs={jsdoc.jsdocFlorenceFront} example={FlorenceFrontExample} />
+
+### Florent
+
+<ComponentDocs docs={jsdoc.jsdocFlorent} example={FlorentExample} />
+
+### FlorentFront
+
+<ComponentDocs docs={jsdoc.jsdocFlorentFront} example={FlorentFrontExample} />
+
+### Gozer
+
+<ComponentDocs docs={jsdoc.jsdocGozer} example={GozerExample} />
+
+### GozerBack
+
+<ComponentDocs docs={jsdoc.jsdocGozerBack} example={GozerBackExample} />
+
+### GozerFront
+
+<ComponentDocs docs={jsdoc.jsdocGozerFront} example={GozerFrontExample} />
+
+### Hi
+
+<ComponentDocs docs={jsdoc.jsdocHi} example={HiExample} />
+
+### HiFront
+
+<ComponentDocs docs={jsdoc.jsdocHiFront} example={HiFrontExample} />
+
+### Holmes
+
+<ComponentDocs docs={jsdoc.jsdocHolmes} example={HolmesExample} />
+
+### HolmesFront
+
+<ComponentDocs docs={jsdoc.jsdocHolmesFront} example={HolmesFrontExample} />
+
+### Hortensia
+
+<ComponentDocs docs={jsdoc.jsdocHortensia} example={HortensiaExample} />
+
+### HortensiaFront
+
+<ComponentDocs docs={jsdoc.jsdocHortensiaFront} example={HortensiaFrontExample} />
+
+### Huey
+
+<ComponentDocs docs={jsdoc.jsdocHuey} example={HueyExample} />
+
+### HueyBack
+
+<ComponentDocs docs={jsdoc.jsdocHueyBack} example={HueyBackExample} />
+
+### HueyFront
+
+<ComponentDocs docs={jsdoc.jsdocHueyFront} example={HueyFrontExample} />
+
+### Hugo
+
+<ComponentDocs docs={jsdoc.jsdocHugo} example={HugoExample} />
+
+### HugoBack
+
+<ComponentDocs docs={jsdoc.jsdocHugoBack} example={HugoBackExample} />
+
+### HugoFront
+
+<ComponentDocs docs={jsdoc.jsdocHugoFront} example={HugoFrontExample} />
+
+### Jane
+
+<ComponentDocs docs={jsdoc.jsdocJane} example={JaneExample} />
+
+### JaneBack
+
+<ComponentDocs docs={jsdoc.jsdocJaneBack} example={JaneBackExample} />
+
+### JaneFront
+
+<ComponentDocs docs={jsdoc.jsdocJaneFront} example={JaneFrontExample} />
+
+### Lucy
+
+<ComponentDocs docs={jsdoc.jsdocLucy} example={LucyExample} />
+
+### LucyFront
+
+<ComponentDocs docs={jsdoc.jsdocLucyFront} example={LucyFrontExample} />
+
+### Lumina
+
+<ComponentDocs docs={jsdoc.jsdocLumina} example={LuminaExample} />
+
+### LuminaBack
+
+<ComponentDocs docs={jsdoc.jsdocLuminaBack} example={LuminaBackExample} />
+
+### LuminaFront
+
+<ComponentDocs docs={jsdoc.jsdocLuminaFront} example={LuminaFrontExample} />
+
+### Lumira
+
+<ComponentDocs docs={jsdoc.jsdocLumira} example={LumiraExample} />
+
+### LumiraBack
+
+<ComponentDocs docs={jsdoc.jsdocLumiraBack} example={LumiraBackExample} />
+
+### LumiraFront
+
+<ComponentDocs docs={jsdoc.jsdocLumiraFront} example={LumiraFrontExample} />
+
+### Lunetius
+
+<ComponentDocs docs={jsdoc.jsdocLunetius} example={LunetiusExample} />
+
+### LunetiusFront
+
+<ComponentDocs docs={jsdoc.jsdocLunetiusFront} example={LunetiusFrontExample} />
+
+### Noble
+
+<ComponentDocs docs={jsdoc.jsdocNoble} example={NobleExample} />
+
+### NobleBack
+
+<ComponentDocs docs={jsdoc.jsdocNobleBack} example={NobleBackExample} />
+
+### NobleFront
+
+<ComponentDocs docs={jsdoc.jsdocNobleFront} example={NobleFrontExample} />
+
+### Simon
+
+<ComponentDocs docs={jsdoc.jsdocSimon} example={SimonExample} />
+
+### SimonBack
+
+<ComponentDocs docs={jsdoc.jsdocSimonBack} example={SimonBackExample} />
+
+### SimonFront
+
+<ComponentDocs docs={jsdoc.jsdocSimonFront} example={SimonFrontExample} />
+
+### Teagan
+
+<ComponentDocs docs={jsdoc.jsdocTeagan} example={TeaganExample} />
+
+### TeaganBack
+
+<ComponentDocs docs={jsdoc.jsdocTeaganBack} example={TeaganBackExample} />
+
+### TeaganFront
+
+<ComponentDocs docs={jsdoc.jsdocTeaganFront} example={TeaganFrontExample} />
+
+### Tristan
+
+<ComponentDocs docs={jsdoc.jsdocTristan} example={TristanExample} />
+
+### TristanBack
+
+<ComponentDocs docs={jsdoc.jsdocTristanBack} example={TristanBackExample} />
+
+### TristanFront
+
+<ComponentDocs docs={jsdoc.jsdocTristanFront} example={TristanFrontExample} />
+
+### Uma
+
+<ComponentDocs docs={jsdoc.jsdocUma} example={UmaExample} />
+
+### UmaBack
+
+<ComponentDocs docs={jsdoc.jsdocUmaBack} example={UmaBackExample} />
+
+### UmaFront
+
+<ComponentDocs docs={jsdoc.jsdocUmaFront} example={UmaFrontExample} />
+
+### Umbra
+
+<ComponentDocs docs={jsdoc.jsdocUmbra} example={UmbraExample} />
+
+### UmbraBack
+
+<ComponentDocs docs={jsdoc.jsdocUmbraBack} example={UmbraBackExample} />
+
+### UmbraFront
+
+<ComponentDocs docs={jsdoc.jsdocUmbraFront} example={UmbraFrontExample} />
+
+### Wahid
+
+<ComponentDocs docs={jsdoc.jsdocWahid} example={WahidExample} />
+
+### WahidBack
+
+<ComponentDocs docs={jsdoc.jsdocWahidBack} example={WahidBackExample} />
+
+### WahidFront
+
+<ComponentDocs docs={jsdoc.jsdocWahidFront} example={WahidFrontExample} />
+
+## Constants
+
+This component family also exports the following helper objects:
+
+- `lineDrawings`: An object where the key is the design name and the value the full LineDrawing component
+- `lineDrawingsBack`: An object where the key is the design name and the value the back LineDrawing component
+- `lineDrawingsFront`: An object where the key is the design name and the value the front LineDrawing component
+
+### lineDrawings
+
+<ConstantDocs docs={cdoc.jsdoclineDrawings} />
+
+### lineDrawingsBack
+
+<ConstantDocs docs={cdoc.jsdoclineDrawingsBack} />
+
+### lineDrawingsFront
+
+<ConstantDocs docs={cdoc.jsdoclineDrawingsFront} />
+
+</DocusaurusDoc>

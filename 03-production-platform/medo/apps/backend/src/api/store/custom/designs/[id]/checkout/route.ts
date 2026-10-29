@@ -1,0 +1,192 @@
+import {
+  AuthenticatedMedusaRequest,
+  MedusaResponse,
+} from "@medusajs/framework/http";
+import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils";
+import { estimateDesignCostWorkflow } from "../../../../../../workflows/designs/estimate-design-cost";
+import designCustomerLink from "../../../../../../links/design-customer-link";
+import { DESIGN_MODULE } from "../../../../../../modules/designs";
+import {
+  fetchExchangeRate,
+  applyRate,
+} from "../../../../../../workflows/designs/create-draft-order-from-designs";
+import { resolveStorefrontCurrency } from "../../../../../../lib/resolve-store-currency";
+
+/**
+ * POST /store/custom/designs/:id/checkout
+ *
+ * Adds a custom line item to the cart priced at the design's cost estimate.
+ * Admin approval (POST /admin/designs/:id/approve) later creates the real product/variant.
+ *
+ * Request body:
+ * {
+ *   cart_id: string               Required — cart to add the item to
+ *   inventory_item_ids?: string[] Optional — override which inventory items to price
+ *   currency_code?: string        Optional — only used when the cart has no
+ *                                 currency of its own
+ * }
+ */
+export async function POST(
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+): Promise<void> {
+  const customerId = req.auth_context?.actor_id;
+  const designId = req.params.id;
+
+  if (!customerId) {
+    throw new MedusaError(MedusaError.Types.UNAUTHORIZED, "Customer authentication required");
+  }
+
+  const body = req.body as {
+    cart_id?: string;
+    inventory_item_ids?: string[];
+    currency_code?: string;
+  };
+
+  if (!body.cart_id) {
+    throw new MedusaError(MedusaError.Types.INVALID_DATA, "cart_id is required");
+  }
+
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY) as any;
+
+  // Verify the customer owns this design
+  const { data: links } = await query.graph({
+    entity: designCustomerLink.entryPoint,
+    filters: { customer_id: customerId, design_id: designId },
+    fields: ["design_id"],
+  });
+
+  if (!links || links.length === 0) {
+    throw new MedusaError(MedusaError.Types.NOT_FOUND, "Design not found or not owned by customer");
+  }
+
+  // Fetch design name for the line item title
+  const { data: designs } = await query.graph({
+    entity: "design",
+    filters: { id: designId },
+    fields: ["name"],
+  });
+  const designName = designs?.[0]?.name || "Custom Design";
+
+  // Run cost estimation (includes component design costs)
+  const { result: costEstimate, errors: costErrors } =
+    await estimateDesignCostWorkflow(req.scope).run({
+      input: {
+        design_id: designId,
+        inventory_item_ids: body.inventory_item_ids,
+      },
+    });
+
+  if (costErrors && costErrors.length > 0) {
+    throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "Failed to estimate design cost");
+  }
+
+  /**
+   * 🔴 Refuse rather than sell it for nothing.
+   *
+   * There was no check here at all. The estimator reported "no BOM, no order
+   * history, nothing to go on" as `total_estimated: 0`, and this route fed that
+   * straight into `unit_price` with `is_custom_price: true` — so a design
+   * nobody had ever costed went into a customer's cart FREE, with a line item
+   * that looks exactly like a legitimately-priced one.
+   *
+   * A cost of null is not a cheap design; it is an unanswered question, and the
+   * only safe thing to do with an unanswered question at the till is stop. #1564
+   */
+  if (costEstimate.total_estimated == null) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_ALLOWED,
+      "This design cannot be priced automatically yet — it has no bill of materials and no cost history. Please contact us for a quote."
+    );
+  }
+
+  const cartService = req.scope.resolve(Modules.CART) as any;
+
+  // Determine the cart's currency so we can convert from store default
+  const cart = await cartService.retrieveCart(body.cart_id);
+  const cartCurrency = (cart?.currency_code || body.currency_code || "usd").toLowerCase();
+
+  /**
+   * 🔴 The estimate is denominated by the STOREFRONT, not by whichever store
+   * row came back first.
+   *
+   * This read used to be `entity: "store", filters: {}` → `[0]` → literal
+   * `"inr"`, while the sibling estimate route ran the identical lookup and
+   * defaulted to `"eur"` — the same figure denominated two ways, ~100x apart,
+   * on a public money path.
+   *
+   * `stores[0]` is the platform store (EUR) across all 14 stores, so a partner
+   * storefront selling in INR had its INR-derived estimate treated as EUR and
+   * then converted EUR→INR right here, multiplying the customer's price by the
+   * exchange rate.
+   *
+   * A denomination we cannot establish is an unanswered question at the till,
+   * and it gets the same answer as an unanswered price: stop. #1564
+   */
+  const storeCurrency = await resolveStorefrontCurrency(
+    req.scope,
+    req.publishable_key_context
+  );
+
+  if (!storeCurrency) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_ALLOWED,
+      "Could not determine this storefront's currency, so this design cannot be priced. Please contact us for a quote."
+    );
+  }
+
+  // Convert estimated cost from store currency to cart currency
+  const rate = await fetchExchangeRate(storeCurrency, cartCurrency);
+  const convertedEstimate = applyRate(costEstimate.total_estimated, rate);
+
+  const wasCurrencyConverted = storeCurrency !== cartCurrency;
+
+  const lineItems = await cartService.addLineItems(body.cart_id, [
+    {
+      title: designName,
+      unit_price: convertedEstimate,
+      is_custom_price: true,
+      // #1195: MUST stay false on the CART — `validateShippingStep` would
+      // otherwise block completion for these variant-less custom items. The
+      // flag is repaired at order.placed; see `src/lib/requires-shipping.ts`.
+      requires_shipping: false,
+      quantity: 1,
+      metadata: {
+        design_id: designId,
+        cost_confidence: costEstimate.confidence,
+        ...(wasCurrencyConverted && {
+          original_currency: storeCurrency,
+          original_amount: costEstimate.total_estimated,
+        }),
+      },
+    },
+  ]);
+
+  const lineItem = lineItems?.[0];
+  if (!lineItem) {
+    throw new MedusaError(MedusaError.Types.UNEXPECTED_STATE, "Failed to add line item to cart");
+  }
+
+  // Create design → line item link for admin tracking
+  const remoteLink = req.scope.resolve(ContainerRegistrationKeys.LINK) as any;
+  await remoteLink.create({
+    [DESIGN_MODULE]: { design_id: designId },
+    [Modules.CART]: { line_item_id: lineItem.id },
+  });
+
+  res.status(200).json({
+    line_item_id: lineItem.id,
+    price: convertedEstimate,
+    currency_code: cartCurrency,
+    cost_estimate: {
+      material_cost: costEstimate.material_cost,
+      production_cost: costEstimate.production_cost,
+      total_estimated: costEstimate.total_estimated,
+      confidence: costEstimate.confidence,
+      breakdown: costEstimate.breakdown,
+      original_currency: storeCurrency,
+      converted_amount: convertedEstimate,
+      converted_currency: cartCurrency,
+    },
+  });
+}

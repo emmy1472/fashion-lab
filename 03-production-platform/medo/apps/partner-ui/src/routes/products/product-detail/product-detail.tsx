@@ -1,0 +1,89 @@
+import { useLoaderData, useParams } from "react-router-dom"
+
+import { TwoColumnPageSkeleton } from "../../../components/common/skeleton"
+import { TwoColumnPage } from "../../../components/layout/pages"
+import { useProduct } from "../../../hooks/api/products"
+import { ProductArtisanSection } from "./components/product-artisan-section"
+import { ProductSpecSection } from "./components/product-spec-section"
+import { ProductAttributeSection } from "./components/product-attribute-section"
+import { ProductGeneralSection } from "./components/product-general-section"
+import { ProductReviewBanner } from "./components/product-review-banner/product-review-banner"
+import { ProductMediaSection } from "./components/product-media-section"
+import { ProductOptionSection } from "./components/product-option-section"
+import { ProductOrganizationSection } from "./components/product-organization-section"
+import { ProductProductionRunsSection } from "./components/product-production-runs-section"
+import { ProductSalesChannelSection } from "./components/product-sales-channel-section"
+import { ProductVariantSection } from "./components/product-variant-section"
+import { PRODUCT_DETAIL_FIELDS } from "./constants"
+import { productLoader } from "./loader"
+
+import { useExtension } from "../../../providers/extension-provider"
+import { ProductShippingProfileSection } from "./components/product-shipping-profile-section"
+
+export const ProductDetail = () => {
+  const initialData = useLoaderData() as Awaited<
+    ReturnType<typeof productLoader>
+  >
+
+  const { id } = useParams()
+  const { product, isLoading, isError, error } = useProduct(
+    id!,
+    { fields: PRODUCT_DETAIL_FIELDS },
+    {
+      initialData: initialData,
+    }
+  )
+
+  const { getWidgets } = useExtension()
+
+  const after = getWidgets("product.details.after")
+  const before = getWidgets("product.details.before")
+  const sideAfter = getWidgets("product.details.side.after")
+  const sideBefore = getWidgets("product.details.side.before")
+
+  if (isLoading || !product) {
+    return (
+      <TwoColumnPageSkeleton
+        mainSections={4}
+        sidebarSections={3}
+        showJSON
+        showMetadata
+      />
+    )
+  }
+
+  if (isError) {
+    throw error
+  }
+
+  return (
+    <TwoColumnPage
+      widgets={{
+        after,
+        before,
+        sideAfter,
+        sideBefore,
+      }}
+      showJSON
+      showMetadata
+      data={product}
+    >
+      <TwoColumnPage.Main>
+        <ProductReviewBanner product={product} />
+        <ProductGeneralSection product={product} />
+        <ProductMediaSection product={product} />
+        <ProductOptionSection product={product} />
+        <ProductVariantSection product={product} />
+        <ProductProductionRunsSection product={product} />
+        <ProductArtisanSection product={product} />
+        <ProductSpecSection product={product} />
+      </TwoColumnPage.Main>
+      <TwoColumnPage.Sidebar>
+        <ProductSalesChannelSection product={product} />
+        <ProductShippingProfileSection product={product} />
+        <ProductOrganizationSection product={product} />
+        <ProductAttributeSection product={product} />
+      </TwoColumnPage.Sidebar>
+    </TwoColumnPage>
+  )
+}

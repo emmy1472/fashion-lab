@@ -1,0 +1,37 @@
+import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import { splitInventoryItemWorkflow } from "../../../../../workflows/inventory/split-inventory-item"
+
+export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
+  const body = req.validatedBody as {
+    quantity: number
+    new_title: string
+    location_id?: string
+    raw_material_overrides?: {
+      name?: string
+      color?: string
+      composition?: string
+      grade?: string
+      description?: string
+      extra?: Record<string, string>
+    }
+  }
+
+  const logger: any = req.scope.resolve(ContainerRegistrationKeys.LOGGER)
+  const { result, errors } = await splitInventoryItemWorkflow(req.scope).run({
+    input: {
+      sourceInventoryItemId: req.params.id,
+      quantity: body.quantity,
+      newTitle: body.new_title,
+      locationId: body.location_id,
+      rawMaterialOverrides: body.raw_material_overrides,
+    },
+  })
+
+  if (errors && errors.length > 0) {
+    logger.warn(`Split inventory workflow errors: ${JSON.stringify(errors)}`)
+    throw errors[0]
+  }
+
+  res.status(201).json(result)
+}

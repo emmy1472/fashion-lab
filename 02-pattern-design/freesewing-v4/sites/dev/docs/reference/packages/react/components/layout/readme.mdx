@@ -1,0 +1,62 @@
+---
+title: Layout
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.layout.mjs'
+import {
+  BaseLayoutExample,
+  BaseLayoutLeftExample,
+  BaseLayoutProseExample,
+  BaseLayoutRightExample,
+  BaseLayoutWideExample,
+  LayoutExample,
+  NoTitleLayoutExample,
+} from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Layout** component family provides the following components:
+
+- [BaseLayout](#baselayout)
+- [BaseLayoutLeft](#baselayoutleft)
+- [BaseLayoutProse](#baselayoutprose)
+- [BaseLayoutRight](#baselayoutright)
+- [BaseLayoutWide](#baselayoutwide)
+- [Layout](#layout)
+- [NoTitleLayout](#notitlelayout)
+
+### BaseLayout
+
+<ComponentDocs docs={jsdoc.jsdocBaseLayout} example={BaseLayoutExample} />
+
+### BaseLayoutLeft
+
+<ComponentDocs docs={jsdoc.jsdocBaseLayoutLeft} example={BaseLayoutLeftExample} />
+
+### BaseLayoutProse
+
+<ComponentDocs docs={jsdoc.jsdocBaseLayoutProse} example={BaseLayoutProseExample} />
+
+### BaseLayoutRight
+
+<ComponentDocs docs={jsdoc.jsdocBaseLayoutRight} example={BaseLayoutRightExample} />
+
+### BaseLayoutWide
+
+<ComponentDocs docs={jsdoc.jsdocBaseLayoutWide} example={BaseLayoutWideExample} />
+
+### Layout
+
+<ComponentDocs docs={jsdoc.jsdocLayout} example={LayoutExample} />
+
+### NoTitleLayout
+
+<ComponentDocs docs={jsdoc.jsdocNoTitleLayout} example={NoTitleLayoutExample} />
+
+</DocusaurusDoc>

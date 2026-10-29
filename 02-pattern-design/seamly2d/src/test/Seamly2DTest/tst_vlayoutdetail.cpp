@@ -1,0 +1,208 @@
+/***************************************************************************
+ *                                                                         *
+ *   Copyright (C) 2017  Seamly, LLC                                       *
+ *                                                                         *
+ *   https://github.com/fashionfreedom/seamly2d                             *
+ *                                                                         *
+ ***************************************************************************
+ **
+ **  Seamly2D is free software: you can redistribute it and/or modify
+ **  it under the terms of the GNU General Public License as published by
+ **  the Free Software Foundation, either version 3 of the License, or
+ **  (at your option) any later version.
+ **
+ **  Seamly2D is distributed in the hope that it will be useful,
+ **  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ **  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ **  GNU General Public License for more details.
+ **
+ **  You should have received a copy of the GNU General Public License
+ **  along with Seamly2D.  If not, see <http://www.gnu.org/licenses/>.
+ **
+ **************************************************************************
+
+ ************************************************************************
+ **
+ **  @file   tst_vlayoutdetail.cpp
+ **  @author Roman Telezhynskyi <dismine(at)gmail.com>
+ **  @date   17 5, 2015
+ **
+ **  @brief
+ **  @copyright
+ **  This source code is part of the Valentine project, a pattern making
+ **  program, whose allow create and modeling patterns of clothing.
+ **  Copyright (C) 2015 Seamly2D project
+ **  <https://github.com/fashionfreedom/seamly2d> All Rights Reserved.
+ **
+ **  Seamly2D is free software: you can redistribute it and/or modify
+ **  it under the terms of the GNU General Public License as published by
+ **  the Free Software Foundation, either version 3 of the License, or
+ **  (at your option) any later version.
+ **
+ **  Seamly2D is distributed in the hope that it will be useful,
+ **  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ **  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ **  GNU General Public License for more details.
+ **
+ **  You should have received a copy of the GNU General Public License
+ **  along with Seamly2D.  If not, see <http://www.gnu.org/licenses/>.
+ **
+ *************************************************************************/
+
+#include "tst_vlayoutdetail.h"
+#include "../vlayout/vlayoutpiece.h"
+
+#include <QtDebug>
+
+//---------------------------------------------------------------------------------------------------------------------
+TST_VLayoutPiece::TST_VLayoutPiece(QObject *parent)
+    :AbstractTest(parent)
+{
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void TST_VLayoutPiece::RemoveDublicates() const
+{
+    qDebug() << "Case 1.";
+    Case1();
+
+    qDebug() << "Case 2.";
+    Case2();
+
+    qDebug() << "Case 3.";
+    Case3();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void TST_VLayoutPiece::Case1() const
+{
+
+    VLayoutPiece piece = VLayoutPiece();
+    piece.setMainPathPoints(InputPointsCase1());
+
+    // Begin comparison
+    Comparison(piece.getContourPoints(), OutputPointsCase1());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QVector<QPointF> TST_VLayoutPiece::InputPointsCase1() const
+{
+    QVector<QPointF> points;
+
+    points += QPointF(557.0, -94.0);
+    points += QPointF(760.0, -53.0);
+    points += QPointF(661.0, 411.0);
+    points += QPointF(708.0, 467.0);
+    points += QPointF(366.0, 845.0);
+    points += QPointF(750.0, 509.0);
+    points += QPointF(957.0, 556.0);
+    points += QPointF(933.0, 787.0);
+    points += QPointF(366.0, 845.0);
+    points += QPointF(921.0, 901.0);
+    points += QPointF(883.0, 1158.0);
+    points += QPointF(866.0, 1446.0);
+    points += QPointF(396.0, 1446.0);
+    points += QPointF(400.0, 1093.0);
+    points += QPointF(366.0, 917.0);
+    points += QPointF(366.0, 845.0);
+    points += QPointF(466.0, 411.0);
+
+    return points;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QVector<QPointF> TST_VLayoutPiece::OutputPointsCase1() const //-V524
+{
+    QVector<QPointF> points;
+
+    points += QPointF(557.0, -94.0);
+    points += QPointF(760.0, -53.0);
+    points += QPointF(661.0, 411.0);
+    points += QPointF(708.0, 467.0);
+    points += QPointF(366.0, 845.0);
+    points += QPointF(750.0, 509.0);
+    points += QPointF(957.0, 556.0);
+    points += QPointF(933.0, 787.0);
+    points += QPointF(366.0, 845.0);
+    points += QPointF(921.0, 901.0);
+    points += QPointF(883.0, 1158.0);
+    points += QPointF(866.0, 1446.0);
+    points += QPointF(396.0, 1446.0);
+    points += QPointF(400.0, 1093.0);
+    points += QPointF(366.0, 917.0);
+    points += QPointF(366.0, 845.0);
+    points += QPointF(466.0, 411.0);
+
+    return points;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void TST_VLayoutPiece::Case2() const
+{
+    VLayoutPiece piece = VLayoutPiece();
+    piece.setMainPathPoints(InputPointsCase2());
+
+    // Begin comparison
+    Comparison(piece.getContourPoints(), OutputPointsCase2());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QVector<QPointF> TST_VLayoutPiece::InputPointsCase2() const
+{
+    QVector<QPointF> points;
+
+    points += QPointF(557.0, -94.0);
+    points += QPointF(760.0, -53.0);
+    points += QPointF(760.0, -53.0);// Need delete this part
+    points += QPointF(760.0, -53.0);// Need delete this part
+    points += QPointF(760.0, -53.0);// Need delete this part
+    points += QPointF(661.0, 411.0);
+    points += QPointF(708.0, 467.0);
+    points += QPointF(366.0, 845.0);
+
+    return points;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QVector<QPointF> TST_VLayoutPiece::OutputPointsCase2() const
+{
+    QVector<QPointF> points;
+
+    points += QPointF(557.0, -94.0);
+    points += QPointF(760.0, -53.0);
+    points += QPointF(661.0, 411.0);
+    points += QPointF(708.0, 467.0);
+    points += QPointF(366.0, 845.0);
+
+    return points;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void TST_VLayoutPiece::Case3() const
+{
+    VLayoutPiece piece = VLayoutPiece();
+    piece.setMainPathPoints(InputPointsCase3());
+
+    // Begin comparison
+    Comparison(piece.getContourPoints(), OutputPointsCase3());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QVector<QPointF> TST_VLayoutPiece::InputPointsCase3() const
+{
+    QVector<QPointF> points;
+
+    points += QPointF(557.0, -94.0);// Only one point
+
+    return points;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QVector<QPointF> TST_VLayoutPiece::OutputPointsCase3() const //-V524
+{
+    QVector<QPointF> points;
+
+    points += QPointF(557.0, -94.0);// Only one point
+
+    return points;
+}

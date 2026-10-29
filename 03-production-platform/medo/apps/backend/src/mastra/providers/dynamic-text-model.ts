@@ -1,0 +1,218 @@
+/**
+ * Dynamic Free Text Model Provider
+ *
+ * Provides a proper AI SDK v5 LanguageModel (via wrapLanguageModel) that:
+ * 1. Dynamically selects the best available free model from OpenRouter (realtime API lookup)
+ * 2. Detects "free period has ended" errors and permanently evicts the expired model,
+ *    then retries with the next available model — no human intervention needed.
+ * 3. Falls back to a static list of known free models when the OpenRouter API
+ *    is unreachable.
+ *
+ * ⚠️ This docblock previously claimed a fourth step — "falls back to the
+ * cheapest Vercel AI Gateway text model when all OpenRouter free models are
+ * exhausted". **No such code has ever existed here**: `resolveModel()` goes
+ * live-list → static list and stops. Corrected rather than implemented, because
+ * a hardcoded gateway fallback would now duplicate a better mechanism —
+ * `mastra/services/ai-platforms.ts` resolves an admin-configured provider
+ * (Cloudflare / Vercel AI Gateway / DashScope / OpenRouter) per AI role from
+ * encrypted credentials, and `resolveRoleTextModel` is documented as the single
+ * entry point every text feature should use. THIS model is only the free
+ * fallback for when no platform is configured for a role.
+ *
+ * 🔑 Consequence worth knowing: because this pool is ranked by context length
+ * and filtered only for text output, it will happily pick a model that does not
+ * honour structured output. Anything asking for a schema must read the response
+ * through `lib/ai/model-json.ts` rather than trusting `response.object`.
+ *
+ * Uses wrapLanguageModel so Mastra recognises it as a proper AI SDK v5 model.
+ * The placeholder model passed to wrapLanguageModel is never actually called —
+ * both wrapGenerate and wrapStream completely bypass it.
+ */
+
+import { wrapLanguageModel } from "ai"
+import { createOpenRouter } from "@openrouter/ai-sdk-provider"
+import { fetchAllModels, filterFreeModels, OpenRouterModel } from "./openrouter"
+
+const openrouter = createOpenRouter({
+  apiKey: process.env.OPENROUTER_API_KEY,
+})
+
+// ──────────────────────────────────────────────────────────────
+// Static fallbacks — known working free models (updated periodically)
+// ──────────────────────────────────────────────────────────────
+const STATIC_FALLBACKS = [
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "google/gemma-3-27b-it:free",
+  "google/gemma-3-12b-it:free",
+  "mistralai/mistral-7b-instruct:free",
+  "google/gemini-2.0-flash-exp:free",
+]
+
+// Models that have permanently expired their free tier — never retry these.
+const expiredModelIds = new Set<string>()
+
+// In-process cache for the ranked free text model list from OpenRouter.
+let cachedFreeTextModels: OpenRouterModel[] = []
+let cacheTs = 0
+const CACHE_TTL = 15 * 60 * 1000 // 15 minutes
+
+// ──────────────────────────────────────────────────────────────
+// Expiry detection
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Returns true when an OpenRouter error indicates that a model's
+ * free tier has permanently ended (not a transient rate-limit).
+ */
+export function isExpiredFreeModelError(error: unknown): boolean {
+  const msg = String((error as any)?.message ?? error ?? "").toLowerCase()
+  return (
+    msg.includes("period has ended") ||
+    msg.includes("migrate to the paid") ||
+    msg.includes("no longer available for free") ||
+    (msg.includes("free") && msg.includes("ended"))
+  )
+}
+
+/**
+ * Permanently evict a model ID from the free-model pool and invalidate
+ * the in-process cache so the next call re-ranks from the live list.
+ */
+export function markModelExpired(modelId: string): void {
+  if (expiredModelIds.has(modelId)) return
+  console.warn(`[DynamicTextModel] Model expired — evicting: ${modelId}`)
+  expiredModelIds.add(modelId)
+  cachedFreeTextModels = []
+  cacheTs = 0
+}
+
+// ──────────────────────────────────────────────────────────────
+// OpenRouter free model resolution
+// ──────────────────────────────────────────────────────────────
+
+async function refreshFreeTextModels(): Promise<OpenRouterModel[]> {
+  const now = Date.now()
+  if (cachedFreeTextModels.length > 0 && now - cacheTs < CACHE_TTL) {
+    return cachedFreeTextModels
+  }
+
+  try {
+    const allModels = await fetchAllModels()
+    let free = filterFreeModels(allModels)
+
+    // Keep only models that produce text output
+    free = free.filter((m) => {
+      const out = m.architecture?.output_modalities ?? []
+      return out.length === 0 || out.includes("text")
+    })
+
+    // Largest context first — generally the most capable free models
+    free.sort((a, b) => (b.context_length ?? 0) - (a.context_length ?? 0))
+
+    cachedFreeTextModels = free
+    cacheTs = now
+    console.log(`[DynamicTextModel] Refreshed OpenRouter pool — ${free.length} free text models`)
+    return free
+  } catch (err) {
+    console.warn("[DynamicTextModel] OpenRouter model refresh failed:", err)
+    return cachedFreeTextModels
+  }
+}
+
+/**
+ * Return the ID of the best currently-available free text model,
+ * skipping any that have been marked expired.
+ */
+export async function getBestFreeTextModelId(): Promise<string | null> {
+  const models = await refreshFreeTextModels()
+  const available = models.filter((m) => !expiredModelIds.has(m.id))
+  return available.length > 0 ? available[0].id : null
+}
+
+/**
+ * Resolve the best available model instance, falling back through:
+ *   1. OpenRouter live free model list
+ *   2. Static fallback list
+ */
+async function resolveModel(): Promise<{ model: any; id: string }> {
+  const freeId = await getBestFreeTextModelId()
+  if (freeId) {
+    return { model: openrouter(freeId), id: freeId }
+  }
+
+  const staticId = STATIC_FALLBACKS.find((id) => !expiredModelIds.has(id)) ?? STATIC_FALLBACKS[0]
+  console.warn(`[DynamicTextModel] Using static fallback: ${staticId}`)
+  return { model: openrouter(staticId), id: staticId }
+}
+
+// ──────────────────────────────────────────────────────────────
+// wrapLanguageModel — produces a proper AI SDK v5 LanguageModel
+//
+// The placeholder model is required by the API but is never called:
+// both wrapGenerate and wrapStream completely bypass it and
+// delegate directly to the dynamically resolved model.
+// ──────────────────────────────────────────────────────────────
+
+const placeholder = openrouter(STATIC_FALLBACKS[0])
+
+/**
+ * A proper AI SDK v5 LanguageModel (recognised by Mastra) that transparently
+ * resolves the best available free text model at call-time.
+ *
+ * Drop-in replacement for any `openrouter("...")` or `openai("...")` call
+ * in Mastra agent definitions.
+ */
+export const dynamicFreeTextModel = wrapLanguageModel({
+  model: placeholder,
+  middleware: {
+    wrapGenerate: async ({ params }) => {
+      const { model, id } = await resolveModel()
+      console.log(`[DynamicTextModel] generate → ${id}`)
+      try {
+        return await model.doGenerate(params)
+      } catch (err) {
+        if (isExpiredFreeModelError(err)) {
+          markModelExpired(id)
+          const retry = await resolveModel()
+          console.log(`[DynamicTextModel] retry generate → ${retry.id}`)
+          return await retry.model.doGenerate(params)
+        }
+        throw err
+      }
+    },
+    wrapStream: async ({ params }) => {
+      const { model, id } = await resolveModel()
+      console.log(`[DynamicTextModel] stream → ${id}`)
+      try {
+        return await model.doStream(params)
+      } catch (err) {
+        if (isExpiredFreeModelError(err)) {
+          markModelExpired(id)
+          const retry = await resolveModel()
+          console.log(`[DynamicTextModel] retry stream → ${retry.id}`)
+          return await retry.model.doStream(params)
+        }
+        throw err
+      }
+    },
+  },
+})
+
+// ──────────────────────────────────────────────────────────────
+// Tool-capable free model variant
+//
+// Roles that call tools (e.g. the partner/admin assistants) need a model whose
+// provider advertises function-calling. `openrouter/free` is OpenRouter's
+// meta-model that auto-routes each request to an available free model whose
+// provider supports the requested capabilities (incl. tool calling) — OpenRouter
+// does the internal routing and failover for us. So we bind directly to it
+// instead of maintaining our own free-model rotator/eviction for tool roles.
+// (`streamText` in the callers applies its own maxRetries on transient errors.)
+// ──────────────────────────────────────────────────────────────
+const TOOL_PRIMARY = "openrouter/free"
+
+/**
+ * Drop-in AI SDK v5 LanguageModel for tool-calling roles. Delegates model
+ * selection to OpenRouter's `openrouter/free` internal router.
+ */
+export const dynamicFreeToolTextModel = openrouter(TOOL_PRIMARY)

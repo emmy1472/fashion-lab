@@ -1,0 +1,70 @@
+core:
+  - design
+  - diy
+  - fashion
+  - made to measure
+  - library
+  - parametric design
+  - patterns
+  - sewing
+  - sewing patterns
+design:
+  - design
+  - diy
+  - fashion
+  - made to measure
+  - parametric design
+  - pattern
+  - sewing
+  - sewing pattern
+examples:
+  - documentation
+  - example
+  - parametric design
+i18n:
+  - i18n
+  - internationalisation
+  - languages
+  - localisation
+  - translation
+models:
+  - bodies
+  - data
+  - fashion
+  - measurements
+  - sizes
+other:
+  - design
+  - diy
+  - fashion
+  - made to measure
+  - parametric design
+  - sewing
+package:
+  - freesewing
+patterns:
+  - design
+  - diy
+  - fashion
+  - sewing
+  - sewing pattern
+  - parametric design
+  - made to measure
+plugin:
+  - plugin
+  - sewing pattern
+  - sewing
+  - design
+  - parametric design
+  - made to measure
+  - diy
+  - fashion
+core-plugins:
+  - plugin
+  - sewing pattern
+  - sewing
+  - design
+  - parametric design
+  - made to measure
+  - diy
+  - fashion

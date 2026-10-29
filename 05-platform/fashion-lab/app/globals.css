@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+:root {
+  --sidebar-bg: #062D24;
+  --sidebar-hover: #0A3A2F;
+  --sidebar-active: #0E4B3D;
+  --brand-primary: #0E6E55;
+  --brand-primary-hover: #09503E;
+  --brand-accent: #10B981;
+  --brand-light: #ECFDF5;
+  --surface-bg: #F8F9FA;
+  --card-bg: #FFFFFF;
+  --border-subtle: #E5E7EB;
+  --text-primary: #111827;
+  --text-secondary: #4B5563;
+  --text-muted: #9CA3AF;
+  
+  --background: #F8F9FA;
+  --foreground: #111827;
+}
+
+@theme inline {
+  --color-sidebar: var(--sidebar-bg);
+  --color-sidebar-hover: var(--sidebar-hover);
+  --color-sidebar-active: var(--sidebar-active);
+  --color-brand-primary: var(--brand-primary);
+  --color-brand-accent: var(--brand-accent);
+  --color-brand-light: var(--brand-light);
+  --color-surface: var(--surface-bg);
+  --color-card: var(--card-bg);
+  --color-border-subtle: var(--border-subtle);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+}
+
+/* Custom utility colors */
+.bg-sidebar { background-color: var(--sidebar-bg); }
+.bg-sidebar-hover { background-color: var(--sidebar-hover); }
+.bg-sidebar-active { background-color: var(--sidebar-active); }
+.bg-brand-primary { background-color: var(--brand-primary); }
+.bg-brand-primary-hover { background-color: var(--brand-primary-hover); }
+.bg-brand-accent { background-color: var(--brand-accent); }
+.bg-brand-light { background-color: var(--brand-light); }
+.bg-surface { background-color: var(--surface-bg); }
+
+.text-brand-primary { color: var(--brand-primary); }
+.text-brand-accent { color: var(--brand-accent); }
+.text-sidebar { color: var(--sidebar-bg); }
+
+.border-brand-primary { border-color: var(--brand-primary); }
+.border-subtle { border-color: var(--border-subtle); }
+
+body {
+  background-color: var(--surface-bg);
+  color: var(--text-primary);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom Scrollbar for sidebar and studio panels */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(14, 110, 85, 0.2);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(14, 110, 85, 0.4);
+}

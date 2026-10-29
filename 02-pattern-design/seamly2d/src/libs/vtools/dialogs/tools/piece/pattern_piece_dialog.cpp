@@ -1,0 +1,3820 @@
+//---------------------------------------------------------------------------------------------------------------------
+//  @file   pattern_piece_dialog.cpp
+//  @author Douglas S Caskey
+//  @date   17 Sep, 2023
+//
+//  @copyright
+//  Copyright (C) 2017 - 2026 Seamly, LLC
+//  https://github.com/fashionfreedom/seamly2d
+//
+//  @brief
+//  Seamly2D is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Seamly2D is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Seamly2D. if not, see <http://www.gnu.org/licenses/>.
+//---------------------------------------------------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------------------------------------------------
+//  @file   seamallowance.cpp
+//  @author Roman Telezhynskyi <dismine(at)gmail.com>
+//  @date   3 11, 2016
+//
+//  @brief
+//  @copyright
+//  This source code is part of the Valentina project, a pattern making
+//  program, whose allow create and modeling patterns of clothing.
+//  Copyright (C) 2016 Valentina project
+//  <https://bitbucket.org/dismine/valentina> All Rights Reserved.
+//
+//  Valentina is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Valentina is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with Valentina.  if not, see <http://www.gnu.org/licenses/>.
+//---------------------------------------------------------------------------------------------------------------------
+
+#include "pattern_piece_dialog.h"
+#include "ui_pattern_piece_dialog.h"
+
+#include "internal_path_dialog.h"
+#include "vpointf.h"
+#include "visualization/path/pieceanchorpoint_visual.h"
+#include "visualization/path/pattern_piece_visual.h"
+#include "../ifc/xml/vlabeltemplateconverter.h"
+#include "../vformat/vlabeltemplate.h"
+#include "../vmisc/logging.h"
+#include "../vmisc/vcommonsettings.h"
+#include "../vpatterndb/calculator.h"
+#include "../vpatterndb/vpiecenode.h"
+#include "../vpatterndb/vpiecepath.h"
+#include "../../support/edit_formula_dialog.h"
+#include "../../support/editlabeltemplate_dialog.h"
+#include "../../../tools/pattern_piece_tool.h"
+#include "../../../undocommands/savepiecepathoptions.h"
+
+#include <QColorDialog>
+#include <QFileInfo>
+#include <QLabel>
+#include <QLayoutItem>
+#include <QGuiApplication>
+#include <QKeyEvent>
+#include <QMenu>
+#include <QPixmap>
+#include <QScreen>
+#include <QtDebug>
+#include <QSoundEffect>
+#include <QTimer>
+#include <QtNumeric>
+
+Q_LOGGING_CATEGORY(pattern_piece_dialog, "pattern_piece_dialog")
+
+namespace
+{
+//---------------------------------------------------------------------------------------------------------------------
+void enableDefaultButton(QPushButton *defButton, const QString &formula)
+{
+    SCASSERT(defButton != nullptr)
+
+    if (formula != currentSeamAllowance)
+    {
+        defButton->setEnabled(true);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString getFormulaFromUser(QPlainTextEdit *textEdit)
+{
+    SCASSERT(textEdit != nullptr)
+
+    QString formula = textEdit->toPlainText();
+    formula.replace("\n", " ");
+    return qApp->translateVariables()->TryFormulaFromUser(formula, qApp->Settings()->getOsSeparator());
+}
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+PatternPieceDialog::PatternPieceDialog(const VContainer *data, const quint32 &toolId, QWidget *parent)
+    : DialogTool(data, toolId, parent)
+    , ui(new Ui::PatternPieceDialog)
+    , applyAllowed(false)// By default disabled
+    , flagGrainlineAnchor(true)
+    , flagGrainlineArrow(true)
+    , flagPieceLabelAnchor(true)
+    , flagPatternLabelAnchor(true)
+    , flagGrainlineFormula(true)
+    , flagPieceLabelAngle(true)
+    , flagPieceLabelFormula(true)
+    , flagPatternLabelAngle(true)
+    , flagPatternLabelFormula(true)
+    , flagBeforeFormula(true)
+    , flagAfterFormula(true)
+    , flagMainPath(true)
+    , m_bAddMode(true)
+    , m_mx(0)
+    , m_my(0)
+    , m_inLayout(true)
+    , m_isLocked(false)
+    , m_dialog()
+    , m_anchorPoints()
+    , m_oldData()
+    , m_oldGeom()
+    , m_oldGrainline()
+    , m_timerWidth(nullptr)
+    , m_timerWidthBefore(nullptr)
+    , m_timerWidthAfter(nullptr)
+    , m_saWidth(0)
+    , m_patternLabelLines()
+    , m_pieceLabelLines()
+    , m_beep(new QSoundEffect())
+    , m_undoStack()
+{
+    m_beep->setSource(QUrl(qApp->Settings()->getSelectionSound()));
+
+    ui->setupUi(this);
+    setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+    setWindowIcon(QIcon(":/toolicon/32x32/new_piece.png"));
+
+    // Set the position that the dialog opens based on user preference.
+    setDialogPosition();
+
+    //Limit dialog height to 80% of screen size
+    setMaximumHeight(qRound(QGuiApplication::primaryScreen()->availableGeometry().height() * .8));
+
+    initializeOkCancelApply(ui);
+    enableApply(applyAllowed);
+
+    initializeMainPathTab();
+    initializeSeamAllowanceTab();
+    initializeInternalPathsTab();
+    initializePropertiesTab();
+    initializeLabelsTab();
+    initializeGrainlineTab();
+    initializeAnchorsTab();
+    initializeNotchesTab();
+
+    flagName = true;
+    ChangeColor(ui->editName_Label, okColor);
+    flagMainPath = isMainPathValid();
+    CheckState();
+
+    if (!applyAllowed && vis.isNull())
+    {
+        vis = new PatternPieceVisual(data);
+    }
+
+    // Always show Properties page on start.
+    ui->pages_StackedWidget->setCurrentIndex(TabOrder::Properties);
+    ui->menuTab_ListWidget->setCurrentRow(TabOrder::Properties);
+
+    connect(ui->menuTab_ListWidget, &QListWidget::currentItemChanged, this, &PatternPieceDialog::pageChanged);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+PatternPieceDialog::~PatternPieceDialog()
+{
+    delete m_anchorPoints;
+    delete m_beep;
+    delete ui;
+
+    for (auto &command : m_undoStack)
+    {
+        if (!command.isNull())
+        {
+            delete command;
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::pageChanged(QListWidgetItem *current, QListWidgetItem *previous)
+{
+    if (current == nullptr)
+    {
+        current = previous;
+    }
+    int rowIndex = ui->menuTab_ListWidget->row(current);
+    ui->pages_StackedWidget->setCurrentIndex(rowIndex);
+
+    if (rowIndex == TabOrder::Labels || rowIndex == TabOrder::AnchorPoints || rowIndex == TabOrder::Grainline)
+    {
+        showAnchorPoints();
+    }
+    else
+    {
+        if (!m_anchorPoints.isNull())
+        {
+            delete m_anchorPoints;
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::enableApply(bool enable)
+{
+    SCASSERT(apply_Button != nullptr);
+    apply_Button->setEnabled(enable);
+    applyAllowed = enable;
+
+    ui->internalPaths_Tab->setEnabled(applyAllowed);
+    if (applyAllowed == true)
+    {
+        qCDebug(pattern_piece_dialog, "PatternPieceDialog applyAllowed = True");
+        for (int i = TabOrder::SeamAllowance; i < TabOrder::Count; ++i)
+        {
+            auto flags = ui->menuTab_ListWidget->item(i)->flags();
+            ui->menuTab_ListWidget->item(i)->setFlags(flags | Qt::ItemIsEnabled);
+        }
+      }
+    else
+    {
+        qCDebug(pattern_piece_dialog, "PatternPieceDialog applyAllowed = False");
+        for (int i = TabOrder::SeamAllowance; i < TabOrder::Count; ++i)
+        {
+            auto flags = ui->menuTab_ListWidget->item(i)->flags();
+            ui->menuTab_ListWidget->item(i)->setFlags(flags & ~Qt::ItemIsEnabled);
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+VPiece PatternPieceDialog::GetPiece() const
+{
+    return CreatePiece();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::SetPiece(const VPiece &piece)
+{
+    ui->mainPath_ListWidget->clear();
+    for (int i = 0; i < piece.GetPath().nodeCount(); ++i)
+    {
+        newMainPathItem(piece.GetPath().at(i));
+    }
+
+    ui->hideSeamLine_CheckBox->setChecked(piece.isHideSeamLine());
+    ui->customSeamAllowance_ListWidget->blockSignals(true);
+    ui->customSeamAllowance_ListWidget->clear();
+    for (int i = 0; i < piece.getCustomSARecords().size(); ++i)
+    {
+        newCustomSeamAllowance(piece.getCustomSARecords().at(i));
+    }
+    ui->customSeamAllowance_ListWidget->blockSignals(false);
+
+    ui->internalPaths_ListWidget->clear();
+    for (int i = 0; i < piece.getInternalPaths().size(); ++i)
+    {
+        newInternalPath(piece.getInternalPaths().at(i));
+    }
+
+    ui->anchorPoints_ListWidget->clear();
+    for (int i = 0; i < piece.getAnchors().size(); ++i)
+    {
+        newAnchorPoint(piece.getAnchors().at(i));
+    }
+
+    initAnchorPointComboboxes();
+
+    ui->startPoint_ComboBox->blockSignals(true);
+    ui->startPoint_ComboBox->clear();
+    ui->startPoint_ComboBox->blockSignals(false);
+
+    ui->endPoint_ComboBox->blockSignals(true);
+    ui->endPoint_ComboBox->clear();
+    ui->endPoint_ComboBox->blockSignals(false);
+
+    customSeamAllowanceChanged(0);
+
+    ui->forbidFlipping_CheckBox->setChecked(piece.IsForbidFlipping());
+    ui->seams_CheckBox->setChecked(piece.hasSeamAllowance());
+    ui->builtIn_CheckBox->setChecked(piece.hasSeamAllowanceBuiltIn());
+    ui->pieceName_LineEdit->setText(piece.GetName());
+    setPieceColor(piece.getColor());
+    setPieceFill(piece.getFill());
+    setInLayout(piece.isInLayout());
+    setPieceLock(piece.isLocked());
+
+    const QString width = qApp->translateVariables()->FormulaToUser(piece.getSeamAllowanceWidthFormula(), qApp->Settings()->getOsSeparator());
+    ui->widthFormula_PlainTextEdit->setPlainText(width);
+    m_saWidth = piece.GetSAWidth();
+
+    m_mx = piece.GetMx();
+    m_my = piece.GetMy();
+
+    m_oldData = piece.GetPatternPieceData();
+    ui->letter_LineEdit->setText(m_oldData.GetLetter());
+    ui->annotation_LineEdit->setText(m_oldData.GetAnnotation());
+    ui->orientation_ComboBox->setCurrentText(m_oldData.GetOrientation());
+    ui->rotation_ComboBox->setCurrentText(m_oldData.getRotationWay());
+    ui->tilt_ComboBox->setCurrentText(m_oldData.GetTilt());
+    ui->foldPosition_ComboBox->setCurrentText(m_oldData.GetFoldPosition());
+
+    ui->quantity_SpinBox->setValue(m_oldData.GetQuantity());
+    ui->fold_CheckBox->setChecked(m_oldData.IsOnFold());
+    m_pieceLabelLines = m_oldData.GetLabelTemplate();
+
+    ui->arrow_ComboBox->setCurrentIndex(int(piece.GetGrainlineGeometry().getArrowType()));
+
+    ui->pieceLabel_GroupBox->setChecked(m_oldData.IsVisible());
+    changeCurrentData(ui->pieceLabelCenterAnchor_ComboBox, m_oldData.centerAnchorPoint());
+    changeCurrentData(ui->pieceLabelTopLeftAnchor_ComboBox, m_oldData.topLeftAnchorPoint());
+    changeCurrentData(ui->pieceLabelBottomRightAnchor_ComboBox, m_oldData.bottomRightAnchorPoint());
+    setPieceLabelWidth(m_oldData.GetLabelWidth());
+    setPieceLabelHeight(m_oldData.GetLabelHeight());
+    setPieceLabelAngle(m_oldData.getRotation());
+
+    m_oldGeom = piece.GetPatternInfo();
+    ui->patternLabel_GroupBox->setChecked(m_oldGeom.IsVisible());
+    changeCurrentData(ui->patternLabelCenterAnchor_ComboBox, m_oldGeom.centerAnchorPoint());
+    changeCurrentData(ui->patternLabelTopLeftAnchor_ComboBox, m_oldGeom.topLeftAnchorPoint());
+    changeCurrentData(ui->patternLabelBottomRightAnchor_ComboBox, m_oldGeom.bottomRightAnchorPoint());
+    setPatternLabelWidth(m_oldGeom.GetLabelWidth());
+    setPatternLabelHeight(m_oldGeom.GetLabelHeight());
+    setPatternLabelAngle(m_oldGeom.getRotation());
+
+    m_oldGrainline = piece.GetGrainlineGeometry();
+    ui->showGrainline_CheckBox->setChecked(m_oldGrainline.IsVisible());
+    ui->anchorPoints_GroupBox->setEnabled(m_oldGrainline.IsVisible());
+    ui->arrows_GroupBox->setEnabled(m_oldGrainline.IsVisible());
+    changeCurrentData(ui->grainlineCenterAnchor_ComboBox, m_oldGrainline.centerAnchorPoint());
+    changeCurrentData(ui->grainlineTopAnchor_ComboBox, m_oldGrainline.topAnchorPoint());
+    changeCurrentData(ui->grainlineBottomAnchor_ComboBox, m_oldGrainline.bottomAnchorPoint());
+    setGrainlineAngle(m_oldGrainline.getRotation());
+    setGrainlineLength(m_oldGrainline.getLength());
+    setGrainlineArrowLength(m_oldGrainline.getArrowLength());
+
+    validateObjects(isMainPathValid());
+    enabledGrainline();
+    enabledPieceLabel();
+    enabledPatternLabel();
+
+    nodeListChanged();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief ChosenObject adds selected object of id and type to list of path items.
+/// @param id id of object (points, arcs, splines, spline paths)
+/// @param type type of scene object
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::ChosenObject(quint32 id, const SceneObject &type)
+{
+    if (!prepare)
+    {
+        bool reverse = false;
+        const QSharedPointer<VGObject> obj = data->GetGObject(id);
+        const GOType objType = static_cast<GOType>(obj->getType());
+        quint32 previousId = getPreviousId();
+
+        if (objType != GOType::Point && objType != GOType::Unknown)
+        {
+            if (QGuiApplication::keyboardModifiers() == Qt::ShiftModifier)
+            {
+                reverse = true;
+            }
+            else if (QGuiApplication::keyboardModifiers() == Qt::ControlModifier)
+            {
+                reverse = false;
+            }
+            else if (previousId == NULL_ID)
+            {
+                reverse = false;
+            }
+            else if (previousId != NULL_ID)
+            {
+                QPointF previousPoint;
+                const QSharedPointer<VGObject> previousObj = data->GetGObject(previousId);
+                const GOType previousObjType = static_cast<GOType>(previousObj->getType());
+                if (previousObjType == GOType::Point)
+                {
+                    previousPoint = static_cast<QPointF>(*data->GeometricObject<VPointF>(previousId));
+                }
+                else
+                {
+                    const QSharedPointer<VAbstractCurve> curve = data->GeometricObject<VAbstractCurve>(previousId);
+                    getLastNode().GetReverse() ? previousPoint = curve->getFirstPoint()
+                                               : previousPoint = curve->getLastPoint();
+                }
+
+                const QSharedPointer<VAbstractCurve> curve = data->GeometricObject<VAbstractCurve>(id);
+                if (curve->isPointOnCurve(previousPoint) &&
+                    curve->getFirstPoint() != previousPoint &&
+                    curve->getLastPoint() != previousPoint)
+                {
+                    QList<QListWidgetItem *> items = ui->mainPath_ListWidget->findItems(curve->name(),
+                                                                                        Qt::MatchContains);
+
+                    if (!items.isEmpty())
+                    {
+                        VPieceNode rowNode = qvariant_cast<VPieceNode>(items[0]->data(Qt::UserRole));
+                        reverse = rowNode.GetReverse();
+                    }
+                }
+                else if (curve->getFirstPoint() != previousPoint)
+                {
+                    reverse = true;
+                }
+            }
+            else
+            {
+                QVector<QPointF> points = CreatePiece().mainPathPoints(data);
+                const QSharedPointer<VAbstractCurve> curve = data->GeometricObject<VAbstractCurve>(id);
+                QVector<QPointF> curvePoints = curve->getPoints();
+                points.append(curvePoints);
+                reverse = !VPiece::isClockwise(points);
+            }
+        }
+
+        if (id != previousId)
+        {
+            switch (type)
+            {
+                case SceneObject::Arc:
+                    newMainPathItem(VPieceNode(id, Tool::NodeArc, reverse));
+                    m_beep->play();
+                    break;
+                case SceneObject::ElArc:
+                    newMainPathItem(VPieceNode(id, Tool::NodeElArc, reverse));
+                    m_beep->play();
+                    break;
+                case SceneObject::Point:
+                    newMainPathItem(VPieceNode(id, Tool::NodePoint));
+                    m_beep->play();
+                    break;
+                case SceneObject::Spline:
+                    newMainPathItem(VPieceNode(id, Tool::NodeSpline, reverse));
+                    m_beep->play();
+                    break;
+                case SceneObject::SplinePath:
+                    newMainPathItem(VPieceNode(id, Tool::NodeSplinePath, reverse));
+                    m_beep->play();
+                    break;
+                case (SceneObject::Line):
+                case (SceneObject::Piece):
+                case (SceneObject::Unknown):
+                default:
+                    qWarning() << "Invalid scene object. Ignore.";
+                    break;
+            }
+        }
+        else
+        {
+            if (ui->mainPath_ListWidget->count() > 1)
+            {
+                QApplication::beep();
+                delete getItemById(id);
+            }
+        }
+
+        validateObjects(isMainPathValid());
+
+        if (!applyAllowed)
+        {
+            auto visPath = qobject_cast<PatternPieceVisual *>(vis);
+            SCASSERT(visPath != nullptr);
+            const VPiece p = CreatePiece();
+            visPath->SetPiece(p);
+
+            if (p.GetPath().nodeCount() == 1)
+            {
+                emit ToolTip(tr("Select main path objects clockwise, Use <b>SHIFT</b> to reverse curve direction, "
+                                "or <b>CTRL</b> to keep curve direction."));
+
+                if (!qApp->getCurrentScene()->items().contains(visPath))
+                {
+                    visPath->VisualMode(NULL_ID);
+                }
+                else
+                {
+                    visPath->RefreshGeometry();
+                }
+            }
+            else
+            {
+                emit ToolTip(tr("Press <b>ENTER</b> to finish piece creation."));
+                visPath->RefreshGeometry();
+            }
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::ShowDialog(bool click)
+{
+    if (click == false)
+    {
+        emit ToolTip("");
+        prepare = true;
+
+        if (!applyAllowed)
+        {
+            auto visPath = qobject_cast<PatternPieceVisual *>(vis);
+            SCASSERT(visPath != nullptr);
+            visPath->SetMode(Mode::Show);
+            visPath->RefreshGeometry();
+        }
+
+        // Fix issue #526. Dialog Detail is not on top after selection second object on Mac.
+        setWindowFlags(windowFlags() | Qt::WindowStaysOnTopHint);
+        show();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::SaveData()
+{}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::CheckState()
+{
+    SCASSERT(ok_Button != nullptr);
+    SCASSERT(apply_Button != nullptr);
+    ok_Button->setEnabled(flagName
+                    && flagFormula
+                    && flagMainPath
+                    && flagGrainlineArrow && (flagGrainlineFormula || flagGrainlineAnchor)
+                    && flagPieceLabelAngle && (flagPieceLabelFormula || flagPieceLabelAnchor)
+                    && flagPatternLabelAngle && (flagPatternLabelFormula || flagPatternLabelAnchor));
+
+    if (applyAllowed)
+    {
+        ok_Button->setEnabled(ok_Button->isEnabled() && flagBeforeFormula && flagAfterFormula);
+        apply_Button->setEnabled(ok_Button->isEnabled()); // In case dialog does not have an apply button
+    }
+
+    if (flagFormula && flagBeforeFormula && flagAfterFormula)
+    {
+        clearErrorText(TabOrder::SeamAllowance, tr("Seam Allowance "));
+    }
+    else
+    {
+        setErrorText(TabOrder::SeamAllowance, tr("Seam Allowance"));
+    }
+
+    if (flagMainPath)
+    {
+        clearErrorText(TabOrder::Paths, tr("Paths "));
+        QString tooltip = tr("Ready!");
+        if (!applyAllowed)
+        {
+            tooltip = tooltip + QLatin1String("  <b>") +
+                    tr("Press OK to create pattern piece") + QLatin1String("</b>");
+        }
+        ui->status_Label->setText(tooltip);
+    }
+    else
+    {
+        setErrorText(TabOrder::Paths, tr("Paths"));
+    }
+
+}
+
+void PatternPieceDialog::setErrorText(TabOrder tab, QString text)
+{
+    ui->menuTab_ListWidget->item(tab)->setText(text + QLatin1String("*"));
+}
+
+void PatternPieceDialog::clearErrorText(TabOrder tab, QString text)
+{
+    ui->menuTab_ListWidget->item(tab)->setText(text);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief Filters keyboard event to check if the a key was pressed.
+/// @param object QObject that sent the event.
+/// @param event QEvent.
+/// @return if the node list was the sending object:
+///         True if the key(s) pressed makes up a shortcut sequence of a context menu item.
+///         False if any other key.
+///         if event sent by an object other than the main path list widget pass the event on to the parent.
+//---------------------------------------------------------------------------------------------------------------------
+bool PatternPieceDialog::eventFilter(QObject *object, QEvent *event)
+{
+    if (QListWidget *list = qobject_cast<QListWidget *>(object))
+    {
+        if (event->type() == QEvent::KeyPress)
+        {
+            const int row = ui->mainPath_ListWidget->currentRow();
+            if (ui->mainPath_ListWidget->count() <= 0 || row < 0 || row >= ui->mainPath_ListWidget->count())
+            {
+                return false;
+            }
+            QListWidgetItem *rowItem = list->item(row);
+            SCASSERT(rowItem != nullptr);
+
+            QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
+
+            switch (keyEvent->key())
+            {
+                case Qt::Key_Up:
+                case Qt::Key_Down:
+                case Qt::Key_Left:
+                case Qt::Key_Right:
+                case Qt::Key_Home:
+                case Qt::Key_End:
+                case Qt::Key_PageUp:
+                case Qt::Key_PageDown:
+                    return false; // let the list widget handle navigation and range selection
+                default:
+                    break;
+            }
+            if (keyEvent->matches(QKeySequence::SelectAll))
+            {
+                return false; // let the list widget handle select all
+            }
+
+            if (keyEvent->key() == Qt::Key_Delete)
+            {
+                qDeleteAll(selectedRowItems(list, rowItem)); // deleting an item also removes it from the list
+                validateObjects(isMainPathValid());
+                nodeListChanged();
+                return true; // items are gone - do not fall through
+            }
+            if (keyEvent->modifiers() & Qt::ControlModifier)
+            {
+                const QList<QListWidgetItem *> items = selectedRowItems(list, rowItem);
+                const VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+
+                switch (keyEvent->key())
+                {
+                    case Qt::Key_R:
+                    {
+                        if (rowNode.GetTypeTool() != Tool::NodePoint) // a point cannot anchor the reverse state
+                        {
+                            const bool reverse = !rowNode.GetReverse();
+                            for (QListWidgetItem *item : items)
+                            {
+                                reverseNode(item, reverse); // skips point nodes
+                            }
+                        }
+                        break;
+                    }
+                    case Qt::Key_D:
+                    {
+                        for (QListWidgetItem *item : items)
+                        {
+                            duplicateNode(item); // skips point nodes
+                        }
+                        break;
+                    }
+                    case Qt::Key_E:
+                    {
+                        const bool exclude = !rowNode.isExcluded();
+                        for (QListWidgetItem *item : items)
+                        {
+                            excludeNode(item, exclude);
+                        }
+                        break;
+                    }
+                }
+            }
+            else if (keyEvent->modifiers() & Qt::ShiftModifier)
+            {
+                const QList<QListWidgetItem *> items = selectedRowItems(list, rowItem);
+                for (QListWidgetItem *item : items)
+                {
+                    VPieceNode node = qvariant_cast<VPieceNode>(item->data(Qt::UserRole));
+                    if (node.GetTypeTool() != Tool::NodePoint)
+                    {
+                        continue;
+                    }
+
+                    bool showCutline          = node.showNotch();
+                    bool showSeamline         = node.showSeamlineNotch();
+                    NotchType notchType       = node.getNotchType();
+                    NotchSubType notchSubType = node.getNotchSubType();
+                    qreal notchLength         = node.getNotchLength();
+                    qreal notchWidth          = node.getNotchWidth();
+                    int notchCount            = node.getNotchCount();
+
+                    switch (keyEvent->key())
+                    {
+                        case Qt::Key_S:
+                            notchType = NotchType::Slit;
+                            break;
+                        case Qt::Key_T:
+                            notchType = NotchType::TNotch;
+                            break;
+                        case Qt::Key_U:
+                            notchType = NotchType::UNotch;
+                            break;
+                        case Qt::Key_I:
+                            notchType = NotchType::VInternal;
+                            break;
+                        case Qt::Key_E:
+                            notchType = NotchType::VExternal;
+                            break;
+                        case Qt::Key_C:
+                            notchType = NotchType::Castle;
+                            break;
+                        case Qt::Key_D:
+                            notchType = NotchType::Diamond;
+                            break;
+                        case Qt::Key_F:
+                            notchSubType = NotchSubType::Straightforward;
+                            break;
+                        case Qt::Key_B:
+                            notchSubType = NotchSubType::Bisector;
+                            break;
+                        case Qt::Key_X:
+                            notchSubType = NotchSubType::Intersection;
+                            break;
+                        default:
+                            continue; // not a notch shortcut
+                    }
+
+                    setNotch(item, true, showCutline, showSeamline, notchType,
+                             notchSubType, notchLength, notchWidth, notchCount);
+                }
+            }
+            validateObjects(isMainPathValid());
+            nodeListChanged();
+            return true;
+        }
+    }
+    else
+    {
+        return DialogTool::eventFilter(object, event);  // pass the event on to the parent class
+    }
+    return false; // pass the event to the widget
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::closeEvent(QCloseEvent *event)
+{
+    ui->widthFormula_PlainTextEdit->blockSignals(true);
+    ui->beforeWidthFormula_PlainTextEdit->blockSignals(true);
+    ui->afterWidthFormula_PlainTextEdit->blockSignals(true);
+    ui->rotationFormula_LineEdit->blockSignals(true);
+    ui->lengthFormula_LineEdit->blockSignals(true);
+    ui->arrowlLengthFormula_LineEdit->blockSignals(true);
+    DialogTool::closeEvent(event);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::showEvent(QShowEvent *event)
+{
+    QDialog::showEvent(event);
+    if (isInitialized || event->spontaneous())
+    {
+        return;
+    }
+
+    const QSize size = qApp->Settings()->getPatternPieceDialogSize();
+    if (!size.isEmpty())
+    {
+        resize(size);
+    }
+
+    isInitialized = true;//first show windows are held
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::resizeEvent(QResizeEvent *event)
+{
+    // Remember the size for the next time this dialog is opened, but only
+    // if the dialog was already initialized.
+    if (isInitialized)
+    {
+        qApp->Settings()->setPatternPieceDialogSize(size());
+    }
+    DialogTool::resizeEvent(event);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::pieceNameChanged()
+{
+    QLineEdit *name = qobject_cast<QLineEdit*>(sender());
+    if (name)
+    {
+        if (name->text().isEmpty())
+        {
+            flagName = false;
+            ChangeColor(ui->editName_Label, Qt::red);
+            setErrorText(TabOrder::Properties, tr("Properties"));
+        }
+        else
+        {
+            flagName = true;
+            ChangeColor(ui->editName_Label, okColor);
+            clearErrorText(TabOrder::Properties, tr("Properties "));
+        }
+    }
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::pieceColorChanged()
+{
+    const QColor color = QColorDialog::getColor(Qt::white, this, tr("Select Color"),
+                                                qApp->Settings()->getUseNativeColorDialogs());
+
+    if (color.isValid())
+    {
+        ui->color_Label->setText(color.name());
+        ui->color_Label->setPalette(QPalette(color));
+        CheckState();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::showMainPathContextMenu(const QPoint &pos)
+{
+    const int row = ui->mainPath_ListWidget->currentRow();
+    if (ui->mainPath_ListWidget->count() == 0 || row == -1 || row >= ui->mainPath_ListWidget->count())
+    {
+        return;
+    }
+
+    const VPiece piece = CreatePiece();
+    bool isBuiltInSA    = piece.hasSeamAllowanceBuiltIn();
+    bool isHideSeamline = piece.isHideSeamLine();
+
+    QListWidgetItem *rowItem = ui->mainPath_ListWidget->item(row);
+    SCASSERT(rowItem != nullptr);
+    VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+
+    // Create a state-aware icon
+    QIcon checkIcon;
+    // Icons used when the item is checked or NOT checked
+    checkIcon.addFile("://icon/32x32/visible_off.png", QSize(), QIcon::Normal, QIcon::Off);
+    checkIcon.addFile("://icon/32x32/visible_on.png", QSize(), QIcon::Normal, QIcon::On);
+
+    // Icons used when the item IS disabled
+    checkIcon.addFile("://icon/32x32/visible_hover.png", QSize(), QIcon::Disabled, QIcon::On);
+    checkIcon.addFile("://icon/32x32/visible_hover.png", QSize(), QIcon::Disabled, QIcon::Off);
+
+
+    // workaround for https://bugreports.qt.io/browse/QTBUG-97559: assign parent to QMenu
+    QScopedPointer<QMenu> menu(new QMenu(ui->mainPath_ListWidget));
+
+    QAction *actionShowCutNotch   = nullptr;
+    QAction *actionShowSeamNotch  = nullptr;
+
+    QAction *actionDefaultNotch = nullptr;
+    QAction *actionRemoveNotch  = nullptr;
+
+    QAction *actionNotch        = nullptr;
+    QAction *actionSlit         = nullptr;
+    QAction *actionTNotch       = nullptr;
+    QAction *actionUNotch       = nullptr;
+    QAction *actionVInternal    = nullptr;
+    QAction *actionVExternal    = nullptr;
+    QAction *actionCastle       = nullptr;
+    QAction *actionDiamond      = nullptr;
+
+    QAction *actionStraightforward = nullptr;
+    QAction *actionBisector        = nullptr;
+    QAction *actionIntersection    = nullptr;
+
+    QAction *action1Notch = nullptr;
+    QAction *action2Notch = nullptr;
+    QAction *action3Notch = nullptr;
+
+    QAction *actionReverse   = nullptr;
+    QAction *actionDuplicate = nullptr;
+
+    if (rowNode.GetTypeTool() != Tool::NodePoint)
+    {
+        actionReverse = menu->addAction(tr("Reverse") + QStringLiteral("\tCtrl + R"));
+        actionReverse->setCheckable(true);
+        actionReverse->setChecked(rowNode.GetReverse());
+
+        actionDuplicate = menu->addAction(tr("Duplicate") + QStringLiteral("\tCtrl + D"));
+    }
+    else
+    {
+        actionShowCutNotch = menu->addAction(checkIcon, tr("Show Cut Line Notch"));
+        actionShowCutNotch->setCheckable(true);
+        actionShowCutNotch->setChecked(rowNode.showNotch() && rowNode.isNotch());
+        actionShowCutNotch->setEnabled(rowNode.isNotch());
+
+        actionShowSeamNotch = menu->addAction(checkIcon, tr("Show Seam Line Notch"));
+        actionShowSeamNotch->setCheckable(true);
+        actionShowSeamNotch->setChecked(rowNode.showSeamlineNotch() && rowNode.isNotch());
+        actionShowSeamNotch->setEnabled(rowNode.isNotch() && !isBuiltInSA && !isHideSeamline);
+
+        actionDefaultNotch = menu->addAction(tr("Make Default Notch"));
+
+        QMenu *notchMenu = menu->addMenu(tr("Edit Notch"));
+        actionNotch = notchMenu->menuAction();
+        notchMenu->setEnabled(rowNode.isNotch());
+
+        QMenu *notchTypeMenu = notchMenu->addMenu(tr("Type"));
+        actionSlit      = notchTypeMenu->addAction(QIcon("://icon/24x24/slit_notch.png"),       tr("Slit") + QStringLiteral("\tShift + S"));
+        actionTNotch    = notchTypeMenu->addAction(QIcon("://icon/24x24/t_notch.png"),          tr("TNotch") + QStringLiteral("\tShift + T"));
+        actionUNotch    = notchTypeMenu->addAction(QIcon("://icon/24x24/u_notch.png"),          tr("UNotch") + QStringLiteral("\tShift + U"));
+        actionVInternal = notchTypeMenu->addAction(QIcon("://icon/24x24/internal_v_notch.png"), tr("VInternal") + QStringLiteral("\tShift + I"));
+        actionVExternal = notchTypeMenu->addAction(QIcon("://icon/24x24/external_v_notch.png"), tr("VExternal") + QStringLiteral("\tShift + E"));
+        actionCastle    = notchTypeMenu->addAction(QIcon("://icon/24x24/castle_notch.png"),     tr("Castle") + QStringLiteral("\tShift + C"));
+        actionDiamond   = notchTypeMenu->addAction(QIcon("://icon/24x24/diamond_notch.png"),    tr("Diamond") + QStringLiteral("\tShift + D"));
+
+        QMenu *notchSubtypeMenu = notchMenu->addMenu(tr("Subtype"));
+        actionStraightforward = notchSubtypeMenu->addAction(QIcon(), tr("Straightforward") + QStringLiteral("\tShift + F"));
+        actionBisector        = notchSubtypeMenu->addAction(QIcon(), tr("Bisector") + QStringLiteral("\tShift + B"));
+        actionIntersection    = notchSubtypeMenu->addAction(QIcon(), tr("Intersection") + QStringLiteral("\tShift + X"));
+
+        QMenu *notchCountMenu = notchMenu->addMenu(tr("Count"));
+        action1Notch = notchCountMenu->addAction(QIcon(), QStringLiteral("1"));
+        action2Notch = notchCountMenu->addAction(QIcon(), QStringLiteral("2"));
+        action3Notch = notchCountMenu->addAction(QIcon(), QStringLiteral("3"));
+
+        actionRemoveNotch = menu->addAction(tr("Remove Notch"));
+
+        QAction *separator = new QAction(this);
+        separator->setSeparator(true);
+        menu->addAction(separator);
+    }
+
+    QAction *actionExcluded = menu->addAction(tr("Excluded") + QStringLiteral("\tCtrl + E"));
+    actionExcluded->setCheckable(true);
+    actionExcluded->setChecked(rowNode.isExcluded());
+
+    QAction *actionDelete = menu->addAction(QIcon::fromTheme("edit-delete"), tr("Delete") + QStringLiteral("\tDel"));
+
+    QAction *selectedAction = menu->exec(ui->mainPath_ListWidget->viewport()->mapToGlobal(pos));
+    if (selectedAction == nullptr)
+    {
+        return; // menu dismissed - on curve rows the notch actions are null and would falsely match below
+    }
+
+    const QList<QListWidgetItem *> items = selectedRowItems(ui->mainPath_ListWidget, rowItem);
+
+    if (selectedAction == actionDelete)
+    {
+        qDeleteAll(items); // deleting an item also removes it from the list
+        validateObjects(isMainPathValid());
+        nodeListChanged();
+        return; // items are gone - do not fall through
+    }
+    else if (rowNode.GetTypeTool() != Tool::NodePoint && selectedAction == actionReverse)
+    {
+        const bool reverse = !rowNode.GetReverse();
+        for (QListWidgetItem *item : items)
+        {
+            reverseNode(item, reverse); // skips point nodes
+        }
+    }
+    else if (rowNode.GetTypeTool() != Tool::NodePoint && selectedAction == actionDuplicate)
+    {
+        for (QListWidgetItem *item : items)
+        {
+            duplicateNode(item); // skips point nodes
+        }
+    }
+    else if (selectedAction == actionExcluded)
+    {
+        const bool exclude = !rowNode.isExcluded();
+        for (QListWidgetItem *item : items)
+        {
+            excludeNode(item, exclude);
+        }
+    }
+    else // notch actions - apply to every selected point node, keeping its other notch settings
+    {
+        const bool newShowCutline  = !rowNode.showNotch();
+        const bool newShowSeamline = !rowNode.showSeamlineNotch();
+
+        for (QListWidgetItem *item : items)
+        {
+            VPieceNode node = qvariant_cast<VPieceNode>(item->data(Qt::UserRole));
+            if (node.GetTypeTool() != Tool::NodePoint)
+            {
+                continue;
+            }
+
+            NotchType notchType       = node.getNotchType();
+            NotchSubType notchSubType = node.getNotchSubType();
+            qreal notchLength         = node.getNotchLength();
+            qreal notchWidth          = node.getNotchWidth();
+            int notchCount            = node.getNotchCount();
+            bool isNotch              = node.isNotch();
+            bool showCutline          = node.showNotch();
+            bool showSeamline         = node.showSeamlineNotch();
+
+            if (selectedAction == actionShowCutNotch)
+            {
+                if (!isNotch)
+                {
+                    continue; // only meaningful on nodes that have a notch
+                }
+                showCutline = newShowCutline;
+            }
+            else if (selectedAction == actionShowSeamNotch)
+            {
+                if (!isNotch)
+                {
+                    continue;
+                }
+                showSeamline = newShowSeamline;
+            }
+            else if (selectedAction == actionDefaultNotch)
+            {
+                notchType    = stringToNotchType(qApp->Settings()->getDefaultNotchType());
+                notchSubType = NotchSubType::Straightforward;
+                notchLength  = qApp->Settings()->getDefaultNotchLength();
+                notchWidth   = qApp->Settings()->getDefaultNotchWidth();
+                notchCount   = 1;
+                isNotch      = true;
+                showCutline  = qApp->Settings()->showSeamAllowanceNotch();
+                showSeamline = qApp->Settings()->showSeamlineNotch();
+            }
+            else if (selectedAction == actionSlit)
+            {
+                isNotch = true;
+                notchType = NotchType::Slit;
+            }
+            else if (selectedAction == actionTNotch)
+            {
+                isNotch = true;
+                notchType = NotchType::TNotch;
+            }
+            else if (selectedAction == actionUNotch)
+            {
+                isNotch = true;
+                notchType = NotchType::UNotch;
+            }
+            else if (selectedAction == actionVInternal)
+            {
+                isNotch = true;
+                notchType = NotchType::VInternal;
+            }
+            else if (selectedAction == actionVExternal)
+            {
+                isNotch = true;
+                notchType = NotchType::VExternal;
+            }
+            else if (selectedAction == actionCastle)
+            {
+                isNotch = true;
+                notchType = NotchType::Castle;
+            }
+            else if (selectedAction == actionDiamond)
+            {
+                isNotch = true;
+                notchType = NotchType::Diamond;
+            }
+            else if (selectedAction == actionStraightforward)
+            {
+                isNotch = true;
+                notchSubType = NotchSubType::Straightforward;
+            }
+            else if (selectedAction == actionBisector)
+            {
+                isNotch = true;
+                notchSubType = NotchSubType::Bisector;
+            }
+            else if (selectedAction == actionIntersection)
+            {
+                isNotch = true;
+                notchSubType = NotchSubType::Intersection;
+            }
+            else if (selectedAction == action1Notch)
+            {
+                isNotch = true;
+                notchCount = 1;
+            }
+            else if (selectedAction == action2Notch)
+            {
+                isNotch = true;
+                notchCount = 2;
+            }
+            else if (selectedAction == action3Notch)
+            {
+                isNotch = true;
+                notchCount = 3;
+            }
+            else if (selectedAction == actionRemoveNotch)
+            {
+                isNotch      = false;
+                showCutline  = true;
+                showSeamline = true;
+            }
+
+            setNotch(item, isNotch, showCutline, showSeamline, notchType,
+                     notchSubType, notchLength, notchWidth, notchCount);
+        }
+    }
+
+    validateObjects(isMainPathValid());
+    nodeListChanged();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::showCustomSAContextMenu(const QPoint &pos)
+{
+    const int row = ui->customSeamAllowance_ListWidget->currentRow();
+    if (ui->customSeamAllowance_ListWidget->count() == 0 || row == -1 || row >= ui->customSeamAllowance_ListWidget->count())
+    {
+        return;
+    }
+
+    // workaround for https://bugreports.qt.io/browse/QTBUG-97559: assign parent to QMenu
+    QScopedPointer<QMenu> menu(new QMenu(ui->customSeamAllowance_ListWidget));
+    QAction *actionOption = menu->addAction(QIcon::fromTheme("preferences-other"), tr("Options"));
+
+    QListWidgetItem *rowItem = ui->customSeamAllowance_ListWidget->item(row);
+    SCASSERT(rowItem != nullptr);
+    CustomSARecord record = qvariant_cast<CustomSARecord>(rowItem->data(Qt::UserRole));
+
+    QAction *actionReverse = menu->addAction(tr("Reverse"));
+    actionReverse->setCheckable(true);
+    actionReverse->setChecked(record.reverse);
+
+    QAction *actionDelete = menu->addAction(QIcon::fromTheme("edit-delete"), tr("Delete"));
+
+    QAction *selectedAction = menu->exec(ui->customSeamAllowance_ListWidget->viewport()->mapToGlobal(pos));
+    if (selectedAction == actionDelete)
+    {
+        delete ui->customSeamAllowance_ListWidget->item(row);
+    }
+    else if (selectedAction == actionReverse)
+    {
+        record.reverse = !record.reverse;
+        rowItem->setData(Qt::UserRole, QVariant::fromValue(record));
+        rowItem->setText(getPathName(record.path, record.reverse));
+    }
+    else if (selectedAction == actionOption)
+    {
+        auto *dialog = new InternalPathDialog(data, record.path, this);
+        dialog->enableEditMode(true); //must be first to prevent unwanted signals when setting pieceId
+        dialog->setPiecePath(data->getPiecePath(record.path));
+        dialog->setPieceId(toolId);
+        if (record.includeType == PiecePathIncludeType::AsMainPath)
+        {
+            dialog->setSeamAllowanceWidthFormula(getSeamAllowanceWidthFormula());
+        }
+        m_dialog = dialog;
+        connect(m_dialog.data(), &DialogTool::DialogClosed, this, &PatternPieceDialog::pathDialogClosed);
+        m_dialog->show();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::showInternalPathsContextMenu(const QPoint &pos)
+{
+    const int row = ui->internalPaths_ListWidget->currentRow();
+    if (ui->internalPaths_ListWidget->count() == 0 || row == -1
+            || row >= ui->internalPaths_ListWidget->count())
+    {
+        return;
+    }
+
+    // workaround for https://bugreports.qt.io/browse/QTBUG-97559: assign parent to QMenu
+    QScopedPointer<QMenu> menu(new QMenu(ui->internalPaths_ListWidget));
+    QAction *actionOption = menu->addAction(QIcon::fromTheme("preferences-other"), tr("Options"));
+    QAction *actionDelete = menu->addAction(QIcon::fromTheme("edit-delete"), tr("Delete"));
+
+    QAction *selectedAction = menu->exec(ui->internalPaths_ListWidget->viewport()->mapToGlobal(pos));
+    if (selectedAction == actionDelete)
+    {
+        delete ui->internalPaths_ListWidget->item(row);
+    }
+    else if (selectedAction == actionOption)
+    {
+        QListWidgetItem *rowItem = ui->internalPaths_ListWidget->item(row);
+        SCASSERT(rowItem != nullptr);
+        const quint32 pathId = qvariant_cast<quint32>(rowItem->data(Qt::UserRole));
+
+        auto *dialog = new InternalPathDialog(data, pathId, this);
+        dialog->enableEditMode(true); //must be first to prevent unwanted signals when setting pieceId
+        dialog->setPiecePath(data->getPiecePath(pathId));
+        dialog->setPieceId(toolId);
+        m_dialog = dialog;
+        connect(m_dialog.data(), &DialogTool::DialogClosed, this, &PatternPieceDialog::pathDialogClosed);
+        m_dialog->show();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::showAnchorsContextMenu(const QPoint &pos)
+{
+    const int row = ui->anchorPoints_ListWidget->currentRow();
+    if (ui->anchorPoints_ListWidget->count() == 0 || row == -1 || row >= ui->anchorPoints_ListWidget->count())
+    {
+        return;
+    }
+
+    // workaround for https://bugreports.qt.io/browse/QTBUG-97559: assign parent to QMenu
+    QScopedPointer<QMenu> menu(new QMenu(ui->anchorPoints_ListWidget));
+    QAction *actionDelete = menu->addAction(QIcon::fromTheme("edit-delete"), tr("Delete"));
+
+    QAction *selectedAction = menu->exec(ui->anchorPoints_ListWidget->viewport()->mapToGlobal(pos));
+    if (selectedAction == actionDelete)
+    {
+        delete ui->anchorPoints_ListWidget->item(row);
+        initAnchorPointComboboxes();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::nodeListChanged()
+{
+    if (!applyAllowed)
+    {
+        auto visPath = qobject_cast<PatternPieceVisual *>(vis);
+        SCASSERT(visPath != nullptr);
+        visPath->SetPiece(CreatePiece());
+        visPath->RefreshGeometry();
+    }
+    initializeNodesList();
+    initializeNotchesList();
+    customSeamAllowanceChanged(ui->customSeamAllowance_ListWidget->currentRow());
+    setMoveExclusions();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::enableSeamAllowance(bool enable)
+{
+    ui->builtIn_CheckBox->setEnabled(enable);
+    ui->hideSeamLine_CheckBox->setEnabled(enable);
+
+    if (!enable)
+    {
+        ui->autoCustom_TabWidget->setEnabled(enable);
+    }
+    else
+    {
+        emit ui->builtIn_CheckBox->toggled(ui->builtIn_CheckBox->isChecked());
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::enableBuiltIn(bool enable)
+{
+    ui->autoCustom_TabWidget->setEnabled(!enable);
+
+    if (enable)
+    {
+        initializeNodesList();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::nodeChanged(int index)
+{
+    ui->beforeWidthFormula_PlainTextEdit->setDisabled(true);
+    ui->beforeExpr_ToolButton->setDisabled(true);
+    ui->beforeDefault_PushButton->setDisabled(true);
+
+    ui->afterWidthFormula_PlainTextEdit->setDisabled(true);
+    ui->afterExpr_ToolButton->setDisabled(true);
+    ui->afterDefault_PushButton->setDisabled(true);
+
+    ui->angle_ComboBox->setDisabled(true);
+
+    ui->angle_ComboBox->blockSignals(true);
+
+    if (index != -1)
+    {
+        const VPiece piece = CreatePiece();
+        const int nodeIndex = piece.GetPath().indexOfNode(ui->nodes_ComboBox->currentData().toUInt());
+        if (nodeIndex != -1)
+        {
+            const VPieceNode &node = piece.GetPath().at(nodeIndex);
+
+            // Seam allowance before node
+            ui->beforeWidthFormula_PlainTextEdit->setEnabled(true);
+            ui->beforeExpr_ToolButton->setEnabled(true);
+
+            QString w1Formula = node.GetFormulaSABefore();
+            enableDefaultButton(ui->beforeDefault_PushButton, w1Formula);
+            w1Formula = qApp->translateVariables()->FormulaToUser(w1Formula, qApp->Settings()->getOsSeparator());
+
+            ui->beforeWidthFormula_PlainTextEdit->setPlainText(w1Formula);
+
+            // Seam allowance after node
+            ui->afterWidthFormula_PlainTextEdit->setEnabled(true);
+            ui->afterExpr_ToolButton->setEnabled(true);
+
+            QString w2Formula = node.GetFormulaSAAfter();
+            enableDefaultButton(ui->afterDefault_PushButton, w2Formula);
+            w2Formula = qApp->translateVariables()->FormulaToUser(w2Formula, qApp->Settings()->getOsSeparator());
+
+            ui->afterWidthFormula_PlainTextEdit->setPlainText(w2Formula);
+
+            //Angle type
+            ui->angle_ComboBox->setEnabled(true);
+            const int index = ui->angle_ComboBox->findData(static_cast<unsigned char>(node.GetAngleType()));
+            if (index != -1)
+            {
+                ui->angle_ComboBox->setCurrentIndex(index);
+            }
+        }
+    }
+    else
+    {
+        ui->beforeWidthFormula_PlainTextEdit->setPlainText(currentSeamAllowance);
+        ui->afterWidthFormula_PlainTextEdit->setPlainText(currentSeamAllowance);
+        ui->angle_ComboBox->setCurrentIndex(-1);
+    }
+    ui->angle_ComboBox->blockSignals(false);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::notchChanged(int index)
+{
+    ui->slitNotch_RadioButton->setDisabled(true);
+    ui->tNotch_RadioButton->setDisabled(true);
+    ui->uNotch_RadioButton->setDisabled(true);
+    ui->vInternalNotch_RadioButton->setDisabled(true);
+    ui->vExternalNotch_RadioButton->setDisabled(true);
+    ui->castleNotch_RadioButton->setDisabled(true);
+    ui->diamondNotch_RadioButton->setDisabled(true);
+
+    ui->straightforward_RadioButton->setDisabled(true);
+    ui->bisector_RadioButton->setDisabled(true);
+    ui->intersection_RadioButton->setDisabled(true);
+
+    ui->showNotch_CheckBox->setDisabled(true);
+    ui->showNotch_CheckBox->blockSignals(true);
+
+    ui->showSeamlineNotch_CheckBox->setDisabled(true);
+    ui->showSeamlineNotch_CheckBox->blockSignals(true);
+
+    ui->notchType_GroupBox->blockSignals(true);
+    ui->notchSubType_GroupBox->blockSignals(true);
+
+    if (index != -1)
+    {
+        const VPiece piece = CreatePiece();
+        const int nodeIndex = piece.GetPath().indexOfNode(ui->notches_ComboBox->currentData().toUInt());
+        if (nodeIndex != -1)
+        {
+            const VPieceNode &node = piece.GetPath().at(nodeIndex);
+
+            // Notch type
+            ui->slitNotch_RadioButton->setEnabled(true);
+            ui->tNotch_RadioButton->setEnabled(true);
+            ui->uNotch_RadioButton->setEnabled(true);
+            ui->vInternalNotch_RadioButton->setEnabled(true);
+            ui->vExternalNotch_RadioButton->setEnabled(true);
+            ui->castleNotch_RadioButton->setEnabled(true);
+            ui->diamondNotch_RadioButton->setEnabled(true);
+
+            ui->notchAngle_DoubleSpinBox->setEnabled(false);
+
+            switch(node.getNotchType())
+            {
+                case NotchType::Slit:
+                    ui->slitNotch_RadioButton->setChecked(true);
+                    ui->notchAngle_DoubleSpinBox->setEnabled(true);
+                    ui->notchAngle_DoubleSpinBox->setValue(node.getNotchAngle());
+                    break;
+                case NotchType::TNotch:
+                    ui->tNotch_RadioButton->setChecked(true);
+                    break;
+                case NotchType::UNotch:
+                    ui->uNotch_RadioButton->setChecked(true);
+                    break;
+                case NotchType::VInternal:
+                    ui->vInternalNotch_RadioButton->setChecked(true);
+                    break;
+                case NotchType::VExternal:
+                    ui->vExternalNotch_RadioButton->setChecked(true);
+                    break;
+                case NotchType::Castle:
+                    ui->castleNotch_RadioButton->setChecked(true);
+                    break;
+                case NotchType::Diamond:
+                    ui->diamondNotch_RadioButton->setChecked(true);
+                    break;
+                default:
+                    break;
+            }
+
+            // Notch Sub type
+            ui->straightforward_RadioButton->setEnabled(true);
+            ui->bisector_RadioButton->setEnabled(true);
+            ui->intersection_RadioButton->setEnabled(true);
+
+            switch(node.getNotchSubType())
+            {
+                case NotchSubType::Straightforward:
+                    ui->straightforward_RadioButton->setChecked(true);
+                    break;
+                case NotchSubType::Bisector:
+                    ui->bisector_RadioButton->setChecked(true);
+                    break;
+                case NotchSubType::Intersection:
+                    ui->intersection_RadioButton->setChecked(true);
+                    break;
+                default:
+                    break;
+            }
+
+            // Show the seam allowance notch
+            ui->showNotch_CheckBox->setEnabled(true);
+            ui->showNotch_CheckBox->setChecked(node.showNotch());
+
+            // Show the seam line notch
+            ui->showSeamlineNotch_CheckBox->setEnabled(true);
+            ui->showSeamlineNotch_CheckBox->setChecked(node.showSeamlineNotch());
+
+            ui->notchLength_DoubleSpinBox->setEnabled(true);
+            ui->notchLength_DoubleSpinBox->setValue(node.getNotchLength());
+
+            ui->notchWidth_DoubleSpinBox->setEnabled(true);
+            ui->notchWidth_DoubleSpinBox->setValue(node.getNotchWidth());
+
+            ui->notchCount_SpinBox->setEnabled(true);
+            ui->notchCount_SpinBox->setValue(node.getNotchCount());
+        }
+    }
+
+    ui->showNotch_CheckBox->blockSignals(false);
+    ui->showSeamlineNotch_CheckBox->blockSignals(false);
+
+    ui->notchType_GroupBox->blockSignals(false);
+    ui->notchSubType_GroupBox->blockSignals(false);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::customSAStartPointChanged(int index)
+{
+    Q_UNUSED(index);
+
+    const int row = ui->customSeamAllowance_ListWidget->currentRow();
+    if (ui->customSeamAllowance_ListWidget->count() == 0 || row == -1 || row >= ui->customSeamAllowance_ListWidget->count())
+    {
+        return;
+    }
+
+    QListWidgetItem *rowItem = ui->customSeamAllowance_ListWidget->item(row);
+    SCASSERT(rowItem != nullptr);
+    CustomSARecord record = qvariant_cast<CustomSARecord>(rowItem->data(Qt::UserRole));
+    record.startPoint = ui->startPoint_ComboBox->currentData().toUInt();
+    rowItem->setData(Qt::UserRole, QVariant::fromValue(record));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::customSAEndPointChanged(int index)
+{
+    Q_UNUSED(index);
+
+    const int row = ui->customSeamAllowance_ListWidget->currentRow();
+    if (ui->customSeamAllowance_ListWidget->count() == 0 || row == -1 || row >= ui->customSeamAllowance_ListWidget->count())
+    {
+        return;
+    }
+
+    QListWidgetItem *rowItem = ui->customSeamAllowance_ListWidget->item(row);
+    SCASSERT(rowItem != nullptr);
+    CustomSARecord record = qvariant_cast<CustomSARecord>(rowItem->data(Qt::UserRole));
+    record.endPoint = ui->endPoint_ComboBox->currentData().toUInt();
+    rowItem->setData(Qt::UserRole, QVariant::fromValue(record));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::customSAIncludeTypeChanged(int index)
+{
+    Q_UNUSED(index);
+
+    const int row = ui->customSeamAllowance_ListWidget->currentRow();
+    if (ui->customSeamAllowance_ListWidget->count() == 0 || row == -1 || row >= ui->customSeamAllowance_ListWidget->count())
+    {
+        return;
+    }
+
+    QListWidgetItem *rowItem = ui->customSeamAllowance_ListWidget->item(row);
+    SCASSERT(rowItem != nullptr);
+    CustomSARecord record = qvariant_cast<CustomSARecord>(rowItem->data(Qt::UserRole));
+    record.includeType = static_cast<PiecePathIncludeType>(ui->comboBoxIncludeType->currentData().toUInt());
+    rowItem->setData(Qt::UserRole, QVariant::fromValue(record));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::nodeAngleChanged(int index)
+{
+    const int i = ui->nodes_ComboBox->currentIndex();
+    if (i != -1 && index != -1)
+    {
+        QListWidgetItem *rowItem = getItemById(ui->nodes_ComboBox->currentData().toUInt());
+        if (rowItem)
+        {
+            VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+            rowNode.SetAngleType(static_cast<PieceNodeAngle>(ui->angle_ComboBox->currentData().toUInt()));
+            rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+
+            nodeListChanged();
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::enableDefaultBeforeButton()
+{
+    const QString allowance = qApp->translateVariables()->FormulaToUser(currentSeamAllowance, qApp->Settings()->getOsSeparator());
+    ui->beforeWidthFormula_PlainTextEdit->setPlainText(allowance);
+    if (QPushButton *button = qobject_cast<QPushButton*>(sender()))
+    {
+        button->setEnabled(false);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::enableDefaultAfterButton()
+{
+    const QString allowance = qApp->translateVariables()->FormulaToUser(currentSeamAllowance, qApp->Settings()->getOsSeparator());
+    ui->afterWidthFormula_PlainTextEdit->setPlainText(allowance);
+    if (QPushButton *button = qobject_cast<QPushButton*>(sender()))
+    {
+        button->setEnabled(false);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::customSeamAllowanceChanged(int row)
+{
+    if (ui->customSeamAllowance_ListWidget->count() == 0 || row == -1 || row >= ui->customSeamAllowance_ListWidget->count())
+    {
+        ui->startPoint_ComboBox->blockSignals(true);
+        ui->startPoint_ComboBox->clear();
+        ui->startPoint_ComboBox->blockSignals(false);
+
+        ui->endPoint_ComboBox->blockSignals(true);
+        ui->endPoint_ComboBox->clear();
+        ui->endPoint_ComboBox->blockSignals(false);
+
+        ui->comboBoxIncludeType->blockSignals(true);
+        ui->comboBoxIncludeType->clear();
+        ui->comboBoxIncludeType->blockSignals(false);
+        return;
+    }
+
+    const QListWidgetItem *item = ui->customSeamAllowance_ListWidget->item(row);
+    SCASSERT(item != nullptr);
+    const CustomSARecord record = qvariant_cast<CustomSARecord>(item->data(Qt::UserRole));
+
+    ui->startPoint_ComboBox->blockSignals(true);
+    initializeCSAPoint(ui->startPoint_ComboBox);
+    {
+        const int index = ui->startPoint_ComboBox->findData(record.startPoint);
+        if (index != -1)
+        {
+            ui->startPoint_ComboBox->setCurrentIndex(index);
+        }
+    }
+    ui->startPoint_ComboBox->blockSignals(false);
+
+    ui->endPoint_ComboBox->blockSignals(true);
+    initializeCSAPoint(ui->endPoint_ComboBox);
+    {
+        const int index = ui->endPoint_ComboBox->findData(record.endPoint);
+        if (index != -1)
+        {
+            ui->endPoint_ComboBox->setCurrentIndex(index);
+        }
+    }
+    ui->endPoint_ComboBox->blockSignals(false);
+
+    ui->comboBoxIncludeType->blockSignals(true);
+    initializeSAIncludeType();
+    {
+        const int index = ui->comboBoxIncludeType->findData(static_cast<unsigned char>(record.includeType));
+        if (index != -1)
+        {
+            ui->comboBoxIncludeType->setCurrentIndex(index);
+        }
+    }
+    ui->comboBoxIncludeType->blockSignals(false);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::pathDialogClosed(int result)
+{
+    if (result == QDialog::Accepted)
+    {
+        SCASSERT(!m_dialog.isNull());
+        InternalPathDialog *dialog = qobject_cast<InternalPathDialog*>(m_dialog.data());
+        SCASSERT(dialog != nullptr);
+        try
+        {
+            const VPiecePath newPath = dialog->getPiecePath();
+            const VPiecePath oldPath = data->getPiecePath(dialog->GetToolId());
+
+            SavePiecePathOptions *saveCommand = new SavePiecePathOptions(toolId, oldPath, newPath,
+                                                                         qApp->getCurrentDocument(),
+                                                                         const_cast<VContainer *>(data),
+                                                                         dialog->GetToolId());
+            //m_undoStack.append(saveCommand);
+            qApp->getUndoStack()->push(saveCommand);
+
+            updateCurrentCustomSARecord();
+            updateCurrentInternalPathRecord();
+        }
+        catch (const VExceptionBadId &error)
+        {
+            qCritical("%s\n\n%s\n\n%s", qUtf8Printable(tr("Error. Can't save piece path.")),
+                       qUtf8Printable(error.ErrorMessage()), qUtf8Printable(error.DetailedInformation()));
+        }
+    }
+    delete m_dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::notchTypeChanged(int id)
+{
+    const int i = ui->notches_ComboBox->currentIndex();
+    if (i != -1)
+    {
+        QListWidgetItem *rowItem = getItemById(ui->notches_ComboBox->currentData().toUInt());
+        if (rowItem)
+        {
+            ui->notchAngle_DoubleSpinBox->setEnabled(false);
+            ui->notchAngle_DoubleSpinBox->setValue(0.0);
+
+            VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+
+            NotchType notchType = stringToNotchType(qApp->Settings()->getDefaultNotchType());
+
+            if (id == ui->notchType_ButtonGroup->id(ui->slitNotch_RadioButton))
+            {
+                notchType = NotchType::Slit;
+                ui->notchAngle_DoubleSpinBox->setEnabled(true);
+            }
+            else if (id == ui->notchType_ButtonGroup->id(ui->tNotch_RadioButton))
+            {
+                notchType = NotchType::TNotch;
+            }
+            else if (id == ui->notchType_ButtonGroup->id(ui->uNotch_RadioButton))
+            {
+                notchType = NotchType::UNotch;
+            }
+            else if (id == ui->notchType_ButtonGroup->id(ui->vInternalNotch_RadioButton))
+            {
+                notchType = NotchType::VInternal;
+            }
+            else if (id == ui->notchType_ButtonGroup->id(ui->vExternalNotch_RadioButton))
+            {
+                notchType = NotchType::VExternal;
+            }
+            else if (id == ui->notchType_ButtonGroup->id(ui->castleNotch_RadioButton))
+            {
+                notchType = NotchType::Castle;
+            }
+            else if (id == ui->notchType_ButtonGroup->id(ui->diamondNotch_RadioButton))
+            {
+                notchType = NotchType::Diamond;
+            }
+
+            rowNode.setNotchType(notchType);
+            const NodeInfo info = getNodeInfo(rowNode, true);
+            rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+            rowItem->setIcon(QIcon(info.icon));
+            rowItem->setText(info.name);
+
+            nodeListChanged();
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::notchSubTypeChanged(int id)
+{
+    const int i = ui->notches_ComboBox->currentIndex();
+    if (i != -1)
+    {
+        QListWidgetItem *rowItem = getItemById(ui->notches_ComboBox->currentData().toUInt());
+        if (rowItem)
+        {
+            VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+
+            NotchSubType notchSubType = NotchSubType::Straightforward;
+            if (id == ui->notchSubType_ButtonGroup->id(ui->straightforward_RadioButton))
+            {
+                notchSubType = NotchSubType::Straightforward;
+            }
+            else if (id == ui->notchSubType_ButtonGroup->id(ui->bisector_RadioButton))
+            {
+                notchSubType = NotchSubType::Bisector;
+            }
+            else if (id == ui->notchSubType_ButtonGroup->id(ui->intersection_RadioButton))
+            {
+                notchSubType = NotchSubType::Intersection;
+            }
+
+            rowNode.setNotchSubType(notchSubType);
+            rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+
+            nodeListChanged();
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::showNotchChanged(int state)
+{
+    const int i = ui->notches_ComboBox->currentIndex();
+    if (i != -1)
+    {
+        QListWidgetItem *rowItem = getItemById(ui->notches_ComboBox->currentData().toUInt());
+        if (rowItem)
+        {
+            VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+            rowNode.setShowNotch(state);
+            rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+
+            nodeListChanged();
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::showSeamlineNotchChanged(int state)
+{
+    const int i = ui->notches_ComboBox->currentIndex();
+    if (i != -1)
+    {
+        QListWidgetItem *rowItem = getItemById(ui->notches_ComboBox->currentData().toUInt());
+        if (rowItem)
+        {
+            VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+            rowNode.setShowSeamlineNotch(state && !ui->builtIn_CheckBox->isChecked());
+            rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+
+            nodeListChanged();
+        }
+    }
+}
+
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::notchLengthChanged(qreal value)
+{
+  const int i = ui->notches_ComboBox->currentIndex();
+  if (i != -1)
+  {
+      QListWidgetItem *rowItem = getItemById(ui->notches_ComboBox->currentData().toUInt());
+      if (rowItem)
+      {
+          VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+          rowNode.setNotchLength(value);
+          rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+
+          nodeListChanged();
+      }
+  }
+
+}
+
+void PatternPieceDialog::resetNotchLength()
+{
+    ui->notchLength_DoubleSpinBox->setValue(qApp->Settings()->getDefaultNotchLength());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::notchWidthChanged(qreal value)
+{
+  const int i = ui->notches_ComboBox->currentIndex();
+  if (i != -1)
+  {
+      QListWidgetItem *rowItem = getItemById(ui->notches_ComboBox->currentData().toUInt());
+      if (rowItem)
+      {
+          VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+          rowNode.setNotchWidth(value);
+          rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+
+          nodeListChanged();
+      }
+  }
+
+}
+
+void PatternPieceDialog::resetNotchWidth()
+{
+    ui->notchWidth_DoubleSpinBox->setValue(qApp->Settings()->getDefaultNotchWidth());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::notchAngleChanged(qreal value)
+{
+  const int i = ui->notches_ComboBox->currentIndex();
+  if (i != -1)
+  {
+      QListWidgetItem *rowItem = getItemById(ui->notches_ComboBox->currentData().toUInt());
+      if (rowItem)
+      {
+          VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+          rowNode.setNotchAngle(value);
+          rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+
+          nodeListChanged();
+      }
+  }
+}
+
+void PatternPieceDialog::resetNotchAngle()
+{
+    ui->notchAngle_DoubleSpinBox->setValue(0.0);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::notchCountChanged(int value)
+{
+  const int i = ui->notches_ComboBox->currentIndex();
+  if (i != -1)
+  {
+      QListWidgetItem *rowItem = getItemById(ui->notches_ComboBox->currentData().toUInt());
+      if (rowItem)
+      {
+          VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+          rowNode.setNotchCount(value);
+          rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+
+          nodeListChanged();
+      }
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::updateGrainlineValues()
+{
+    QPlainTextEdit *lineEdit[3] = {ui->rotationFormula_LineEdit, ui->lengthFormula_LineEdit, ui->arrowlLengthFormula_LineEdit};
+    bool formulasOK[3] = {true, true, true};
+
+    for (int i = 0; i < 3; ++i)
+    {
+        QLabel *labelValue;
+        QLabel *labelText;
+        QString labelUnits;
+        if (i == 0)
+        {
+            labelValue = ui->rotationCalc_Label;
+            labelText  = ui->rotation_Label;
+            labelUnits = degreeSymbol;
+        }
+        else if (i == 1)
+        {
+            labelValue = ui->lengthCalc_Label;
+            labelText  = ui->length_Label;
+            labelUnits = QLatin1String(" ") + UnitsToStr(qApp->patternUnit());
+        }
+        else
+        {
+            labelValue = ui->arowLengthCalc_Label;
+            labelText  = ui->arrowLength_Label;
+            labelUnits = QLatin1String(" ") + UnitsToStr(qApp->patternUnit());
+        }
+
+        labelValue->setToolTip(tr("Value"));
+
+        QString formula = lineEdit[i]->toPlainText().simplified();
+        QString formulaValueStr;
+        try
+        {
+            formula.replace("\n", " ");
+            formula = qApp->translateVariables()->FormulaFromUser(formula, qApp->Settings()->getOsSeparator());
+            Calculator calculation;
+            qreal calculatedValue = calculation.EvalFormula(data->DataVariables(), formula);
+
+            QString arrowFormula = lineEdit[2]->toPlainText().simplified();
+            arrowFormula.replace("\n", " ");
+            arrowFormula = qApp->translateVariables()->FormulaFromUser(arrowFormula, qApp->Settings()->getOsSeparator());
+            Calculator arrowCalculation;
+            qreal arrowCalculatedValue = arrowCalculation.EvalFormula(data->DataVariables(), arrowFormula);
+
+            if (qIsInf(calculatedValue) == true || qIsNaN(calculatedValue) == true)
+            {
+                throw qmu::QmuParserError(tr("Infinite/undefined result"));
+            }
+            else if (i == 1 && calculatedValue < arrowCalculatedValue * 2.0)
+            {
+                throw qmu::QmuParserError(tr("Length can't be less than length of 2 arrows"));
+            }
+            else if (i ==2 && calculatedValue <= 0.0)
+            {
+                throw qmu::QmuParserError(tr("Length should be positive"));
+            }
+            else
+            {
+                formulaValueStr.setNum(calculatedValue, 'f', 2);
+                ChangeColor(labelText, okColor);
+            }
+        }
+        catch (qmu::QmuParserError &error)
+        {
+            formulaValueStr = tr("Error");
+            !flagGrainlineAnchor ? ChangeColor(labelText, Qt::red) : ChangeColor(labelText, okColor);
+            formulasOK[i] = false;
+            labelValue->setToolTip(tr("Parser error: %1").arg(error.GetMsg()));
+        }
+
+        if (formulasOK[i] && formulaValueStr.isEmpty() == false)
+        {
+            formulaValueStr += labelUnits;
+        }
+        labelValue->setText(formulaValueStr);
+    }
+
+    flagGrainlineArrow = formulasOK[2];
+    flagGrainlineFormula = formulasOK[0] && formulasOK[1];
+    if (!flagGrainlineArrow || !(flagGrainlineFormula || flagGrainlineAnchor))
+    {
+        setErrorText(TabOrder::Grainline, tr("Grainline"));
+    }
+    else
+    {
+        resetGrainlineWarning();
+    }
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::updatePieceLabelValues()
+{
+    QPlainTextEdit *lineEdit[3] = {ui->pieceLabelWidthFormula_LineEdit, ui->pieceLabelHeightFormula_LineEdit,
+                                     ui->pieceLabelAngleFormula_LineEdit};
+    bool formulasOK[3] = {true, true, true};
+
+    for (int i = 0; i < 3; ++i)
+    {
+        QLabel *labelValue;
+        QLabel *labelText;
+        QString labelUnits;
+        if (i == 0)
+        {
+            labelValue = ui->labelDLWidth;
+            labelText  = ui->labelEditDLWidth;
+            labelUnits = QLatin1String(" ") + UnitsToStr(qApp->patternUnit());
+        }
+        else if (i == 1)
+        {
+            labelValue = ui->labelDLHeight;
+            labelText  = ui->labelEditDLHeight;
+            labelUnits = QLatin1String(" ") + UnitsToStr(qApp->patternUnit());
+        }
+        else
+        {
+            labelValue = ui->labelDLAngle;
+            labelText  = ui->labelEditDLAngle;
+            labelUnits = degreeSymbol;
+        }
+
+        labelValue->setToolTip(tr("Value"));
+
+        QString formula = lineEdit[i]->toPlainText().simplified();
+        QString formulaValueStr;
+        try
+        {
+            formula.replace("\n", " ");
+            formula = qApp->translateVariables()->FormulaFromUser(formula, qApp->Settings()->getOsSeparator());
+            Calculator calculation;
+            qreal calculatedValue = calculation.EvalFormula(data->DataVariables(), formula);
+            if (qIsInf(calculatedValue) == true || qIsNaN(calculatedValue) == true)
+            {
+                throw qmu::QmuParserError(tr("Infinite/undefined result"));
+            }
+            else if ((i == 0 || i == 1) && calculatedValue <= 0.0)
+            {
+                throw qmu::QmuParserError(tr("Length should be positive"));
+            }
+            else
+            {
+                formulaValueStr.setNum(calculatedValue, 'f', 2);
+                ChangeColor(labelText, okColor);
+            }
+        }
+        catch (qmu::QmuParserError &error)
+        {
+            formulaValueStr = tr("Error");
+            !flagPieceLabelAnchor ? ChangeColor(labelText, Qt::red) : ChangeColor(labelText, okColor);
+            formulasOK[i] = false;
+            labelValue->setToolTip(tr("Parser error: %1").arg(error.GetMsg()));
+        }
+
+        if (formulasOK[i] && formulaValueStr.isEmpty() == false)
+        {
+            formulaValueStr += labelUnits;
+        }
+        labelValue->setText(formulaValueStr);
+    }
+
+    flagPieceLabelAngle = formulasOK[2];
+    flagPieceLabelFormula = formulasOK[0] && formulasOK[1];
+    if (!flagPieceLabelAngle || !(flagPieceLabelFormula || flagPieceLabelAnchor))
+    {
+        setErrorText(TabOrder::Labels, tr("Labels"));
+        QIcon icon(":/icons/win.icon.theme/16x16/status/dialog-warning.png");
+        ui->labels_TabWidget->setTabIcon(ui->labels_TabWidget->indexOf(ui->pieceLabel_Tab), icon);
+    }
+    else
+    {
+        resetLabelsWarning();
+    }
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::updatePatternLabelValues()
+{
+    QPlainTextEdit *lineEdit[3] = {ui->patternLabelWidthFormula_LineEdit, ui->patternLabelHeightFormula_LineEdit,
+                                     ui->patternLabelAngleFormula_LineEdit};
+    bool formulasOK[3] = {true, true, true};
+
+    for (int i = 0; i < 3; ++i)
+    {
+        QLabel *labelValue;
+        QLabel *labelText;
+        QString labelUnits;
+        if (i == 0)
+        {
+            labelValue = ui->labelPLWidth;
+            labelText  = ui->labelEditPLWidth;
+            labelUnits = QLatin1String(" ") + UnitsToStr(qApp->patternUnit());
+        }
+        else if (i == 1)
+        {
+            labelValue = ui->labelPLHeight;
+            labelText  = ui->labelEditPLHeight;
+            labelUnits = QLatin1String(" ") + UnitsToStr(qApp->patternUnit());
+        }
+        else
+        {
+            labelValue = ui->labelPLAngle;
+            labelText  = ui->labelEditPLAngle;
+            labelUnits = degreeSymbol;
+        }
+
+        labelValue->setToolTip(tr("Value"));
+
+        QString formula = lineEdit[i]->toPlainText().simplified();
+        QString formulaValueStr;
+        try
+        {
+            formula.replace("\n", " ");
+            formula = qApp->translateVariables()->FormulaFromUser(formula, qApp->Settings()->getOsSeparator());
+            Calculator calculation;
+            qreal calculatedValue = calculation.EvalFormula(data->DataVariables(), formula);
+            if (qIsInf(calculatedValue) == true || qIsNaN(calculatedValue) == true)
+            {
+                throw qmu::QmuParserError(tr("Infinite/undefined result"));
+            }
+            else if ((i == 0 || i == 1) && calculatedValue <= 0.0)
+            {
+                throw qmu::QmuParserError(tr("Length should be positive"));
+            }
+            else
+            {
+                formulaValueStr.setNum(calculatedValue, 'f', 2);
+                ChangeColor(labelText, okColor);
+            }
+        }
+        catch (qmu::QmuParserError &error)
+        {
+            formulaValueStr = tr("Error");
+            !flagPatternLabelAnchor ? ChangeColor(labelText, Qt::red) : ChangeColor(labelText, okColor);
+            formulasOK[i] = false;
+            labelValue->setToolTip(tr("Parser error: %1").arg(error.GetMsg()));
+        }
+
+        if (formulasOK[i] && formulaValueStr.isEmpty() == false)
+        {
+            formulaValueStr += labelUnits;
+        }
+        labelValue->setText(formulaValueStr);
+    }
+
+    flagPatternLabelAngle = formulasOK[2];
+    flagPatternLabelFormula = formulasOK[0] && formulasOK[1];
+    if (!flagPatternLabelAngle || !(flagPatternLabelFormula || flagPatternLabelAnchor))
+    {
+        setErrorText(TabOrder::Labels, tr("Labels"));
+        QIcon icon(":/icons/win.icon.theme/16x16/status/dialog-warning.png");
+        ui->labels_TabWidget->setTabIcon(ui->labels_TabWidget->indexOf(ui->patternLabel_Tab), icon);
+    }
+    else
+    {
+        resetLabelsWarning();
+    }
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::enabledGrainline()
+{
+    bool showGrainline = ui->showGrainline_CheckBox->isChecked();
+    ui->grainlineGeometry_GroupBox->setEnabled(showGrainline);
+    ui->anchorPoints_GroupBox->setEnabled(showGrainline);
+    ui->arrows_GroupBox->setEnabled(showGrainline);
+
+    if (showGrainline)
+    {
+        updateGrainlineValues();
+        grainlineAnchorChanged();
+    }
+    else
+    {
+        flagGrainlineFormula = true;
+        flagGrainlineArrow = true;
+        resetGrainlineWarning();
+        CheckState();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::enabledPieceLabel()
+{
+    if (ui->pieceLabel_GroupBox->isChecked() == true)
+    {
+        updatePieceLabelValues();
+        pieceLabelAnchorChanged();
+    }
+    else
+    {
+        flagPieceLabelAngle = true;
+        flagPieceLabelFormula = true;
+        resetLabelsWarning();
+        CheckState();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::enabledPatternLabel()
+{
+    if (ui->patternLabel_GroupBox->isChecked() == true)
+    {
+        updatePatternLabelValues();
+        patternLabelAnchorChanged();
+    }
+    else
+    {
+        flagPatternLabelAngle = true;
+        flagPatternLabelFormula = true;
+        resetLabelsWarning();
+        CheckState();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::editGrainlineFormula()
+{
+    QPlainTextEdit *labelFormula;
+    bool checkForZero;
+    QString title;
+
+    if (sender() == ui->length_PushButton)
+    {
+        labelFormula = ui->lengthFormula_LineEdit;
+        checkForZero = true;
+        title = tr("Edit length");
+    }
+    else if (sender() == ui->rotation_PushButton)
+    {
+        labelFormula = ui->rotationFormula_LineEdit;
+        checkForZero = false;
+        title = tr("Edit angle");
+    }
+    else if (sender() == ui->arrowLength_PushButton)
+    {
+        labelFormula = ui->arrowlLengthFormula_LineEdit;
+        checkForZero = false;
+        title = tr("Edit length");
+    }
+    else
+    {
+        // should not get here!
+        return;
+    }
+
+    EditFormulaDialog dialog(data, NULL_ID, ToolDialog, this);
+    dialog.setWindowTitle(title);
+    dialog.SetFormula(qApp->translateVariables()->TryFormulaFromUser(labelFormula->toPlainText(), qApp->Settings()->getOsSeparator()));
+    dialog.setCheckZero(checkForZero);
+    if (dialog.exec() == QDialog::Accepted)
+    {
+        QString formula = dialog.GetFormula();
+        formula.replace("\n", " ");
+
+        if (sender() == ui->length_PushButton)
+        {
+            setGrainlineLength(formula);
+        }
+        else if (sender() == ui->rotation_PushButton)
+        {
+            setGrainlineAngle(formula);
+        }
+        else if (sender() == ui->arrowLength_PushButton)
+        {
+            setGrainlineArrowLength(formula);
+        }
+        else
+        {
+            // should not get here!
+            labelFormula->setPlainText(formula);
+        }
+        updateGrainlineValues();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::editPieceLabelFormula()
+{
+    QPlainTextEdit *labelFormula;
+    bool checkForZero;
+    QString title;
+
+    if (sender() == ui->pieceLabelHeght_PushButton)
+    {
+        labelFormula = ui->pieceLabelHeightFormula_LineEdit;
+        checkForZero = true;
+        title = tr("Edit height");
+    }
+    else if (sender() == ui->pieceLabelWidth_PushButton)
+    {
+        labelFormula = ui->pieceLabelWidthFormula_LineEdit;
+        checkForZero = true;
+        title = tr("Edit width");
+    }
+    else if (sender() == ui->pieceLabelAngle_PushButton)
+    {
+        labelFormula = ui->pieceLabelAngleFormula_LineEdit;
+        checkForZero = false;
+        title = tr("Edit angle");
+    }
+    else
+    {
+        // should not get here!
+        return;
+    }
+
+    EditFormulaDialog dialog(data, NULL_ID, ToolDialog, this);
+    dialog.setWindowTitle(title);
+    dialog.SetFormula(qApp->translateVariables()->TryFormulaFromUser(labelFormula->toPlainText(), qApp->Settings()->getOsSeparator()));
+    dialog.setCheckZero(checkForZero);
+    if (dialog.exec() == QDialog::Accepted)
+    {
+        QString formula = dialog.GetFormula();
+        formula.replace("\n", " ");
+        if (sender() == ui->pieceLabelHeght_PushButton)
+        {
+            setPieceLabelHeight(formula);
+        }
+        else if (sender() == ui->pieceLabelWidth_PushButton)
+        {
+            setPieceLabelWidth(formula);
+        }
+        else if (sender() == ui->pieceLabelAngle_PushButton)
+        {
+            setPieceLabelAngle(formula);
+        }
+        else
+        {
+            // should not get here!
+            labelFormula->setPlainText(formula);
+        }
+        updatePieceLabelValues();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::editPatternLabelFormula()
+{
+    QPlainTextEdit *labelFormula;
+    bool checkForZero;
+    QString title;
+
+    if (sender() == ui->patternLabelHeght_PushButton)
+    {
+        labelFormula = ui->patternLabelHeightFormula_LineEdit;
+        checkForZero = true;
+        title = tr("Edit height");
+    }
+    else if (sender() == ui->patternLabelWidth_PushButton)
+    {
+        labelFormula = ui->patternLabelWidthFormula_LineEdit;
+        checkForZero = true;
+        title = tr("Edit width");
+    }
+    else if (sender() == ui->patternLabelAngle_PushButton)
+    {
+        labelFormula = ui->patternLabelAngleFormula_LineEdit;
+        checkForZero = false;
+        title = tr("Edit angle");
+    }
+    else
+    {
+        // should not get here!
+        return;
+    }
+
+    EditFormulaDialog dialog(data, NULL_ID, ToolDialog, this);
+    dialog.setWindowTitle(title);
+    dialog.SetFormula(qApp->translateVariables()->TryFormulaFromUser(labelFormula->toPlainText(), qApp->Settings()->getOsSeparator()));
+    dialog.setCheckZero(checkForZero);
+    if (dialog.exec() == QDialog::Accepted)
+    {
+        QString formula = dialog.GetFormula();
+        formula.replace("\n", " ");
+        if (sender() == ui->patternLabelHeght_PushButton)
+        {
+            setPatternLabelHeight(formula);
+        }
+        else if (sender() == ui->patternLabelWidth_PushButton)
+        {
+            setPatternLabelWidth(formula);
+        }
+        else if (sender() == ui->patternLabelAngle_PushButton)
+        {
+            setPatternLabelAngle(formula);
+        }
+        else
+        {
+            // should not get here!
+            labelFormula->setPlainText(formula);
+        }
+        updatePatternLabelValues();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::resetGrainlineWarning()
+{
+    if (flagGrainlineArrow && (flagGrainlineFormula || flagGrainlineAnchor))
+    {
+        clearErrorText(TabOrder::Grainline, tr("Grainline "));
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::resetLabelsWarning()
+{
+    if (flagPieceLabelAngle && (flagPieceLabelFormula || flagPieceLabelAnchor))
+    {
+        clearErrorText(TabOrder::Labels, tr("Labels "));
+        QIcon icon(":/icon/32x32/piece_label.png");
+        ui->labels_TabWidget->setTabIcon(ui->labels_TabWidget->indexOf(ui->pieceLabel_Tab), icon);
+    }
+    if (flagPatternLabelAngle && (flagPatternLabelFormula || flagPatternLabelAnchor))
+    {
+        clearErrorText(TabOrder::Labels, tr("Labels "));
+        QIcon icon(":/icon/32x32/pattern_label.png");
+        ui->labels_TabWidget->setTabIcon(ui->labels_TabWidget->indexOf(ui->patternLabel_Tab), icon);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::evaluateDefaultWidth()
+{
+    labelEditFormula = ui->widthEdit_Label;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    const QString formula = ui->widthFormula_PlainTextEdit->toPlainText();
+    m_saWidth = Eval(formula, flagFormula, ui->widthResult_Label, postfix, false, true);
+
+    if (m_saWidth >= 0)
+    {
+        VContainer *locData = const_cast<VContainer *> (data);
+        locData->AddVariable(currentSeamAllowance, new CustomVariable(locData, currentSeamAllowance, 0, m_saWidth,
+                                                                  QString().setNum(m_saWidth), true,
+                                                                  tr("Current seam allowance")));
+
+        evaluateBeforeWidth();
+        evaluateAfterWidth();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::evaluateBeforeWidth()
+{
+    if (ui->nodes_ComboBox->count() > 0)
+    {
+        labelEditFormula = ui->beforeWidthEdit_Label;
+        const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+        const QString formula = ui->beforeWidthFormula_PlainTextEdit->toPlainText();
+        Eval(formula, flagBeforeFormula, ui->beforeWidthResult_Label, postfix, false, true);
+
+        const QString formulaSABefore = getFormulaFromUser(ui->beforeWidthFormula_PlainTextEdit);
+        updateNodeBeforeSeamAllowance(formulaSABefore);
+        enableDefaultButton(ui->beforeDefault_PushButton, formulaSABefore);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::evaluateAfterWidth()
+{
+    if (ui->nodes_ComboBox->count() > 0)
+    {
+        labelEditFormula = ui->afterWidthEdit_Label;
+        const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+        const QString formula = ui->afterWidthFormula_PlainTextEdit->toPlainText();
+        Eval(formula, flagAfterFormula, ui->afterWidthResult_Label, postfix, false, true);
+
+        const QString formulaSAAfter = getFormulaFromUser(ui->afterWidthFormula_PlainTextEdit);
+        updateNodeAfterSeamAllowance(formulaSAAfter);
+        enableDefaultButton(ui->afterDefault_PushButton, formulaSAAfter);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::editDefaultSeamAllowanceWidth()
+{
+    EditFormulaDialog *dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit seam allowance width"));
+    dialog->SetFormula(getSeamAllowanceWidthFormula());
+    dialog->setCheckLessThanZero(true);
+    dialog->setPostfix(UnitsToStr(qApp->patternUnit(), true));
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        setSeamAllowanceWidthFormula(dialog->GetFormula());
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::editBeforeSeamAllowanceWidth()
+{
+    EditFormulaDialog *dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit seam allowance width before"));
+    dialog->SetFormula(getFormulaFromUser(ui->beforeWidthFormula_PlainTextEdit));
+    dialog->setCheckLessThanZero(true);
+    dialog->setPostfix(UnitsToStr(qApp->patternUnit(), true));
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        setCurrentBeforeSeamAllowance(dialog->GetFormula());
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::editAfterSeamAllowanceWidth()
+{
+    EditFormulaDialog *dialog = new EditFormulaDialog(data, toolId, ToolDialog, this);
+    dialog->setWindowTitle(tr("Edit seam allowance width after"));
+    dialog->SetFormula(getFormulaFromUser(ui->afterWidthFormula_PlainTextEdit));
+    dialog->setCheckLessThanZero(true);
+    dialog->setPostfix(UnitsToStr(qApp->patternUnit(), true));
+    if (dialog->exec() == QDialog::Accepted)
+    {
+        setCurrentAfterSeamAllowance(dialog->GetFormula());
+    }
+    delete dialog;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::defaultWidthChanged()
+{
+    labelEditFormula = ui->widthEdit_Label;
+    labelResultCalculation = ui->widthResult_Label;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+    formulaValueChanged(flagFormula, ui->widthFormula_PlainTextEdit, m_timerWidth, postfix);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::beforeWidthChanged()
+{
+    labelEditFormula = ui->beforeWidthEdit_Label;
+    labelResultCalculation = ui->beforeWidthResult_Label;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+
+    formulaValueChanged(flagBeforeFormula, ui->beforeWidthFormula_PlainTextEdit, m_timerWidthBefore, postfix);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::afterWidthChanged()
+{
+    labelEditFormula = ui->afterWidthEdit_Label;
+    labelResultCalculation = ui->afterWidthResult_Label;
+    const QString postfix = UnitsToStr(qApp->patternUnit(), true);
+
+    formulaValueChanged(flagAfterFormula, ui->afterWidthFormula_PlainTextEdit, m_timerWidthAfter, postfix);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::grainlineAnchorChanged()
+{
+    QColor color = okColor;
+    const quint32 topAnchorId = getCurrentObjectId(ui->grainlineTopAnchor_ComboBox);
+    const quint32 bottomAnchorId = getCurrentObjectId(ui->grainlineBottomAnchor_ComboBox);
+    bool enabled = topAnchorId != NULL_ID && bottomAnchorId != NULL_ID && topAnchorId != bottomAnchorId;
+
+    ui->grainlineGeometry_GroupBox->setEnabled(!enabled);
+
+    if (enabled)
+    {
+        flagGrainlineAnchor = true;
+        color = okColor;
+
+        resetGrainlineWarning();
+    }
+    else
+    {
+        flagGrainlineAnchor = false;
+        topAnchorId == NULL_ID && bottomAnchorId == NULL_ID ? color = okColor : color = errorColor;
+
+        if (!flagGrainlineArrow || !(flagGrainlineFormula || flagGrainlineAnchor))
+        {
+            ui->menuTab_ListWidget->item(TabOrder::Grainline)->setText(QString(tr("Grainline")));
+        }
+    }
+    updateGrainlineValues();
+    ChangeColor(ui->topGrainlineAnchor_Label, color);
+    ChangeColor(ui->bottomGrainlineAnchor_Label, color);
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::pieceLabelAnchorChanged()
+{
+    QColor color = okColor;
+    const quint32 topAnchorId = getCurrentObjectId(ui->pieceLabelTopLeftAnchor_ComboBox);
+    const quint32 bottomAnchorId = getCurrentObjectId(ui->pieceLabelBottomRightAnchor_ComboBox);
+    if (topAnchorId != NULL_ID && bottomAnchorId != NULL_ID && topAnchorId != bottomAnchorId)
+    {
+        flagPieceLabelAnchor = true;
+        color = okColor;
+
+        if (flagPatternLabelAnchor)
+        {
+            clearErrorText(TabOrder::Labels, tr("Labels "));
+            QIcon icon(":/icon/32x32/piece_label.png");
+            ui->labels_TabWidget->setTabIcon(ui->labels_TabWidget->indexOf(ui->pieceLabel_Tab), icon);
+        }
+    }
+    else
+    {
+        flagPieceLabelAnchor = false;
+        topAnchorId == NULL_ID && bottomAnchorId == NULL_ID ? color = okColor : color = errorColor;
+
+        setErrorText(TabOrder::Labels, tr("Labels"));
+        QIcon icon(":/icons/win.icon.theme/16x16/status/dialog-warning.png");
+        ui->labels_TabWidget->setTabIcon(ui->labels_TabWidget->indexOf(ui->pieceLabel_Tab), icon);
+    }
+    updatePieceLabelValues();
+    ChangeColor(ui->labelDLTopLeftAnchor, color);
+    ChangeColor(ui->labelDLBottomRightAnchor, color);
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::patternLabelAnchorChanged()
+{
+    QColor color = okColor;
+    const quint32 topAnchorId = getCurrentObjectId(ui->patternLabelTopLeftAnchor_ComboBox);
+    const quint32 bottomAnchorId = getCurrentObjectId(ui->patternLabelBottomRightAnchor_ComboBox);
+    if (topAnchorId != NULL_ID && bottomAnchorId != NULL_ID && topAnchorId != bottomAnchorId)
+    {
+        flagPatternLabelAnchor = true;
+        color = okColor;
+
+        if (flagPieceLabelAnchor)
+        {
+            clearErrorText(TabOrder::Labels, tr("Labels "));
+            QIcon icon(":/icon/32x32/pattern_label.png");
+            ui->labels_TabWidget->setTabIcon(ui->labels_TabWidget->indexOf(ui->patternLabel_Tab), icon);
+        }
+    }
+    else
+    {
+        flagPatternLabelAnchor = false;
+        topAnchorId == NULL_ID && bottomAnchorId == NULL_ID ? color = okColor : color = errorColor;
+
+        setErrorText(TabOrder::Labels, tr("Labels"));
+        QIcon icon(":/icons/win.icon.theme/16x16/status/dialog-warning.png");
+        ui->labels_TabWidget->setTabIcon(ui->labels_TabWidget->indexOf(ui->patternLabel_Tab), icon);
+    }
+    updatePatternLabelValues();
+    ChangeColor(ui->labelPLTopLeftAnchor, color);
+    ChangeColor(ui->labelPLBottomRightAnchor, color);
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::editPatternLabel()
+{
+    QVector<VLabelTemplateLine> patternLabelLines = qApp->getCurrentDocument()->getPatternLabelTemplate();
+    EditLabelTemplateDialog editor(qApp->getCurrentDocument());
+    editor.SetTemplate(patternLabelLines);
+    editor.SetPiece(GetPiece());
+
+    if (QDialog::Accepted == editor.exec())
+    {
+        patternLabelLines = editor.GetTemplate();
+        qApp->getCurrentDocument()->setPatternLabelTemplate(patternLabelLines);
+        emit qApp->getCurrentDocument()->updatePatternLabel();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::editPieceLabel()
+{
+    EditLabelTemplateDialog editor(qApp->getCurrentDocument());
+    editor.SetTemplate(m_pieceLabelLines);
+    editor.SetPiece(GetPiece());
+
+    if (QDialog::Accepted == editor.exec())
+    {
+        m_pieceLabelLines = editor.GetTemplate();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+VPiece PatternPieceDialog::CreatePiece() const
+{
+    VPiece piece;
+    piece.GetPath().setNodes(GetListInternals<VPieceNode>(ui->mainPath_ListWidget));
+    piece.SetCustomSARecords(GetListInternals<CustomSARecord>(ui->customSeamAllowance_ListWidget));
+    piece.SetInternalPaths(GetListInternals<quint32>(ui->internalPaths_ListWidget));
+    piece.setAnchors(GetListInternals<quint32>(ui->anchorPoints_ListWidget));
+    piece.SetForbidFlipping(ui->forbidFlipping_CheckBox->isChecked());
+    piece.SetSeamAllowance(ui->seams_CheckBox->isChecked());
+    piece.SetSeamAllowanceBuiltIn(ui->builtIn_CheckBox->isChecked());
+    piece.setHideSeamLine(ui->hideSeamLine_CheckBox->isChecked());
+    piece.SetName(ui->pieceName_LineEdit->text());
+    piece.setColor(getPieceColor());
+    piece.setFill(getPieceFill());
+    piece.setInLayout(isInLayout());
+    piece.setIsLocked(getPieceLock());
+    piece.SetMx(m_mx);
+    piece.SetMy(m_my);
+    piece.setSeamAllowanceWidthFormula(getFormulaFromUser(ui->widthFormula_PlainTextEdit), m_saWidth);
+
+    piece.GetPatternPieceData() = m_oldData;
+    piece.GetPatternPieceData().SetLetter(ui->letter_LineEdit->text());
+    piece.GetPatternPieceData().SetAnnotation(ui->annotation_LineEdit->text());
+    piece.GetPatternPieceData().SetOrientation(ui->orientation_ComboBox->currentText());
+    piece.GetPatternPieceData().SetRotationWay(ui->rotation_ComboBox->currentText());
+    piece.GetPatternPieceData().SetTilt(ui->tilt_ComboBox->currentText());
+    piece.GetPatternPieceData().SetFoldPosition(ui->foldPosition_ComboBox->currentText());
+    piece.GetPatternPieceData().SetQuantity(ui->quantity_SpinBox->value());
+    piece.GetPatternPieceData().SetOnFold(ui->fold_CheckBox->isChecked());
+    piece.GetPatternPieceData().SetLabelTemplate(m_pieceLabelLines);
+    piece.GetPatternPieceData().SetVisible(ui->pieceLabel_GroupBox->isChecked());
+    piece.GetPatternPieceData().SetLabelWidth(getFormulaFromUser(ui->pieceLabelWidthFormula_LineEdit));
+    piece.GetPatternPieceData().SetLabelHeight(getFormulaFromUser(ui->pieceLabelHeightFormula_LineEdit));
+    piece.GetPatternPieceData().SetRotation(getFormulaFromUser(ui->pieceLabelAngleFormula_LineEdit));
+    piece.GetPatternPieceData().SetFontSize(m_oldData.getFontSize());
+    piece.GetPatternPieceData().setCenterAnchorPoint(getCurrentObjectId(ui->pieceLabelCenterAnchor_ComboBox));
+    piece.GetPatternPieceData().setTopLeftAnchorPoint(getCurrentObjectId(ui->pieceLabelTopLeftAnchor_ComboBox));
+    piece.GetPatternPieceData().setBottomRightAnchorPoint(getCurrentObjectId(ui->pieceLabelBottomRightAnchor_ComboBox));
+
+    piece.GetPatternInfo() = m_oldGeom;
+    piece.GetPatternInfo().SetVisible(ui->patternLabel_GroupBox->isChecked());
+    piece.GetPatternInfo().SetLabelWidth(getFormulaFromUser(ui->patternLabelWidthFormula_LineEdit));
+    piece.GetPatternInfo().SetLabelHeight(getFormulaFromUser(ui->patternLabelHeightFormula_LineEdit));
+    piece.GetPatternInfo().SetRotation(getFormulaFromUser(ui->patternLabelAngleFormula_LineEdit));
+    piece.GetPatternInfo().setCenterAnchorPoint(getCurrentObjectId(ui->patternLabelCenterAnchor_ComboBox));
+    piece.GetPatternInfo().setTopLeftAnchorPoint(getCurrentObjectId(ui->patternLabelTopLeftAnchor_ComboBox));
+    piece.GetPatternInfo().setBottomRightAnchorPoint(getCurrentObjectId(ui->patternLabelBottomRightAnchor_ComboBox));
+
+    piece.GetGrainlineGeometry() = m_oldGrainline;
+    piece.GetGrainlineGeometry().SetVisible(ui->showGrainline_CheckBox->isChecked());
+    piece.GetGrainlineGeometry().setRotation(getFormulaFromUser(ui->rotationFormula_LineEdit));
+    piece.GetGrainlineGeometry().setLength(getFormulaFromUser(ui->lengthFormula_LineEdit));
+    piece.GetGrainlineGeometry().setArrowLength(getFormulaFromUser(ui->arrowlLengthFormula_LineEdit));
+    piece.GetGrainlineGeometry().setArrowType(static_cast<ArrowType>(ui->arrow_ComboBox->currentIndex()));
+    piece.GetGrainlineGeometry().setCenterAnchorPoint(getCurrentObjectId(ui->grainlineCenterAnchor_ComboBox));
+    piece.GetGrainlineGeometry().setTopAnchorPoint(getCurrentObjectId(ui->grainlineTopAnchor_ComboBox));
+    piece.GetGrainlineGeometry().setBottomAnchorPoint(getCurrentObjectId(ui->grainlineBottomAnchor_ComboBox));
+
+    if (applyAllowed == false)
+    {
+        VPiecePath path = piece.GetPath();
+        const QRectF rect = QPolygonF(path.PathPoints(data)).boundingRect();
+
+        qreal width = getFormulaValue(ui->pieceLabelWidthFormula_LineEdit);
+        qreal height = getFormulaValue(ui->pieceLabelHeightFormula_LineEdit);
+        qreal xPos = rect.center().x() + (rect.width()/2.0 - width)/2.0;
+        qreal yPos = rect.center().y() - height/2.0;
+        piece.GetPatternPieceData().SetPos(QPointF(xPos, yPos));
+
+        xPos = rect.left() + (rect.width()/2.0 - width)/2.0;
+        yPos = rect.center().y() - height/2.0;
+        piece.GetPatternInfo().SetPos(QPointF(xPos, yPos));
+
+        xPos = rect.center().x();
+        yPos = rect.center().y() + getFormulaValue(ui->lengthFormula_LineEdit)/2.0;
+        piece.GetGrainlineGeometry().SetPos(QPointF(xPos, yPos));
+    }
+    return piece;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::newMainPathItem(const VPieceNode &node)
+{
+    newNodeItem(ui->mainPath_ListWidget, node);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::newCustomSeamAllowance(const CustomSARecord &record)
+{
+    if (record.path > NULL_ID)
+    {
+        const QString name = getPathName(record.path, record.reverse);
+
+        QListWidgetItem *item = new QListWidgetItem(name);
+        item->setData(Qt::UserRole, QVariant::fromValue(record));
+        ui->customSeamAllowance_ListWidget->addItem(item);
+        ui->customSeamAllowance_ListWidget->setCurrentRow(ui->customSeamAllowance_ListWidget->count()-1);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::newInternalPath(quint32 path)
+{
+    if (path > NULL_ID)
+    {
+        const QString name = getPathName(path);
+
+        QListWidgetItem *item = new QListWidgetItem(name);
+        item->setData(Qt::UserRole, QVariant::fromValue(path));
+        ui->internalPaths_ListWidget->addItem(item);
+        ui->internalPaths_ListWidget->setCurrentRow(ui->internalPaths_ListWidget->count()-1);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::newAnchorPoint(quint32 anchorPoint)
+{
+    if (anchorPoint > NULL_ID)
+    {
+        const QSharedPointer<VGObject> anchor = data->GetGObject(anchorPoint);
+
+        QListWidgetItem *item = new QListWidgetItem(anchor->name());
+        item->setData(Qt::UserRole, QVariant::fromValue(anchorPoint));
+        ui->anchorPoints_ListWidget->addItem(item);
+        ui->anchorPoints_ListWidget->setCurrentRow(ui->anchorPoints_ListWidget->count()-1);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString PatternPieceDialog::getPathName(quint32 path, bool reverse) const
+{
+    QString name;
+
+    if (path > NULL_ID)
+    {
+        name = data->getPiecePath(path).getName();
+
+        if (reverse)
+        {
+            name = QLatin1String("- ") + name;
+        }
+    }
+
+    return name;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString PatternPieceDialog::getPieceColor() const
+{
+    QString color =  ui->color_Label->text();
+    return color;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setPieceColor(const QString &color)
+{
+    ui->color_Label->setText(color);
+    ui->color_Label->setPalette(QPalette(color));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString PatternPieceDialog::getPieceFill() const
+{
+    QString value =  getComboBoxCurrentData(ui->fill_ComboBox, FillNone);
+    return value;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setPieceFill(const QString &value)
+{
+    changeCurrentData(ui->fill_ComboBox, value);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+bool PatternPieceDialog::isInLayout() const
+{
+   return m_inLayout;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setInLayout(const bool &state)
+{
+    m_inLayout = state;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+bool PatternPieceDialog::getPieceLock() const
+{
+   return m_isLocked;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setPieceLock(const bool &state)
+{
+    m_isLocked = state;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+bool PatternPieceDialog::isMainPathValid() const
+{
+    QString warning = DialogWarningIcon();
+
+    if(CreatePiece().mainPathPoints(data).count() < 3)
+    {
+        warning += tr("You need more points!");
+        ui->status_Label->setText(warning);
+        return false;
+    }
+    else
+    {
+        if(!isMainPathClockwise())
+        {
+            warning += tr("You must choose points in a clockwise direction!");
+            ui->status_Label->setText(warning);
+            return false;
+        }
+        if (isFirstPointSameAsLast(ui->mainPath_ListWidget))
+        {
+            warning += tr("First point cannot be same as last point!");
+            ui->status_Label->setText(warning);
+            return  false;
+        }
+        else if (doublePointsExist(ui->mainPath_ListWidget))
+        {
+            warning += tr("You have double points!");
+            ui->status_Label->setText(warning);
+            return  false;
+        }
+        else if (!isEachPointNameUnique(ui->mainPath_ListWidget))
+        {
+            warning += tr("Each point in the path must be unique!");
+            ui->status_Label->setText(warning);
+            return  false;
+        }
+    }
+
+    return true;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::validateObjects(bool value)
+{
+    flagMainPath = value;
+    CheckState();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+bool PatternPieceDialog::isMainPathClockwise() const
+{
+    const QVector<QPointF> points = CreatePiece().mainPathPoints(data);
+    return VPiece::isClockwise(points);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeNodesList()
+{
+    const quint32 id = ui->nodes_ComboBox->currentData().toUInt();
+
+    ui->nodes_GroupBox->setEnabled(true);
+    ui->nodes_ComboBox->blockSignals(true);
+    ui->nodes_ComboBox->clear();
+
+    const QVector<VPieceNode> nodes = GetListInternals<VPieceNode>(ui->mainPath_ListWidget);
+
+    for (int i = 0; i < nodes.size(); ++i)
+    {
+        const VPieceNode node = nodes.at(i);
+        if (node.GetTypeTool() == Tool::NodePoint && !node.isExcluded())
+        {
+            const NodeInfo info = getNodeInfo(node);
+
+            ui->nodes_ComboBox->addItem(info.name, node.GetId());
+        }
+    }
+
+    if (pointNodesExist())
+    {
+        const int index = ui->nodes_ComboBox->findData(id);
+        if (index != -1)
+        {
+            ui->nodes_ComboBox->setCurrentIndex(index);
+            nodeChanged(index);// Need in case combobox index was not changed
+        }
+        else
+        {
+            ui->nodes_ComboBox->count() > 0 ? nodeChanged(0) : nodeChanged(-1);
+        }
+        ui->nodes_ComboBox->blockSignals(false);
+    }
+    else
+    {
+        ui->nodes_GroupBox->setEnabled(false);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeNotchesList()
+{
+    const quint32 id = ui->notches_ComboBox->currentData().toUInt();
+
+    ui->notches_ComboBox->blockSignals(true);
+    ui->notches_ComboBox->clear();
+
+    const QVector<VPieceNode> nodes = GetListInternals<VPieceNode>(ui->mainPath_ListWidget);
+
+    for (int i = 0; i < nodes.size(); ++i)
+    {
+        const VPieceNode node = nodes.at(i);
+        if (node.GetTypeTool() == Tool::NodePoint && node.isNotch())
+        {
+            const NodeInfo info = getNodeInfo(node);
+
+            ui->notches_ComboBox->addItem(QIcon(info.icon), info.name, node.GetId());
+        }
+    }
+    ui->notches_ComboBox->blockSignals(false);
+
+    const int index = ui->notches_ComboBox->findData(id);
+    if (index != -1)
+    {
+        ui->notches_ComboBox->setCurrentIndex(index);
+        notchChanged(index);// Need in case combox index was not changed
+    }
+    else
+    {
+        ui->notches_ComboBox->count() > 0 ? notchChanged(0) : notchChanged(-1);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QListWidgetItem *PatternPieceDialog::getItemById(quint32 id)
+{
+    for (qint32 i = 0; i < ui->mainPath_ListWidget->count(); ++i)
+    {
+        QListWidgetItem *item = ui->mainPath_ListWidget->item(i);
+        const VPieceNode node = qvariant_cast<VPieceNode>(item->data(Qt::UserRole));
+
+        if (node.GetId() == id)
+        {
+            return item;
+        }
+    }
+    return nullptr;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+quint32 PatternPieceDialog::getPreviousId() const
+{
+    const int count = ui->mainPath_ListWidget->count();
+    if (count > 0)
+    {
+        QListWidgetItem *item = ui->mainPath_ListWidget->item(count-1);
+        const VPieceNode node = qvariant_cast<VPieceNode>(item->data(Qt::UserRole));
+        return node.GetId();
+    }
+    else
+    {
+        return NULL_ID;
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+VPieceNode PatternPieceDialog::getLastNode() const
+{
+    const int count = ui->mainPath_ListWidget->count();
+    if (count > 0)
+    {
+        QListWidgetItem *item = ui->mainPath_ListWidget->item(count-1);
+        const VPieceNode node = qvariant_cast<VPieceNode>(item->data(Qt::UserRole));
+        return node;
+    }
+    else
+    {
+        return VPieceNode();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+bool PatternPieceDialog::pointNodesExist() const
+{
+    const QVector<VPieceNode> nodes = GetListInternals<VPieceNode>(ui->mainPath_ListWidget);
+    for (int i = 0; i < nodes.size(); ++i)
+    {
+        const VPieceNode node = nodes.at(i);
+        if (node.GetTypeTool() == Tool::NodePoint && !node.isExcluded())
+        {
+            qDebug() << "point nodes exist";
+            return true;
+        }
+    }
+    qDebug() << "point nodes do not exist";
+    return false;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setCurrentBeforeSeamAllowance(const QString &formula)
+{
+    updateNodeBeforeSeamAllowance(formula);
+    nodeListChanged();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setCurrentAfterSeamAllowance(const QString &formula)
+{
+    updateNodeAfterSeamAllowance(formula);
+    nodeListChanged();
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::updateNodeBeforeSeamAllowance(const QString &formula)
+{
+    const int index = ui->nodes_ComboBox->currentIndex();
+    if (index != -1)
+    {
+        QListWidgetItem *rowItem = getItemById(ui->nodes_ComboBox->currentData().toUInt());
+        if (rowItem)
+        {
+            VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+            rowNode.setBeforeSAFormula(formula);
+            rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::updateNodeAfterSeamAllowance(const QString &formula)
+{
+    const int index = ui->nodes_ComboBox->currentIndex();
+    if (index != -1)
+    {
+        QListWidgetItem *rowItem = getItemById(ui->nodes_ComboBox->currentData().toUInt());
+        if (rowItem)
+        {
+            VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+            rowNode.setAfterSAFormula(formula);
+            rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeMainPathTab()
+{
+    ui->forbidFlipping_CheckBox->setChecked(qApp->Settings()->getForbidPieceFlipping());
+    ui->hideSeamLine_CheckBox->setChecked(qApp->Settings()->isHideSeamLine());
+
+    ui->mainPath_ListWidget->installEventFilter(this);
+    ui->mainPath_ListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(ui->mainPath_ListWidget, &QListWidget::customContextMenuRequested, this,
+            &PatternPieceDialog::showMainPathContextMenu);
+
+    connect(ui->mainPath_ListWidget->model(), &QAbstractItemModel::rowsMoved, this, [this]()
+    {
+      nodeListChanged();
+      validateObjects(isMainPathValid());
+    });
+
+    connect(ui->mainPath_ListWidget, &QListWidget::itemSelectionChanged,
+            this, &PatternPieceDialog::setMoveExclusions);
+    connect(ui->moveTop_ToolButton,&QToolButton::clicked, this, [this]()
+    {
+        moveListRowTop(ui->mainPath_ListWidget);
+        validateObjects(isMainPathValid());
+    });
+    connect(ui->moveUp_ToolButton, &QToolButton::clicked, this, [this]()
+    {
+        moveListRowUp(ui->mainPath_ListWidget);
+        validateObjects(isMainPathValid());
+    });
+    connect(ui->moveDown_ToolButton, &QToolButton::clicked, this, [this]()
+    {
+        moveListRowDown(ui->mainPath_ListWidget);
+        validateObjects(isMainPathValid());
+    });
+    connect(ui->moveBottom_ToolButton, &QToolButton::clicked, this, [this]()
+    {
+        moveListRowBottom(ui->mainPath_ListWidget);
+        validateObjects(isMainPathValid());
+    });
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeSeamAllowanceTab()
+{
+    ui->seams_CheckBox->setChecked(qApp->Settings()->getDefaultSeamAllowanceVisibilty());
+
+    plainTextEditFormula = ui->widthFormula_PlainTextEdit;
+
+    ui->widthFormula_PlainTextEdit->installEventFilter(this);
+    ui->beforeWidthFormula_PlainTextEdit->installEventFilter(this);
+    ui->afterWidthFormula_PlainTextEdit->installEventFilter(this);
+
+    m_timerWidth = new QTimer(this);
+    connect(m_timerWidth, &QTimer::timeout, this, &PatternPieceDialog::evaluateDefaultWidth);
+
+    m_timerWidthBefore = new QTimer(this);
+    connect(m_timerWidthBefore, &QTimer::timeout, this, &PatternPieceDialog::evaluateBeforeWidth);
+
+    m_timerWidthAfter = new QTimer(this);
+    connect(m_timerWidthAfter, &QTimer::timeout, this, &PatternPieceDialog::evaluateAfterWidth);
+
+    connect(ui->seams_CheckBox,   &QCheckBox::stateChanged, this, &PatternPieceDialog::enableSeamAllowance);
+    connect(ui->builtIn_CheckBox, &QCheckBox::stateChanged, this, &PatternPieceDialog::enableBuiltIn);
+
+    // Initialize the default seam allowance, convert the value if app unit is different than pattern unit
+    m_saWidth = UnitConvertor(qApp->Settings()->GetDefaultSeamAllowance(),
+                              StrToUnits(qApp->Settings()->getUnit()), qApp->patternUnit());
+
+    ui->widthFormula_PlainTextEdit->setPlainText(qApp->LocaleToString(m_saWidth));
+
+    initializeNodesList();
+    connect(ui->nodes_ComboBox, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this,
+            &PatternPieceDialog::nodeChanged);
+
+    connect(ui->beforeDefault_PushButton, &QPushButton::clicked, this, &PatternPieceDialog::enableDefaultBeforeButton);
+    connect(ui->afterDefault_PushButton, &QPushButton::clicked, this, &PatternPieceDialog::enableDefaultAfterButton);
+
+    initializeNodeAngles(ui->angle_ComboBox);
+    connect(ui->angle_ComboBox, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this,
+            &PatternPieceDialog::nodeAngleChanged);
+
+    ui->customSeamAllowance_ListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(ui->customSeamAllowance_ListWidget, &QListWidget::customContextMenuRequested, this,
+            &PatternPieceDialog::showCustomSAContextMenu);
+    connect(ui->customSeamAllowance_ListWidget, &QListWidget::currentRowChanged, this,
+            &PatternPieceDialog::customSeamAllowanceChanged);
+    connect(ui->startPoint_ComboBox, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &PatternPieceDialog::customSAStartPointChanged);
+    connect(ui->endPoint_ComboBox, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this,
+            &PatternPieceDialog::customSAEndPointChanged);
+    connect(ui->comboBoxIncludeType, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &PatternPieceDialog::customSAIncludeTypeChanged);
+
+    connect(ui->toolButtonExprWidth, &QPushButton::clicked, this, &PatternPieceDialog::editDefaultSeamAllowanceWidth);
+    connect(ui->beforeExpr_ToolButton, &QPushButton::clicked, this, &PatternPieceDialog::editBeforeSeamAllowanceWidth);
+    connect(ui->afterExpr_ToolButton, &QPushButton::clicked, this, &PatternPieceDialog::editAfterSeamAllowanceWidth);
+
+    connect(ui->widthFormula_PlainTextEdit, &QPlainTextEdit::textChanged, this,
+            &PatternPieceDialog::defaultWidthChanged);
+    connect(ui->beforeWidthFormula_PlainTextEdit, &QPlainTextEdit::textChanged, this,
+            &PatternPieceDialog::beforeWidthChanged);
+    connect(ui->afterWidthFormula_PlainTextEdit, &QPlainTextEdit::textChanged, this,
+            &PatternPieceDialog::afterWidthChanged);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeCSAPoint(QComboBox *box)
+{
+    SCASSERT(box != nullptr);
+    box->clear();
+    box->addItem(tr("Empty"), NULL_ID);
+
+    const QVector<VPieceNode> nodes = GetListInternals<VPieceNode>(ui->mainPath_ListWidget);
+
+    for (int i = 0; i < nodes.size(); ++i)
+    {
+        const VPieceNode &node = nodes.at(i);
+        if (node.GetTypeTool() == Tool::NodePoint && !node.isExcluded())
+        {
+            const NodeInfo info = getNodeInfo(node);
+            box->addItem(info.name, node.GetId());
+        }
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initAnchorPoint(QComboBox *box)
+{
+    SCASSERT(box != nullptr);
+
+    quint32 currentId = NULL_ID;
+    if (box->count() > 0)
+    {
+        currentId = box->currentData().toUInt();
+    }
+
+    box->clear();
+    box->addItem(QLatin1String("<") + tr("None") + QLatin1String(">"), NULL_ID);
+
+    const QVector<quint32> anchorPoints = GetListInternals<quint32>(ui->anchorPoints_ListWidget);
+
+    for (int i = 0; i < anchorPoints.size(); ++i)
+    {
+        const QSharedPointer<VGObject> anchorPoint = data->GetGObject(anchorPoints.at(i));
+        box->addItem(anchorPoint->name(), anchorPoints.at(i));
+    }
+
+    const int index = ui->nodes_ComboBox->findData(currentId);
+    if (index != -1)
+    {
+        box->setCurrentIndex(index);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeSAIncludeType()
+{
+    ui->comboBoxIncludeType->clear();
+
+    ui->comboBoxIncludeType->addItem(tr("main path"),
+                                             static_cast<unsigned char>(PiecePathIncludeType::AsMainPath));
+    ui->comboBoxIncludeType->addItem(tr("custom seam allowance"),
+                                             static_cast<unsigned char>(PiecePathIncludeType::AsCustomSA));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeInternalPathsTab()
+{
+    ui->internalPaths_ListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(ui->internalPaths_ListWidget, &QListWidget::customContextMenuRequested, this,
+            &PatternPieceDialog::showInternalPathsContextMenu);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializePropertiesTab()
+{
+    ui->pieceName_LineEdit->setClearButtonEnabled(true);
+    ui->letter_LineEdit->setClearButtonEnabled(true);
+    ui->annotation_LineEdit->setClearButtonEnabled(true);
+
+    QColor color = QColor(Qt::white);
+    ui->color_Label->setText(color.name());
+    ui->color_Label->setPalette(QPalette(color));
+
+    connect(ui->pieceName_LineEdit, &QLineEdit::textChanged, this, &PatternPieceDialog::pieceNameChanged);
+    connect(ui->colorPicker_ToolButton, &QToolButton::clicked, this, &PatternPieceDialog::pieceColorChanged);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeLabelsTab()
+{
+    //Piece label
+    ui->pieceLabel_GroupBox->setChecked(qApp->Settings()->showPieceLabels());
+
+    ui->pieceLabelWidthFormula_LineEdit->setPlainText(qApp->LocaleToString(qApp->Settings()->getDefaultLabelWidth()));
+    ui->pieceLabelHeightFormula_LineEdit->setPlainText(qApp->LocaleToString(qApp->Settings()->getDefaultLabelHeight()));
+
+    connect(ui->pieceLabel_GroupBox, &QGroupBox::toggled, this, &PatternPieceDialog::enabledPieceLabel);
+    initAnchorPoint(ui->pieceLabelCenterAnchor_ComboBox);
+    initAnchorPoint(ui->pieceLabelTopLeftAnchor_ComboBox);
+    initAnchorPoint(ui->pieceLabelBottomRightAnchor_ComboBox);
+
+    connect(ui->pieceLabelTopLeftAnchor_ComboBox, &QComboBox::currentTextChanged,
+            this, &PatternPieceDialog::pieceLabelAnchorChanged);
+
+    connect(ui->pieceLabelBottomRightAnchor_ComboBox, &QComboBox::currentTextChanged,
+            this, &PatternPieceDialog::pieceLabelAnchorChanged);
+
+    connect(ui->pieceLabelWidth_PushButton, &QPushButton::clicked,
+            this, &PatternPieceDialog::editPieceLabelFormula);
+    connect(ui->pieceLabelHeght_PushButton, &QPushButton::clicked,
+            this, &PatternPieceDialog::editPieceLabelFormula);
+    connect(ui->pieceLabelAngle_PushButton, &QPushButton::clicked,
+            this, &PatternPieceDialog::editPieceLabelFormula);
+
+    connect(ui->pieceLabelWidthFormula_LineEdit, &QPlainTextEdit::textChanged, this,
+            &PatternPieceDialog::updatePieceLabelValues);
+    connect(ui->pieceLabelHeightFormula_LineEdit, &QPlainTextEdit::textChanged, this,
+            &PatternPieceDialog::updatePieceLabelValues);
+    connect(ui->pieceLabelAngleFormula_LineEdit, &QPlainTextEdit::textChanged, this,
+            &PatternPieceDialog::updatePieceLabelValues);
+
+    connect(ui->editPieceLabel_PushButton, &QPushButton::clicked, this, &PatternPieceDialog::editPieceLabel);
+
+    if (m_pieceLabelLines.isEmpty())
+    {
+        VLabelTemplate labelTemplate;
+        QString filename = qApp->Settings()->getDefaultPieceTemplate();
+        if (QFileInfo::exists(filename))
+        {
+            labelTemplate.setXMLContent(VLabelTemplateConverter(filename).Convert());
+            m_pieceLabelLines = labelTemplate.ReadLines();
+        }
+    }
+
+    enabledPieceLabel();
+
+    //Pattern label
+    ui->patternLabel_GroupBox->setChecked(qApp->Settings()->showPatternLabels());
+
+    ui->patternLabelWidthFormula_LineEdit->setPlainText(qApp->LocaleToString(qApp->Settings()->getDefaultLabelWidth()));
+    ui->patternLabelHeightFormula_LineEdit->setPlainText(qApp->LocaleToString(qApp->Settings()->getDefaultLabelHeight()));
+
+    connect(ui->patternLabel_GroupBox, &QGroupBox::toggled, this, &PatternPieceDialog::enabledPatternLabel);
+    initAnchorPoint(ui->patternLabelCenterAnchor_ComboBox);
+    initAnchorPoint(ui->patternLabelTopLeftAnchor_ComboBox);
+    initAnchorPoint(ui->patternLabelBottomRightAnchor_ComboBox);
+
+    connect(ui->patternLabelTopLeftAnchor_ComboBox, &QComboBox::currentTextChanged,
+            this, &PatternPieceDialog::patternLabelAnchorChanged);
+
+    connect(ui->patternLabelBottomRightAnchor_ComboBox, &QComboBox::currentTextChanged,
+            this, &PatternPieceDialog::patternLabelAnchorChanged);
+
+    connect(ui->patternLabelWidth_PushButton,  &QPushButton::clicked,
+            this, &PatternPieceDialog::editPatternLabelFormula);
+    connect(ui->patternLabelHeght_PushButton, &QPushButton::clicked,
+            this, &PatternPieceDialog::editPatternLabelFormula);
+    connect(ui->patternLabelAngle_PushButton,  &QPushButton::clicked,
+            this, &PatternPieceDialog::editPatternLabelFormula);
+
+    connect(ui->patternLabelWidthFormula_LineEdit,  &QPlainTextEdit::textChanged, this,
+            &PatternPieceDialog::updatePatternLabelValues);
+    connect(ui->patternLabelHeightFormula_LineEdit, &QPlainTextEdit::textChanged, this,
+            &PatternPieceDialog::updatePatternLabelValues);
+    connect(ui->patternLabelAngleFormula_LineEdit,  &QPlainTextEdit::textChanged, this,
+            &PatternPieceDialog::updatePatternLabelValues);
+
+    connect(ui->editPatternLabel_PushButton, &QPushButton::clicked, this, &PatternPieceDialog::editPatternLabel);
+
+    m_patternLabelLines = qApp->getCurrentDocument()->getPatternLabelTemplate();
+
+    if (m_patternLabelLines.isEmpty())
+    {
+        VLabelTemplate labelTemplate;
+        QString filename = qApp->Settings()->getDefaultPatternTemplate();
+        if (QFileInfo(filename).exists())
+        {
+            labelTemplate.setXMLContent(VLabelTemplateConverter(filename).Convert());
+            m_patternLabelLines = labelTemplate.ReadLines();
+            qApp->getCurrentDocument()->setPatternLabelTemplate(m_patternLabelLines);
+        }
+    }
+
+    enabledPatternLabel();
+
+    ui->pieceName_LineEdit->setText(createPieceName());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeGrainlineTab()
+{
+    bool enabled = qApp->Settings()->getDefaultGrainlineVisibilty();
+    ui->showGrainline_CheckBox->setChecked(enabled);
+    ui->grainlineGeometry_GroupBox->setEnabled(enabled);
+    ui->anchorPoints_GroupBox->setEnabled(enabled);
+    ui->arrows_GroupBox->setEnabled(enabled);
+
+    qreal arrowLength = FromPixel(qApp->Settings()->getDefaultArrowLength(), *data->GetPatternUnit());
+    ui->arrowlLengthFormula_LineEdit->setPlainText(qApp->LocaleToString(arrowLength));
+
+    qreal grainlineLength = qApp->Settings()->getDefaultGrainlineLength();
+    if (grainlineLength < arrowLength * 2)
+    {
+        grainlineLength = arrowLength * 2.1;
+    }
+    ui->lengthFormula_LineEdit->setPlainText(qApp->LocaleToString(grainlineLength));
+
+    connect(ui->showGrainline_CheckBox, &QCheckBox::stateChanged, this, &PatternPieceDialog::enabledGrainline);
+    connect(ui->rotation_PushButton,    &QPushButton::clicked,    this, &PatternPieceDialog::editGrainlineFormula);
+    connect(ui->length_PushButton,      &QPushButton::clicked,    this, &PatternPieceDialog::editGrainlineFormula);
+    connect(ui->arrowLength_PushButton, &QPushButton::clicked,    this, &PatternPieceDialog::editGrainlineFormula);
+    connect(ui->lengthFormula_LineEdit, &QPlainTextEdit::textChanged,
+            this, &PatternPieceDialog::updateGrainlineValues);
+    connect(ui->rotationFormula_LineEdit, &QPlainTextEdit::textChanged,
+            this, &PatternPieceDialog::updateGrainlineValues);
+    connect(ui->arrowlLengthFormula_LineEdit, &QPlainTextEdit::textChanged,
+            this, &PatternPieceDialog::updateGrainlineValues);
+
+    enabledGrainline();
+
+    ui->arrow_ComboBox->addItem(tr("Both"));
+    ui->arrow_ComboBox->addItem(tr("Just front"));
+    ui->arrow_ComboBox->addItem(tr("Just rear"));
+
+    initAnchorPoint(ui->grainlineCenterAnchor_ComboBox);
+    initAnchorPoint(ui->grainlineTopAnchor_ComboBox);
+    initAnchorPoint(ui->grainlineBottomAnchor_ComboBox);
+
+    connect(ui->grainlineTopAnchor_ComboBox, &QComboBox::currentTextChanged,
+            this, &PatternPieceDialog::grainlineAnchorChanged);
+
+    connect(ui->grainlineBottomAnchor_ComboBox, &QComboBox::currentTextChanged,
+            this, &PatternPieceDialog::grainlineAnchorChanged);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeAnchorsTab()
+{
+    const quint32 topAnchorId = getCurrentObjectId(ui->grainlineTopAnchor_ComboBox);
+    const quint32 bottomAnchorId = getCurrentObjectId(ui->grainlineBottomAnchor_ComboBox);
+
+    if (topAnchorId != NULL_ID && bottomAnchorId != NULL_ID && topAnchorId != bottomAnchorId)
+    {
+        ui->grainlineGeometry_GroupBox->setEnabled(false);
+    }
+    ui->anchorPoints_ListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(ui->anchorPoints_ListWidget, &QListWidget::customContextMenuRequested, this,
+            &PatternPieceDialog::showAnchorsContextMenu);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initializeNotchesTab()
+{
+    initializeNotchesList();
+
+    switch (qApp->patternUnit())
+    {
+        case Unit::Cm:
+            {
+                ui->notchLength_DoubleSpinBox->setMaximum(4);
+                ui->notchWidth_DoubleSpinBox->setMaximum(1.25);
+                break;
+            }
+        case Unit::Mm:
+            {
+                ui->notchLength_DoubleSpinBox->setMaximum(40);
+                ui->notchWidth_DoubleSpinBox->setMaximum(12.50);
+                break;
+            }
+        case Unit::Inch:
+        default:
+            {
+                ui->notchLength_DoubleSpinBox->setMaximum(1.50);
+                ui->notchWidth_DoubleSpinBox->setMaximum(.50);
+                break;
+            }
+    }
+    QString unitStr = QString(" " + UnitsToStr(qApp->patternUnit(), true)).left(3);
+    ui->notchLength_DoubleSpinBox->setValue(UnitConvertor(qApp->Settings()->getDefaultNotchLength(),
+                              StrToUnits(qApp->Settings()->getUnit()), qApp->patternUnit()));
+
+    ui->notchLength_DoubleSpinBox->setSuffix(unitStr);
+    ui->notchWidth_DoubleSpinBox->setValue(UnitConvertor(qApp->Settings()->getDefaultNotchWidth(),
+                              StrToUnits(qApp->Settings()->getUnit()), qApp->patternUnit()));
+    ui->notchWidth_DoubleSpinBox->setSuffix(unitStr);
+    ui->showNotch_CheckBox->setChecked(qApp->Settings()->showSeamAllowanceNotch());
+    ui->showSeamlineNotch_CheckBox->setChecked(qApp->Settings()->showSeamlineNotch());
+
+    connect(ui->notches_ComboBox, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &PatternPieceDialog::notchChanged);
+
+    connect(ui->notchType_ButtonGroup, &QButtonGroup::idClicked,
+            this, &PatternPieceDialog::notchTypeChanged);
+
+    connect(ui->notchSubType_ButtonGroup, &QButtonGroup::idClicked,
+            this, &PatternPieceDialog::notchSubTypeChanged);
+
+    connect(ui->showNotch_CheckBox, &QCheckBox::stateChanged, this,
+            &PatternPieceDialog::showNotchChanged);
+
+    connect(ui->showSeamlineNotch_CheckBox, &QCheckBox::stateChanged, this,
+            &PatternPieceDialog::showSeamlineNotchChanged);
+
+    connect(ui->notchLength_DoubleSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &PatternPieceDialog::notchLengthChanged);
+
+    connect(ui->resetLength_PushButton, &QPushButton::clicked, this, &PatternPieceDialog::resetNotchLength);
+
+    connect(ui->notchWidth_DoubleSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &PatternPieceDialog::notchWidthChanged);
+
+    connect(ui->resetWidth_PushButton, &QPushButton::clicked, this, &PatternPieceDialog::resetNotchWidth);
+
+    connect(ui->notchAngle_DoubleSpinBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &PatternPieceDialog::notchAngleChanged);
+
+    connect(ui->resetAngle_PushButton, &QPushButton::clicked, this, &PatternPieceDialog::resetNotchAngle);
+
+    connect(ui->notchCount_SpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &PatternPieceDialog::notchCountChanged);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::initAnchorPointComboboxes()
+{
+    initAnchorPoint(ui->grainlineCenterAnchor_ComboBox);
+    initAnchorPoint(ui->grainlineTopAnchor_ComboBox);
+    initAnchorPoint(ui->grainlineBottomAnchor_ComboBox);
+
+    initAnchorPoint(ui->pieceLabelCenterAnchor_ComboBox);
+    initAnchorPoint(ui->pieceLabelTopLeftAnchor_ComboBox);
+    initAnchorPoint(ui->pieceLabelBottomRightAnchor_ComboBox);
+
+    initAnchorPoint(ui->patternLabelCenterAnchor_ComboBox);
+    initAnchorPoint(ui->patternLabelTopLeftAnchor_ComboBox);
+    initAnchorPoint(ui->patternLabelBottomRightAnchor_ComboBox);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString PatternPieceDialog::getSeamAllowanceWidthFormula() const
+{
+    QString width = ui->widthFormula_PlainTextEdit->toPlainText();
+    width.replace("\n", " ");
+    return qApp->translateVariables()->TryFormulaFromUser(width, qApp->Settings()->getOsSeparator());
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setSeamAllowanceWidthFormula(const QString &formula)
+{
+    const QString width = qApp->translateVariables()->FormulaToUser(formula, qApp->Settings()->getOsSeparator());
+    ui->widthFormula_PlainTextEdit->setPlainText(width);
+
+    PatternPieceVisual *path = qobject_cast<PatternPieceVisual *>(vis);
+    SCASSERT(path != nullptr)
+    const VPiece p = CreatePiece();
+    path->SetPiece(p);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QVector<QPointer<VUndoCommand>> PatternPieceDialog::UndoStack()
+{
+    return m_undoStack;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::updateCurrentCustomSARecord()
+{
+    const int row = ui->customSeamAllowance_ListWidget->currentRow();
+    if (ui->customSeamAllowance_ListWidget->count() == 0 || row == -1)
+    {
+        return;
+    }
+
+    QListWidgetItem *item = ui->customSeamAllowance_ListWidget->item(row);
+    SCASSERT(item != nullptr);
+    const CustomSARecord record = qvariant_cast<CustomSARecord>(item->data(Qt::UserRole));
+    item->setText(getPathName(record.path, record.reverse));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::updateCurrentInternalPathRecord()
+{
+    const int row = ui->internalPaths_ListWidget->currentRow();
+    if (ui->internalPaths_ListWidget->count() == 0 || row == -1)
+    {
+        return;
+    }
+
+    QListWidgetItem *item = ui->internalPaths_ListWidget->item(row);
+    SCASSERT(item != nullptr);
+    const quint32 path = qvariant_cast<quint32>(item->data(Qt::UserRole));
+    item->setText(getPathName(path));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setGrainlineAngle(QString angleFormula)
+{
+    if (angleFormula.isEmpty())
+    {
+        angleFormula = QString("0");
+    }
+
+    const QString formula = qApp->translateVariables()->FormulaToUser(angleFormula, qApp->Settings()->getOsSeparator());
+    ui->rotationFormula_LineEdit->setPlainText(formula);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setGrainlineLength(QString lengthFormula)
+{
+    if (lengthFormula.isEmpty())
+    {
+        lengthFormula = QString().setNum(UnitConvertor(1, Unit::Cm, *data->GetPatternUnit()));
+    }
+
+    const QString formula = qApp->translateVariables()->FormulaToUser(lengthFormula, qApp->Settings()->getOsSeparator());
+    ui->lengthFormula_LineEdit->setPlainText(formula);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setGrainlineArrowLength(QString lengthFormula)
+{
+    if (lengthFormula.isEmpty())
+    {
+        lengthFormula = QString().setNum(UnitConvertor(1, Unit::Cm, *data->GetPatternUnit()));
+    }
+
+    const QString formula = qApp->translateVariables()->FormulaToUser(lengthFormula, qApp->Settings()->getOsSeparator());
+    ui->arrowlLengthFormula_LineEdit->setPlainText(formula);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setPieceLabelWidth(QString widthFormula)
+{
+    if (widthFormula.isEmpty())
+    {
+        widthFormula = QString().setNum(UnitConvertor(1, Unit::Cm, *data->GetPatternUnit()));
+    }
+
+    const QString formula = qApp->translateVariables()->FormulaToUser(widthFormula, qApp->Settings()->getOsSeparator());
+    ui->pieceLabelWidthFormula_LineEdit->setPlainText(formula);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setPieceLabelHeight(QString heightFormula)
+{
+    if (heightFormula.isEmpty())
+    {
+        heightFormula = QString().setNum(UnitConvertor(1, Unit::Cm, *data->GetPatternUnit()));
+    }
+
+    const QString formula = qApp->translateVariables()->FormulaToUser(heightFormula, qApp->Settings()->getOsSeparator());
+    ui->pieceLabelHeightFormula_LineEdit->setPlainText(formula);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setPieceLabelAngle(QString angleFormula)
+{
+    if (angleFormula.isEmpty())
+    {
+        angleFormula = QString("0");
+    }
+
+    const QString formula = qApp->translateVariables()->FormulaToUser(angleFormula, qApp->Settings()->getOsSeparator());
+    ui->pieceLabelAngleFormula_LineEdit->setPlainText(formula);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setPatternLabelWidth(QString widthFormula)
+{
+    if (widthFormula.isEmpty())
+    {
+        widthFormula = QString().setNum(UnitConvertor(1, Unit::Cm, *data->GetPatternUnit()));
+    }
+
+    const QString formula = qApp->translateVariables()->FormulaToUser(widthFormula, qApp->Settings()->getOsSeparator());
+    ui->patternLabelWidthFormula_LineEdit->setPlainText(formula);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setPatternLabelHeight(QString heightFormula)
+{
+    if (heightFormula.isEmpty())
+    {
+        heightFormula = QString().setNum(UnitConvertor(1, Unit::Cm, *data->GetPatternUnit()));
+    }
+
+    const QString formula = qApp->translateVariables()->FormulaToUser(heightFormula, qApp->Settings()->getOsSeparator());
+    ui->patternLabelHeightFormula_LineEdit->setPlainText(formula);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setPatternLabelAngle(QString angleFormula)
+{
+    if (angleFormula.isEmpty())
+    {
+        angleFormula = QString("0");
+    }
+
+    const QString formula = qApp->translateVariables()->FormulaToUser(angleFormula, qApp->Settings()->getOsSeparator());
+    ui->patternLabelAngleFormula_LineEdit->setPlainText(formula);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::showAnchorPoints()
+{
+    if (m_anchorPoints.isNull())
+    {
+        m_anchorPoints = new PieceAnchorPointVisual(data);
+    }
+
+    m_anchorPoints->setAnchors(GetListInternals<quint32>(ui->anchorPoints_ListWidget));
+
+    if (!qApp->getCurrentScene()->items().contains(m_anchorPoints))
+    {
+        m_anchorPoints->VisualMode(NULL_ID);
+        m_anchorPoints->setZValue(10); // anchor points should be on top
+        PatternPieceTool *tool = qobject_cast<PatternPieceTool*>(VAbstractPattern::getTool(toolId));
+        SCASSERT(tool != nullptr);
+        m_anchorPoints->setParentItem(tool);
+    }
+    else
+    {
+        m_anchorPoints->RefreshGeometry();
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setMoveExclusions()
+{
+    setMoveButtonState(ui->mainPath_ListWidget, ui->moveTop_ToolButton, ui->moveUp_ToolButton,
+                       ui->moveDown_ToolButton, ui->moveBottom_ToolButton);
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+QString PatternPieceDialog::createPieceName() const
+{
+    QList<VPiece> pieces = data->DataPieces()->values();
+    QStringList pieceNames;
+
+    for (int i = 0; i < pieces.size(); ++i)
+    {
+        pieceNames.append(pieces.at(i).GetName());
+    }
+
+    const QString defaultName = tr("PatternPiece");
+    QString pieceName = defaultName;
+    int i = 0;
+
+    while(pieceNames.contains(pieceName))
+    {
+        pieceName = defaultName + QString("_%1").arg(++i);
+    }
+    return pieceName;
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief Sets the reverse state of the node if the node is a curve.
+/// @param rowItem list widget item of the selected row.
+/// @param reverse new reverse state.
+//---------------------------------------------------------------------------------------------------------------------
+ void PatternPieceDialog::reverseNode(QListWidgetItem *rowItem, bool reverse)
+{
+    VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+    if (rowNode.GetTypeTool() != Tool::NodePoint)
+    {
+        rowNode.SetReverse(reverse);
+        NodeInfo info;
+        info = getNodeInfo(rowNode, true);
+        rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+        rowItem->setIcon(QIcon(info.icon));
+        rowItem->setText(info.name);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief Duplcates the selected node and adds it excluded at the end of the list widget.
+/// @param rowItem list widget item of the selected row.
+//---------------------------------------------------------------------------------------------------------------------
+ void PatternPieceDialog::duplicateNode(QListWidgetItem *rowItem)
+{
+    VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+    if (rowNode.GetTypeTool() != Tool::NodePoint)
+    {
+        rowNode.SetExcluded(true);
+        newNodeItem(ui->mainPath_ListWidget, rowNode, true, true);
+    }
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief Sets the exclude state of the node.
+/// @param rowItem list widget item of the selected row.
+/// @param exclude new exclude state.
+//---------------------------------------------------------------------------------------------------------------------
+ void PatternPieceDialog::excludeNode(QListWidgetItem *rowItem, bool exclude)
+{
+    NodeInfo info;
+    VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+    rowNode.SetExcluded(exclude);
+    info = getNodeInfo(rowNode, true);
+    rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+    rowItem->setIcon(QIcon(info.icon));
+    rowItem->setText(info.name);
+    rowItem->setFont(NodeFont(rowNode.isExcluded()));
+}
+
+//---------------------------------------------------------------------------------------------------------------------
+/// @brief Sets the notch type of the node of the selected widget item.
+/// @param rowItem list widget item of the selected row.
+/// @param notchType of the selected submenu item.
+//---------------------------------------------------------------------------------------------------------------------
+void PatternPieceDialog::setNotch(QListWidgetItem *rowItem, bool isNotch, bool showCutline, bool showSeamline,
+                                  NotchType notchType, NotchSubType notchSubType, qreal notchLength,
+                                  qreal notchWidth, int count)
+{
+    VPieceNode rowNode = qvariant_cast<VPieceNode>(rowItem->data(Qt::UserRole));
+    if (rowNode.GetTypeTool() == Tool::NodePoint)
+    {
+        rowNode.setNotch(isNotch);
+        rowNode.setShowNotch(showCutline);
+        rowNode.setShowSeamlineNotch(showSeamline);
+        rowNode.setNotchType(notchType);
+        rowNode.setNotchSubType(notchSubType);
+        rowNode.setNotchLength(notchLength);
+        rowNode.setNotchWidth(notchWidth);
+        rowNode.setNotchCount(count);
+        NodeInfo info;
+        info = getNodeInfo(rowNode, true);
+        rowItem->setData(Qt::UserRole, QVariant::fromValue(rowNode));
+        rowItem->setIcon(QIcon(info.icon));
+        rowItem->setText(info.name);
+    }
+}
+
+void PatternPieceDialog::setCurrentText(QComboBox *box, const QString &text) const
+{
+    SCASSERT(box != nullptr)
+    const qint32 index = box->findText(text);
+    if (index != -1)
+    {
+        box->setCurrentIndex(index);
+    }
+    else
+    {
+        box->setCurrentIndex(0);
+    }
+}
+
+qreal PatternPieceDialog::getFormulaValue(QPlainTextEdit *text) const
+{
+    Calculator calculation;
+    QString formula = text->toPlainText().simplified();
+    formula.replace("\n", " ");
+    formula = qApp->translateVariables()->FormulaFromUser(formula, qApp->Settings()->getOsSeparator());
+    return ToPixel(calculation.EvalFormula(data->DataVariables(), formula), *data->GetPatternUnit());
+}

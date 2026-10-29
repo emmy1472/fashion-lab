@@ -1,0 +1,226 @@
+import { Container, Heading, Text, Avatar, Button, Badge, toast } from "@medusajs/ui";
+import { Plus, Trash, XCircle, TriangleRightMini } from "@medusajs/icons";
+import { ActionMenu } from "../common/action-menu";
+import {
+  AdminDesign,
+  DesignPartnerStageRole,
+  useUnlinkDesignFromPartner,
+  useCancelPartnerAssignment,
+  useDesignPartnerRoster,
+  useLinkDesignToPartner,
+} from "../../hooks/api/designs";
+import { StageRoleSelect } from "./stage-role-select";
+import { AdminPartner } from "../../hooks/api/partners";
+import { useProductionRuns } from "../../hooks/api/production-runs";
+import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
+
+interface DesignPartnerSectionProps {
+  design: AdminDesign & { partners?: AdminPartner[] };
+}
+
+export const DesignPartnerSection = ({ design }: DesignPartnerSectionProps) => {
+  const navigate = useNavigate();
+  const partners = design.partners || [];
+  const { mutateAsync: unlinkPartner, isPending: isUnlinking } = useUnlinkDesignFromPartner(design.id)
+  const { mutateAsync: cancelAssignment, isPending: isCancelling } = useCancelPartnerAssignment(design.id)
+  const { mutateAsync: linkPartners, isPending: isSavingStage } = useLinkDesignToPartner(design.id)
+  // The stage and relationship live on the link row, not on `design.partners`.
+  const { data: rosterData } = useDesignPartnerRoster(design.id)
+  const rosterByPartner = new Map(
+    (rosterData?.roster ?? []).map((r) => [r.partner_id, r])
+  )
+
+  const handleStageChange = async (partnerId: string, stageRole: DesignPartnerStageRole | null) => {
+    try {
+      await linkPartners({ partners: [{ partner_id: partnerId, stage_role: stageRole }] })
+      toast.success("Stage updated")
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to update stage")
+    }
+  }
+  const { production_runs = [] } = useProductionRuns({
+    design_id: design.id,
+    limit: 50,
+    offset: 0,
+  })
+
+  // Check production run status per partner — prefer active over terminal
+  const partnerRunStatus = (partnerId: string) => {
+    const partnerRuns = production_runs.filter((r: any) => r.partner_id === partnerId)
+    if (!partnerRuns.length) return null
+    const active = partnerRuns.find(
+      (r: any) => r.status !== "cancelled" && r.status !== "completed"
+    )
+    if (active) return String(active.status || "assigned")
+    const sorted = [...partnerRuns].sort(
+      (a: any, b: any) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()
+    )
+    return String(sorted[0].status || "assigned")
+  }
+
+  const hasActiveRun = (partnerId: string) => {
+    return production_runs.some(
+      (r: any) =>
+        r.partner_id === partnerId &&
+        r.status !== "completed" &&
+        r.status !== "cancelled"
+    )
+  }
+
+  const handleUnlinkPartner = async (e: React.MouseEvent, partnerId: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    try {
+      await unlinkPartner({ partnerId })
+      toast.success("Partner unlinked from design")
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to unlink partner")
+    }
+  }
+
+  const handleCancelAssignment = async (e: React.MouseEvent, partnerId: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    try {
+      await cancelAssignment({ partner_id: partnerId })
+      toast.success("Partner assignment cancelled")
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to cancel assignment")
+    }
+  }
+
+  const isAnyLoading = isUnlinking || isCancelling || isSavingStage
+
+  return (
+    <Container className="p-0">
+      <div className="flex items-center justify-between px-6 py-4">
+        <div>
+          <Heading level="h2">Partners</Heading>
+          <Text className="text-ui-fg-subtle" size="small">
+            Who does which stage on this design. Adding a partner does not message them.
+          </Text>
+        </div>
+        <ActionMenu
+          groups={[
+            {
+              actions: [
+                {
+                  label: "Link Partner",
+                  icon: <Plus />,
+                  onClick: () => {
+                    navigate(`/designs/${design.id}/linkPartner`);
+                  },
+                },
+              ],
+            },
+          ]}
+        />
+      </div>
+      <div className="txt-small flex flex-col gap-2 px-1 pb-2">
+        {!partners.length ? (
+          <div className="flex items-center justify-center py-4 w-full">
+            <Text className="text-ui-fg-subtle">No partners linked to this design</Text>
+          </div>
+        ) : (
+          partners.map((partner) => {
+            const link = `/partners/${partner.id}`;
+            const runStatus = partnerRunStatus(partner.id)
+            const isRunActive = hasActiveRun(partner.id)
+            const canUnlink = !isRunActive
+            const rosterEntry = rosterByPartner.get(partner.id)
+
+            const Inner = (
+              <div className="shadow-elevation-card-rest bg-ui-bg-component rounded-md px-4 py-2 transition-colors">
+                <div className="flex items-center gap-3">
+                  <Avatar src={partner.logo || undefined} fallback={partner.name?.charAt(0) || 'P'} />
+                  <div className="flex flex-1 flex-col overflow-hidden">
+                    <span className="text-ui-fg-base font-medium">
+                      {partner.name || `Partner ${partner.id}`}
+                    </span>
+                    <span className="text-ui-fg-subtle truncate max-w-[150px] sm:max-w-[200px] md:max-w-full block">
+                      {partner.handle || "-"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {/* How they relate to the design (prospect / maker / designer) */}
+                    {rosterEntry?.role && (
+                      <Badge size="2xsmall" color="grey">{rosterEntry.role}</Badge>
+                    )}
+
+                    {/* Production stage. Stops the click so the row's link does not navigate. */}
+                    <div
+                      className="w-44"
+                      onClick={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                      }}
+                    >
+                      <StageRoleSelect
+                        value={rosterEntry?.stage_role ?? null}
+                        disabled={isSavingStage || !rosterEntry}
+                        onChange={(v) => handleStageChange(partner.id, v)}
+                      />
+                    </div>
+
+                    {/* Production run status */}
+                    {runStatus && (
+                      <Badge color={
+                        runStatus === "completed" ? "green" :
+                        runStatus === "cancelled" ? "red" : "orange"
+                      }>
+                        {runStatus === "sent_to_partner" ? "Sent" : runStatus.replace(/_/g, " ")}
+                      </Badge>
+                    )}
+
+                    {/* Active run: allow cancelling the assignment (cancels the run) */}
+                    {isRunActive && (
+                      <Button
+                        size="small"
+                        variant="danger"
+                        isLoading={isCancelling}
+                        disabled={isAnyLoading}
+                        onClick={(e) => handleCancelAssignment(e, partner.id)}
+                      >
+                        <XCircle className="mr-1" />
+                        Cancel
+                      </Button>
+                    )}
+
+                    {/* Unlink */}
+                    {canUnlink && (
+                      <Button
+                        size="small"
+                        variant="transparent"
+                        isLoading={isUnlinking}
+                        disabled={isAnyLoading}
+                        onClick={(e) => handleUnlinkPartner(e, partner.id)}
+                        title="Unlink partner from design"
+                        aria-label={`Unlink ${partner.name || "partner"}`}
+                      >
+                        <Trash className="text-ui-fg-subtle" />
+                      </Button>
+                    )}
+                    <div className="size-7 flex items-center justify-center">
+                      <TriangleRightMini className="text-ui-fg-muted" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+
+            return (
+              <Link
+                to={link}
+                key={partner.id}
+                className="outline-none focus-within:shadow-borders-interactive-with-focus rounded-md [&:hover>div]:bg-ui-bg-component-hover"
+              >
+                {Inner}
+              </Link>
+            );
+          })
+        )}
+      </div>
+    </Container>
+  );
+};

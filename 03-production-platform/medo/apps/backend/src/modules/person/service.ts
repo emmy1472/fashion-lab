@@ -1,0 +1,45 @@
+// src/modules/person/services/person-service.ts
+import { MedusaError, MedusaService } from "@medusajs/framework/utils";
+import Person from "../person/models/person";
+import Address from "./models/person_address";
+import ContactDetail from "./models/person_contact";
+import Tag from "./models/person_tags";
+import PersonSub from "./models/person_subs";
+import IdExtractionBatch from "./models/id_extraction_batch";
+import IdExtractionBatchItem from "./models/id_extraction_batch_item";
+
+class PersonService extends MedusaService({
+  Person,
+  Address,
+  ContactDetail,
+  Tag,
+  PersonSub,
+  IdExtractionBatch,
+  IdExtractionBatchItem,
+}) {
+  // Custom methods can be added here
+  //
+  constructor() {
+    super(...arguments)
+  }
+
+  async listPersonAddresses(...args) {
+    return this.listAddresses(...args)
+  }
+
+  async listPersonContactDetails(...args) {
+    return this.listContactDetails(...args)
+  }
+
+  async listPersonTags(...args) {
+    return this.listTags(...args)
+  }
+
+  async listAndCountPersonTags(...args) {
+    return this.listAndCountTags(...args)
+  }
+
+
+}
+
+export default PersonService;

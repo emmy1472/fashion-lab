@@ -1,0 +1,182 @@
+import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { MedusaError } from "@medusajs/framework/utils"
+
+import { PARTNER_QUOTE_MODULE } from "../../../../../../modules/partner-quote"
+import { POST as mintQuote } from "../../../route"
+
+/**
+ * Freeze a draft into a real quote (#1446).
+ *
+ * ## It calls the mint route's own handler, deliberately
+ *
+ * `POST /admin/quotes` resolves design lines to variants, mints made-to-order
+ * products into the partner's catalogue, asserts every variant really is in
+ * that partner's store, runs `mintQuoteWorkflow` and delivers the buyer's
+ * email. Its own docblock says why a second implementation must not exist:
+ * that workflow's price-list assertion "is the only thing standing between a
+ * quote and a platform-wide price cut."
+ *
+ * So this does not restate any of it. It reads the draft's stored answers,
+ * shapes them into the body that route already validates, and hands them to the
+ * SAME function — which reads nothing from the request but `scope` and
+ * `validatedBody`. One mint, reached two ways.
+ *
+ * ## The draft is consumed, not converted
+ *
+ * A minted quote is a new row: the workflow creates it, complete with the token
+ * hash a draft has never had. The draft is deleted once that has succeeded —
+ * after, never before, so a mint that throws leaves the operator's work exactly
+ * where they left it rather than destroying it on the way to an error.
+ */
+export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
+  const service: any = req.scope.resolve(PARTNER_QUOTE_MODULE)
+  const id = String(req.params.id || "")
+
+  const draft = id ? await service.retrievePartnerQuote(id).catch(() => null) : null
+  if (!draft) {
+    throw new MedusaError(MedusaError.Types.NOT_FOUND, "Draft not found")
+  }
+  if (draft.status !== "draft") {
+    throw new MedusaError(
+      MedusaError.Types.NOT_ALLOWED,
+      `Quote ${id} is ${draft.status}, not a draft — it has already been minted.`
+    )
+  }
+
+  const lines = await service.listPartnerQuoteLines({ quote_id: draft.id })
+  if (!lines?.length) {
+    /**
+     * Refused here rather than deep inside the pricer, where the same
+     * condition surfaces as an arithmetic error about an empty basket.
+     */
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "This draft has no items, so there is nothing to price."
+    )
+  }
+
+  /**
+   * The hand-typed freight rate, forwarded from the request (#1956).
+   *
+   * 🔴 Without this an unrateable lane cannot be minted through the draft door
+   * AT ALL. `quote-readiness` refuses with `freight_needs_manual_rate` whenever
+   * the carrier returns no rates and only a flat fallback exists, and the
+   * message it prints names the remedy outright: "Look up the real rate (DHL and
+   * the like) and type it in." `POST /admin/quotes` accepts exactly that field —
+   * but this route builds its body purely from the stored draft, and the draft
+   * has nowhere to keep a freight override (there is no freight field on the
+   * draft PATCH validator). So the operator was told to type in a number that
+   * this door had no way to receive.
+   *
+   * That is the same shape as #1806: a body assembled from a fixed list of
+   * fields, where the missing name is invisible at every layer that "passes".
+   * It is also why `admin-quote-draft-trade-price` has been red in CI for a
+   * month while passing on every developer machine — a laptop with carrier
+   * credentials gets real rates and never reaches the guard.
+   *
+   * Forwarded, not persisted: the ordinary mint validates and records it
+   * (`quoted_freight_source` / `_basis`), so this adds no second contract. A
+   * draft that should REMEMBER a typed rate is a separate slice.
+   */
+  const freightOverride = (req.body as any)?.freight_override_amount
+
+  const body = {
+    ...(freightOverride != null
+      ? { freight_override_amount: Number(freightOverride) }
+      : {}),
+    partner_id: draft.partner_id,
+    buyer_email: draft.email_sent_to,
+    recipient_name: draft.recipient_name,
+    recipient_company: draft.recipient_company,
+    buyer_tax_id: draft.buyer_tax_id,
+    buyer_tax_id_type: draft.buyer_tax_id_type,
+    partner_note: draft.partner_note,
+    currency_code: draft.currency_code,
+    region_id: draft.region_id,
+    destination_country_code: draft.destination_country_code,
+    destination_postal_code: draft.destination_postal_code,
+    destination_city: draft.destination_city,
+    // 🔑 `??`, never `||`: a stored 0% deposit is a real term.
+    deposit_pct: draft.deposit_pct ?? null,
+    balance_trigger: draft.balance_trigger ?? null,
+    duties_prepaid: draft.duties_prepaid ?? false,
+    ...(draft.duties_prepaid
+      ? {
+          duty_rate_percent: draft.duty_rate_percent ?? null,
+          import_tax_rate_percent: draft.import_tax_rate_percent ?? null,
+          ddp_fee_total: draft.ddp_fee_total ?? null,
+          duty_basis: draft.duty_basis || null,
+        }
+      : {}),
+    lines: [...lines]
+      .sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0))
+      .map((l: any) => ({
+        variant_id: l.variant_id,
+        quantity: l.quantity,
+        position: l.position ?? 0,
+        ...(l.design_id ? { design_id: l.design_id } : {}),
+        /**
+         * The negotiated price the draft was saved with (#1806).
+         *
+         * 🔴 This is the layer the number died at last. The grid collected it,
+         * the validator accepted it, the mint has always known how to freeze it
+         * — and the body built here named five fields, so every draft minted at
+         * catalogue price no matter what the operator had typed.
+         *
+         * 🔑 `!= null` BEFORE `Number(...)`: `override_input_amount` is a
+         * bigNumber column and `Number(null)` is `0` — which would send a 0%
+         * discount, or worse a `0` flat price, on every ordinary line.
+         */
+        ...(l.override_input_amount != null &&
+        l.override_kind === "discount_percent"
+          ? { discount_percent: Number(l.override_input_amount) }
+          : {}),
+        ...(l.override_input_amount != null &&
+        l.override_kind === "override_unit_amount"
+          ? { override_unit_amount: Number(l.override_input_amount) }
+          : {}),
+        /**
+         * The operator-typed weight, for the lines the catalogue cannot weigh.
+         * Without it `buildShippingEstimate` refuses the WHOLE basket on the
+         * first weightless line — so a design-led draft that priced fine in the
+         * grid could not be minted at all.
+         */
+        ...(l.quoted_unit_weight_grams != null
+          ? { unit_weight_grams: Number(l.quoted_unit_weight_grams) }
+          : {}),
+      })),
+  }
+
+  /**
+   * The response is written by the mint handler itself, so the body an operator
+   * receives here — the raw token included — is byte-for-byte the one the
+   * ordinary mint returns. A hand-rolled echo would be a second contract to
+   * keep in step.
+   */
+  const captured: { status?: number; body?: unknown } = {}
+  const proxyRes = {
+    status(code: number) {
+      captured.status = code
+      return this
+    },
+    json(payload: unknown) {
+      captured.body = payload
+      return this
+    },
+  } as unknown as MedusaResponse
+
+  await mintQuote(
+    { scope: req.scope, validatedBody: body } as unknown as MedusaRequest,
+    proxyRes
+  )
+
+  // Only now. A throw above leaves the draft intact.
+  // Lines first — see the DELETE handler: a parent delete with children still
+  // pointing at it fails with a message that names the parent as missing.
+  await service.deletePartnerQuoteLines(lines.map((l: any) => l.id))
+  await service.deletePartnerQuotes([draft.id])
+
+  res
+    .status(captured.status ?? 201)
+    .json({ ...(captured.body as object), draft_id: draft.id })
+}

@@ -1,0 +1,6 @@
+{
+  "id": "rendertest",
+  "description": "A FreeSewing pattern to test (y)our render engine our CSS",
+  "version": "4.2.0",
+  "collection": false
+}

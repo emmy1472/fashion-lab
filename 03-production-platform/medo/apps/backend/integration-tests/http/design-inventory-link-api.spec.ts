@@ -1,0 +1,283 @@
+import { medusaIntegrationTestRunner } from "@medusajs/test-utils";
+import { createAdminUser, getAuthHeaders } from "../helpers/create-admin-user";
+import { getSharedTestEnv, setupSharedTestSuite } from "./shared-test-setup";
+
+/**
+ * This is a simple case where we assume that Raw_maeterials are attached already 
+ */
+
+
+const testDesign = {
+  name: "Summer T-Shirt Design",
+  description: "Basic cotton t-shirt design",
+  design_type: "Original",
+  status: "In_Development",
+  priority: "Medium",
+  target_completion_date: new Date("2025-06-30"),
+  tags: ["summer", "basic", "cotton"],
+  metadata: {
+    season: "Summer 2025",
+    collection: "Basics"
+  }
+};
+
+setupSharedTestSuite(() => {
+
+    let headers;
+    let designId;
+    let cottonFabricId;
+    let buttonsId;
+    const api = getSharedTestEnv().api;
+    beforeEach(async () => {
+      const { api, getContainer } = getSharedTestEnv();
+      const container = getContainer();
+      //await createAdminUser(container);
+      await createAdminUser(container);
+     
+      headers = await getAuthHeaders(api);
+
+      // Create the design first
+      const designResponse = await api.post("/admin/designs", testDesign, headers);
+      expect(designResponse.status).toBe(201);
+      designId = designResponse.data.design.id;
+
+      // Create Cotton Fabric inventory
+      const cottonFabric = {
+        title: "Cotton Fabric",
+        description: "High quality cotton fabric for t-shirts",
+      };
+      const cottonResponse = await api.post("/admin/inventory-items", cottonFabric, headers);
+      expect(cottonResponse.status).toBe(200);
+      cottonFabricId = cottonResponse.data.inventory_item.id;
+
+      // Create Buttons inventory
+      const buttons = {
+        title: "Buttons",
+        description: "Plastic buttons for t-shirts",
+      };
+      const buttonsResponse = await api.post("/admin/inventory-items", buttons, headers);
+      expect(buttonsResponse.status).toBe(200);
+      buttonsId = buttonsResponse.data.inventory_item.id;
+
+    });
+
+    describe("POST /admin/designs/:id/inventory", () => {
+      it("should link inventory items to design", async () => {
+        const linkData = {
+          inventoryIds: [cottonFabricId, buttonsId]
+        };
+
+        const response = await api.post(
+          `/admin/designs/${designId}/inventory`,
+          linkData,
+          headers
+        );
+
+        expect(response.status).toBe(201);
+        expect(response.data.inventory_items).toBeDefined();
+        expect(response.data.inventory_items.map(item => ({
+          design_id: designId,
+          inventory_id: item.id
+        }))).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              design_id: designId,
+              inventory_id: cottonFabricId
+            }),
+            expect.objectContaining({
+              design_id: designId,
+              inventory_id: buttonsId
+            })
+          ])
+        );
+      });
+
+      it("should fail when linking non-existent inventory items", async () => {
+        const linkData = {
+          inventoryIds: ["non-existent-id"]
+        };
+
+        const response = await api
+          .post(`/admin/designs/${designId}/inventory`, linkData, headers)
+          .catch((err) => err.response);
+
+        expect(response.status).toBe(404);
+        
+        expect(response.data).toEqual({
+          message: "InventoryItem with id: non-existent-id was not found"
+        });
+      });
+
+      it("should fail when linking to non-existent design", async () => {
+        const linkData = {
+          inventoryIds: [cottonFabricId]
+        };
+
+        const response = await api
+          .post(`/admin/designs/non-existent-id/inventory`, linkData, headers)
+          .catch((err) => err.response);
+
+        expect(response.status).toBe(404);
+        console.log(response.data);
+        expect(response.data).toEqual({
+          
+          message: 'Design with id "non-existent-id" not found'
+        });
+      });
+
+      it("should store planned quantity and metadata when linking inventory items payload", async () => {
+        const payload = {
+          inventoryItems: [
+            {
+              inventoryId: cottonFabricId,
+              plannedQuantity: 12,
+              metadata: {
+                usage: "primary-fabric",
+              },
+            },
+          ],
+        };
+
+        const linkResponse = await api.post(
+          `/admin/designs/${designId}/inventory`,
+          payload,
+          headers
+        );
+        expect(linkResponse.status).toBe(201);
+
+        const inventoryResponse = await api.get(
+          `/admin/designs/${designId}/inventory`,
+          headers
+        );
+        expect(inventoryResponse.status).toBe(200);
+
+        const linkedItem = inventoryResponse.data.inventory_items.find(
+          (item) => item.inventory_item_id === cottonFabricId
+        );
+        expect(linkedItem).toBeDefined();
+        expect(linkedItem.planned_quantity).toBe(12);
+        expect(linkedItem.metadata).toMatchObject({ usage: "primary-fabric" });
+        expect(linkedItem.consumed_quantity).toBeNull();
+        expect(linkedItem.consumed_at).toBeNull();
+        expect(linkedItem.inventory_item?.id).toBe(cottonFabricId);
+      });
+    });
+
+    /**
+     * #2315 — cloth is planned in metres, and metres are fractional: the
+     * leftover after a 3 m robe is cut from 5.7 m is 2.7 m. The link column is
+     * decimal; only the validator's `.int()` refused it.
+     */
+    describe("planned metres are decimal (#2315)", () => {
+      const planned = async () => {
+        const res = await api.get(`/admin/designs/${designId}/inventory`, headers)
+        return res.data.inventory_items.find(
+          (item) => item.inventory_item_id === cottonFabricId
+        )?.planned_quantity
+      }
+
+      it("links with a fractional planned quantity", async () => {
+        const res = await api.post(
+          `/admin/designs/${designId}/inventory`,
+          { inventoryItems: [{ inventoryId: cottonFabricId, plannedQuantity: 2.7 }] },
+          headers
+        )
+        expect(res.status).toBe(201)
+        expect(Number(await planned())).toBe(2.7)
+      })
+
+      it("changes an existing link's metres through PATCH, and validates it", async () => {
+        await api.post(
+          `/admin/designs/${designId}/inventory`,
+          { inventoryItems: [{ inventoryId: cottonFabricId, plannedQuantity: 3 }] },
+          headers
+        )
+
+        const bad = await api
+          .patch(
+            `/admin/designs/${designId}/inventory/${cottonFabricId}`,
+            { plannedQuantity: -1 },
+            headers
+          )
+          .catch((e) => e.response)
+        expect(bad.status).toBe(400)
+
+        const ok = await api.patch(
+          `/admin/designs/${designId}/inventory/${cottonFabricId}`,
+          { plannedQuantity: 2.8 },
+          headers
+        )
+        expect(ok.status).toBe(200)
+        expect(Number(await planned())).toBe(2.8)
+      })
+
+      it("removes a material from the design", async () => {
+        await api.post(
+          `/admin/designs/${designId}/inventory`,
+          { inventoryIds: [cottonFabricId, buttonsId] },
+          headers
+        )
+        const res = await api.post(
+          `/admin/designs/${designId}/inventory/delink`,
+          { inventoryIds: [cottonFabricId] },
+          headers
+        )
+        expect(res.status).toBe(200)
+        const list = await api.get(`/admin/designs/${designId}/inventory`, headers)
+        const ids = list.data.inventory_items.map((i) => i.inventory_item_id)
+        expect(ids).toEqual([buttonsId])
+      })
+    })
+
+    describe("GET /admin/designs/:id/inventory", () => {
+      it("should return linked inventory items", async () => {
+        // First link some inventory items
+        await api.post(
+          `/admin/designs/${designId}/inventory`,
+          { inventoryIds: [cottonFabricId, buttonsId] },
+          headers
+        );
+
+        const response = await api.get(
+          `/admin/designs/${designId}/inventory`,
+          headers
+        );
+        expect(response.status).toBe(200);
+        expect(response.data).toBeDefined();
+        expect(Array.isArray(response.data.inventory_items)).toBe(true);
+        expect(response.data.inventory_items.length).toBe(2);
+
+        // Check if both inventory items are present
+        const inventoryIds = response.data.inventory_items.map(item => item.id);
+        expect(inventoryIds).toContain(cottonFabricId);
+        expect(inventoryIds).toContain(buttonsId);
+      });
+
+      it("should return empty array for design with no inventory", async () => {
+        // Create a new design without linking any inventory
+        const newDesignResponse = await api.post("/admin/designs", testDesign, headers);
+        const newDesignId = newDesignResponse.data.design.id;
+
+        const response = await api.get(
+          `/admin/designs/${newDesignId}/inventory`,
+          headers
+        );
+
+        expect(response.status).toBe(200);
+        expect(response.data).toBeDefined();
+        expect(Array.isArray(response.data.inventory_items)).toBe(true);
+        expect(response.data.inventory_items).toHaveLength(0);
+      });
+
+      it("should fail for non-existent design", async () => {
+        const response = await api
+          .get(`/admin/designs/non-existent-id/inventory`, headers)
+          .catch((err) => err.response);
+        
+        expect(response.status).toBe(404);
+        expect(response.data).toEqual({
+          message: 'Design with id: non-existent-id was not found'
+        });
+      });
+    });
+});

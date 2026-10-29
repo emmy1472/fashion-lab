@@ -1,0 +1,65 @@
+---
+title: useSelection
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { Popout } from '@freesewing/react/components/Popout'
+import { Tab, Tabs } from '@freesewing/react/components/Tab'
+
+<DocusaurusDoc>
+
+The **useSelection** hook facilitates letting the user select one or more items
+from a list or array. You need to pass this list/array to the hook.
+
+## Example
+
+```js
+import { useSelection } from '@freesewing/react/hooks/useFilter'
+
+const MyComponent = ({ items = [] }) => {
+  const {
+    count,
+    selection,
+    setSelection,
+    toggle,
+    toggleAll,
+  } = useSelection(items)
+
+  // ...
+}
+```
+
+## Return value
+
+Calling the hook returns an object with the following properties:
+
+- [count](#count)
+- [selection](#selection)
+- [setSelection](#setselection)
+- [toggle](#toggle)
+- [toggleAll](#toggleAll)
+
+### count
+
+This holds the number of items currently selected.
+
+### selection
+
+This holds an object of selected items where the key is the index and the value the item itself.
+Call `selection.values()` to get an array.
+
+### setSelection
+
+This is a method that sets the selection manually, typically not used.
+
+# toggle
+
+This is a method that takes an index and toggles the selection for that item.
+
+# toggleAll
+
+This is a method will select all items, unless all items are currently
+selected. In that case, it will select zero items.
+
+</DocusaurusDoc>
+

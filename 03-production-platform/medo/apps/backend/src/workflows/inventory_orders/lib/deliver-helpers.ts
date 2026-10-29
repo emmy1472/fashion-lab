@@ -1,0 +1,194 @@
+import { MedusaError } from "@medusajs/framework/utils"
+import {
+  resolveDeliveredByLine,
+  type DeliveredLine,
+  type OrderLineForReversal,
+} from "./cancel-helpers"
+
+/**
+ * #778 C2 (admin half) + state-machine enforcement on the admin update path.
+ *
+ * The generic admin PUT (`update-inventory-orders` workflow) historically only
+ * checked the *current* status (must be Pending/Processing) and never the
+ * *target* — so an admin could write `status: "Delivered"` straight onto the
+ * column, jumping past the stock-posting that the partner-complete path does.
+ * These pure helpers make the transition rules explicit + unit-testable and
+ * compute the stock to post when an admin actually delivers an order.
+ */
+
+/**
+ * An order line shaped for delivery stock posting (mirrors the reversal shape,
+ * including its optional `line_fulfillments` — the typed receipt record #1613
+ * makes this helper read alongside the metadata blob).
+ */
+export type OrderLineForDelivery = OrderLineForReversal & {
+  /** Ordered quantity for the line (what a full delivery posts, minus prior deliveries). */
+  quantity: number
+}
+
+/** A computed (item, location, qty) level to post on delivery. */
+export type DeliveryLevelInput = {
+  location_id: string
+  inventory_item_id: string
+  stocked_quantity: number
+}
+
+/** Outcome of evaluating a requested admin status transition. */
+export type AdminTransitionDecision = {
+  /** True when the transition is into "Delivered" and stock must be posted. */
+  postStock: boolean
+}
+
+const FIELD_EDIT_STATUSES = new Set(["Pending", "Processing"])
+
+/**
+ * Enforce the admin-editor status rule and decide whether the update must post
+ * stock. Pure (no container) so it can be unit-tested directly.
+ *
+ * The generic admin PUT only mutates orders that are still Pending or Processing
+ * — the long-standing lock (orders with prior deliveries are Partial/Shipped/
+ * Delivered and must go through their dedicated flows: partner-complete, the
+ * cancel workflow #778 C4, the shipment flow). That lock already prevents the
+ * dangerous "cancel/edit an order that posted stock" cases, so it is preserved
+ * verbatim (including its error message, which other flows assert on).
+ *
+ * The one correctness fix (#778 M / C2 admin-half): a transition *to Delivered*
+ * must POST stock (mirroring the partner-complete posting) rather than silently
+ * writing the status column and bypassing inventory movement. Throws
+ * `INVALID_DATA` when the order is no longer editable.
+ */
+export const evaluateAdminStatusTransition = (
+  current: string | null | undefined,
+  target: string | null | undefined,
+  options?: { isSample?: boolean }
+): AdminTransitionDecision => {
+  const currentStatus = String(current ?? "")
+
+  // A samples/swatch order is the one kind that MUST stay editable after it
+  // arrives: it is created empty on purpose, and the whole point is to fill in
+  // what was in the box once someone has opened it. The Pending/Processing
+  // lock exists to stop an order that already posted stock being edited
+  // underneath itself — a sample never posts stock (see below), so that
+  // reasoning does not apply to it.
+  //
+  // Cancelled is still refused. A cancelled order is not a record anyone
+  // should be adding to.
+  if (options?.isSample) {
+    if (currentStatus === "Cancelled") {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "This sample order is cancelled and can no longer be edited."
+      )
+    }
+    // 🔑 Never posts stock. Swatches are reference material, not sellable
+    // units; posting them would put ~zero-value swatch units into a location
+    // where they can be counted, reserved and sold.
+    return { postStock: false }
+  }
+
+  if (!FIELD_EDIT_STATUSES.has(currentStatus)) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "Order can only be updated if status is 'Pending' or 'Processing'."
+    )
+  }
+  const isChange = target !== undefined && target !== null && target !== current
+  return { postStock: isChange && target === "Delivered" }
+}
+
+/**
+ * Compute the stock to post when an admin delivers an order, plus the
+ * delivered-line records to append to `metadata.partner_delivered_lines`.
+ *
+ * Posts only the *remaining* quantity per line (ordered − already delivered, so
+ * delivering a Partial order never double-posts what the partner already
+ * posted), resolved to the same (item, location) the partner-complete path uses:
+ * the line's first linked inventory item at the order's destination location, or
+ * the item's own first linked location as a fallback. Lines with nothing
+ * remaining, or no resolvable item/location, are skipped for posting (but a
+ * resolvable remainder is still recorded so a later cancel reverses it).
+ */
+export const computeAdminDeliveryPosting = (
+  orderlines: OrderLineForDelivery[] | undefined | null,
+  alreadyDelivered: DeliveredLine[] | undefined | null,
+  destLocationId: string | null | undefined,
+  /**
+   * #2289 S2 — what the admin COUNTED, per order line. When given, each line
+   * posts its count (a line left out counts 0), never the remainder: marking
+   * an order Delivered is no longer "everything outstanding arrived". A count
+   * above what is still outstanding is refused. Omitted only by callers that
+   * predate counting (the pure tests of the remainder rule).
+   */
+  counted?: Record<string, number> | null
+): { levels: DeliveryLevelInput[]; deliveredRecords: DeliveredLine[] } => {
+  // #1613 — `already` reads BOTH records of what has been delivered (the typed
+  // `line_fulfillments` rows carried on the line, and the metadata blob) and
+  // takes the larger. Reading the blob alone under-counted every submission but
+  // the last, and posted the difference as stock that was already received.
+  const deliveredByLine = resolveDeliveredByLine(orderlines, alreadyDelivered)
+  const levels: DeliveryLevelInput[] = []
+  const deliveredRecords: DeliveredLine[] = []
+
+  for (const ol of (orderlines || []).filter(Boolean)) {
+    const ordered = Number(ol.quantity) || 0
+    const already = deliveredByLine[ol.id] || 0
+    const remaining = ordered - already
+    let post = remaining
+    if (counted) {
+      const count = Number(counted[ol.id] ?? 0) || 0
+      if (count < 0) {
+        throw new MedusaError(MedusaError.Types.INVALID_DATA, `Counted quantity for line ${ol.id} cannot be negative`)
+      }
+      if (count > Math.max(0, remaining) + 0.01) {
+        throw new MedusaError(
+          MedusaError.Types.INVALID_DATA,
+          `Line ${ol.id}: counted ${count} but only ${Math.max(0, remaining)} is still outstanding`
+        )
+      }
+      post = count
+    }
+    if (post <= 0) continue
+
+    deliveredRecords.push({ order_line_id: ol.id, quantity: post })
+
+    const firstItem = ol.inventory_items?.[0]
+    const itemId = firstItem?.id || ol.inventory_item_id
+    const locId = destLocationId || firstItem?.stock_locations?.[0]?.id
+    if (itemId && locId) {
+      levels.push({
+        location_id: String(locId),
+        inventory_item_id: String(itemId),
+        stocked_quantity: post,
+      })
+    }
+  }
+
+  return { levels, deliveredRecords }
+}
+
+/**
+ * #2289 S2 (founder decision 2026-10-08, option b) — an admin marking an order
+ * Delivered must say what was COUNTED. Before, this posted "ordered minus
+ * already received" as if everything arrived, with nobody having counted it.
+ *
+ * Returns the counts keyed by order line, or null when this update posts
+ * nothing. Throws when it would post and no counts were sent.
+ */
+export const requireDeliveryCounts = (
+  postStock: boolean,
+  receivedLines: Array<{ order_line_id: string; quantity: number }> | null | undefined
+): Record<string, number> | null => {
+  if (!postStock) return null
+  if (!Array.isArray(receivedLines)) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "Marking an order Delivered needs the counted quantities: send received_lines [{ order_line_id, quantity }] for what actually arrived, or use Receive goods."
+    )
+  }
+  const out: Record<string, number> = {}
+  for (const l of receivedLines) {
+    if (!l?.order_line_id) continue
+    out[String(l.order_line_id)] = (out[String(l.order_line_id)] ?? 0) + (Number(l.quantity) || 0)
+  }
+  return out
+}

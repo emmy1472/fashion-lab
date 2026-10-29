@@ -1,0 +1,82 @@
+---
+title: useStateObject
+---
+
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { Popout } from '@freesewing/react/components/Popout'
+import { Tab, Tabs } from '@freesewing/react/components/Tab'
+
+<DocusaurusDoc>
+
+The **useStateObject** hook provides state management with a `lodash.get`-style
+update handler.
+
+It allows one to update specific parts of a state object without having to
+re-construct the new state object yourself.
+
+It is named `useStateObject` because it is intended to be used for objects. Do
+not use this for scalar values where React's native `useState` hook is a better fit.
+
+## Example
+
+```js
+import { useStateObject } from '@freesewing/react/hooks/useStateObject'
+
+const MyComponent = () => {
+  const [value, update, replace] = useStateObject(initialObject)
+
+  // ...
+}
+```
+
+## Return value
+
+This hook returns an array with three entries:
+
+- [value](#value)
+- [update](#update)
+- [replace](#replace)
+
+### value
+
+This holds the current value of the object managed by this state.
+
+### update
+
+This method allows you to update the state. It takes two parameters:
+
+```js
+function update(
+  string|array path, // The path to the property to set
+  mixed value, // The value to set
+)
+```
+
+The `path` can be specified as either a dot-notation path, or an array.
+These two update calls are equivalent:
+
+```js
+// These do the same thing
+update('some.nested.key', "new value here")
+update(['some', 'nested', 'key'], "new value here")
+```
+
+You can also specify multiple update operations by passing them as an array
+of arrays with `path` and `value` elements:
+
+```js
+// Update multiple keys in one call
+update([
+  [ 'some.nested.key', "new value here" ],
+  [ ['some', 'other', 'key'], { some: "other value" } ],
+  [ "one.more", "example" ]
+])
+```
+
+### replace
+
+This method takes a value that will completed replace the object kept in state.
+
+</DocusaurusDoc>
+

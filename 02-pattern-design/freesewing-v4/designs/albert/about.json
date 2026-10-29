@@ -1,0 +1,20 @@
+{
+  "id": "albert",
+  "name": "Albert apron",
+  "code": "Wouter Van Wageningen",
+  "description": "A FreeSewing pattern for an apron",
+  "design": "Wouter Van Wageningen",
+  "difficulty": 2,
+  "tags": [
+    "accessories"
+  ],
+  "techniques": [
+    "hem",
+    "knit-binding",
+    "curved-seam",
+    "pocket"
+  ],
+  "version": "4.2.0",
+  "pkg": "@freesewing/albert",
+  "collection": true
+}

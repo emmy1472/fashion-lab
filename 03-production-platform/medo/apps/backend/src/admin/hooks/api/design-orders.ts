@@ -1,0 +1,926 @@
+import { FetchError } from "@medusajs/js-sdk";
+import {
+  QueryKey,
+  UseMutationOptions,
+  UseQueryOptions,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+
+import { sdk } from "../../lib/config";
+import { queryKeysFactory } from "../../lib/query-key-factory";
+
+export type DesignOrderLineItem = {
+  design: {
+    id: string;
+    name: string;
+    status: string;
+    estimated_cost?: number;
+  };
+  line_item_id: string;
+  price: number;
+  metadata: Record<string, any> | null;
+  added_at: string;
+};
+
+export type DesignOrderItem = {
+  cart_id: string;
+  cart: {
+    id: string;
+    currency_code: string;
+    metadata: Record<string, any> | null;
+    created_at: string;
+    completed_at: string | null;
+  } | null;
+  customer: {
+    id: string;
+    email: string;
+    first_name: string;
+    last_name: string;
+  } | null;
+  items: DesignOrderLineItem[];
+  order: {
+    id: string;
+    display_id: number;
+    status: string;
+    payment_status: string;
+    fulfillment_status: string;
+    total: number;
+    currency_code: string;
+    created_at: string;
+    canceled_at: string | null;
+  } | null;
+  created_at: string | null;
+  total_price: number;
+};
+
+/** Single design-order detail (returned by GET /admin/designs/orders/:lineItemId) */
+/** #1918 — one ORDER line item: what was ordered, what arrived, which design. */
+export type OrderItemRow = {
+  id: string;
+  title: string | null;
+  subtitle: string | null;
+  thumbnail: string | null;
+  ordered: number | null;
+  delivered: number | null;
+  shipped: number | null;
+  fulfilled: number | null;
+  state: "delivered" | "shipped" | "made" | "outstanding";
+  state_label: string;
+  design: { id: string; name: string | null; source: string | null } | null;
+  original_design_id: string | null;
+  /** False when the line has no variant — Medusa's order edit cannot touch it. */
+  editable: boolean;
+  uneditable_reason: string | null;
+};
+
+export type OrderItemsSummary = {
+  items: OrderItemRow[];
+  ordered_total: number;
+  delivered_total: number;
+  outstanding_total: number;
+  has_outstanding: boolean;
+  verdict: "all_delivered" | "in_progress" | "owed";
+  verdict_label: string;
+};
+
+export type DesignOrderDetail = {
+  design: {
+    id: string;
+    name: string;
+    status: string;
+    description?: string;
+    thumbnail_url?: string;
+    estimated_cost?: number;
+    design_type?: string;
+  };
+  customer: {
+    id: string;
+    email: string;
+    first_name: string;
+    last_name: string;
+  } | null;
+  line_item_id: string;
+  cart_id: string;
+  title: string | null;
+  price: number;
+  quantity: number;
+  added_at: string;
+  metadata: Record<string, any> | null;
+  /** #1918 — null when the commission has not become an order yet. */
+  order_items: OrderItemsSummary | null;
+  order: {
+    id: string;
+    display_id: number;
+    status: string;
+    payment_status: string;
+    fulfillment_status: string;
+    total: number;
+    currency_code: string;
+    created_at: string;
+    canceled_at: string | null;
+    tracking: {
+      /** The fulfillment carrying this AWB — the address for cancelling it. */
+      fulfillment_id: string | null;
+      carrier: string | null;
+      awb: string | null;
+      tracking_url: string | null;
+      current_status: string | null;
+      shipped_at: string | null;
+      delivered_at: string | null;
+    } | null;
+  } | null;
+  checkout_url: string | null;
+};
+
+export type DesignOrdersQuery = {
+  limit?: number;
+  offset?: number;
+};
+
+export type DesignOrdersResponse = {
+  design_orders: DesignOrderItem[];
+  count: number;
+  offset: number;
+  limit: number;
+};
+
+export type ApproveDesignResponse = {
+  design: { id: string; status: string };
+  product_id: string;
+  variant_id: string;
+};
+
+const designOrdersQueryKeys = queryKeysFactory<
+  "design_orders",
+  DesignOrdersQuery
+>("design_orders");
+
+export { designOrdersQueryKeys };
+
+export const useDesignOrders = (
+  query?: DesignOrdersQuery,
+  options?: Omit<
+    UseQueryOptions<
+      DesignOrdersResponse,
+      FetchError,
+      DesignOrdersResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: async () =>
+      sdk.client.fetch<DesignOrdersResponse>(`/admin/designs/orders`, {
+        method: "GET",
+        query: query as Record<string, any>,
+      }),
+    queryKey: designOrdersQueryKeys.list(query),
+    ...options,
+  });
+
+  return { ...data, ...rest };
+};
+
+export const useDesignOrder = (
+  lineItemId: string,
+  options?: Omit<
+    UseQueryOptions<
+      { design_order: DesignOrderDetail },
+      FetchError,
+      { design_order: DesignOrderDetail },
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: async () =>
+      sdk.client.fetch<{ design_order: DesignOrderDetail }>(
+        `/admin/designs/orders/${lineItemId}`,
+        { method: "GET" }
+      ),
+    queryKey: designOrdersQueryKeys.detail(lineItemId),
+    ...options,
+  });
+
+  return { designOrder: data?.design_order, ...rest };
+};
+
+export const useApproveDesign = (
+  designId: string,
+  options?: UseMutationOptions<ApproveDesignResponse, FetchError>
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      sdk.client.fetch<ApproveDesignResponse>(
+        `/admin/designs/${designId}/approve`,
+        { method: "POST", body: {} }
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.lists(),
+      });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export const useCancelDesignOrder = (
+  orderId: string,
+  options?: UseMutationOptions<unknown, FetchError>
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      sdk.client.fetch(`/admin/orders/${orderId}/cancel`, {
+        method: "POST",
+        body: {},
+      }),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.lists(),
+      });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export type ConvertDesignOrderPayload = {
+  payment_mode?: "prepaid" | "cod";
+};
+
+export type ConvertDesignOrderResponse = {
+  design_order_conversion: {
+    order_id: string;
+    display_id?: number;
+    status?: string;
+    payment_status?: string;
+    payment_mode: "prepaid" | "cod";
+    linked_design_ids: string[];
+  };
+};
+
+/**
+ * Convert a design order (cart with design line items, no order yet) into a
+ * real order. #404 PR-A. Pass `{ payment_mode: "cod" }` to leave it unpaid;
+ * defaults to prepaid (marked paid via the system provider).
+ */
+export const useConvertDesignOrder = (
+  lineItemId: string,
+  options?: UseMutationOptions<
+    ConvertDesignOrderResponse,
+    FetchError,
+    ConvertDesignOrderPayload
+  >
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: ConvertDesignOrderPayload = {}) =>
+      sdk.client.fetch<ConvertDesignOrderResponse>(
+        `/admin/designs/orders/${lineItemId}/convert`,
+        { method: "POST", body: payload }
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.lists(),
+      });
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.detail(lineItemId),
+      });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+// #826 S3a — produce a design order: fan out one production run per design line
+// and collate them into ONE kind=design work-order. Optional partner_id commits
+// the work (runs born sent_to_partner → the work-order is visible to that
+// partner). Idempotent.
+export interface ProduceDesignOrderPayload {
+  partner_id?: string;
+}
+export interface ProduceDesignOrderResponse {
+  design_order_production: {
+    created: number;
+    run_ids: string[];
+    design_ids: string[];
+    work_order_id: string | null;
+  };
+}
+export const useProduceDesignOrder = (
+  orderId: string,
+  options?: UseMutationOptions<
+    ProduceDesignOrderResponse,
+    FetchError,
+    ProduceDesignOrderPayload
+  >
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: ProduceDesignOrderPayload = {}) =>
+      sdk.client.fetch<ProduceDesignOrderResponse>(
+        `/admin/orders/${orderId}/design/produce`,
+        { method: "POST", body: payload }
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.lists(),
+      });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export type ShiprocketRateOption = {
+  courier_id?: string | number;
+  courier_name?: string;
+  amount: number;
+  currency_code: string;
+  estimated_days?: number;
+  cod_charges?: number;
+  is_recommended?: boolean;
+};
+
+export type ShiprocketRatesResponse = {
+  origin_pincode: string;
+  destination_pincode: string;
+  weight_grams: number;
+  cod: boolean;
+  rates: ShiprocketRateOption[];
+};
+
+export type ShiprocketRatesQuery = {
+  carrier?: string;
+  /**
+   * Parcel the quote should describe. Omitted, the backend prices its default
+   * weight — which is a different parcel than the one the label then ships.
+   */
+  weightGrams?: number;
+  lengthCm?: number;
+  widthCm?: number;
+  heightCm?: number;
+};
+
+/** Query string for a rate request — only the params actually supplied. */
+const rateQueryString = (query?: ShiprocketRatesQuery): string => {
+  const params = new URLSearchParams();
+  if (query?.carrier) params.set("carrier", query.carrier);
+  if (query?.weightGrams) params.set("weight_grams", String(query.weightGrams));
+  // Dimensions are all-or-nothing at the carrier — sending one side would be
+  // dropped anyway, so don't imply a box we can't describe.
+  if (query?.lengthCm && query?.widthCm && query?.heightCm) {
+    params.set("length_cm", String(query.lengthCm));
+    params.set("width_cm", String(query.widthCm));
+    params.set("height_cm", String(query.heightCm));
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+};
+
+/**
+ * List the Shiprocket courier options (rate / ETA / recommended) for an order
+ * so the operator can pick a courier before generating the label. #641.
+ * Disabled until explicitly enabled (the UI fetches on demand).
+ * Accepts an optional carrier query param (defaults to "shiprocket").
+ */
+export const useShiprocketRates = (
+  orderId: string,
+  query?: ShiprocketRatesQuery,
+  options?: Omit<
+    UseQueryOptions<
+      ShiprocketRatesResponse,
+      FetchError,
+      ShiprocketRatesResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => {
+  const qs = rateQueryString(query);
+  return useQuery({
+    queryKey: designOrdersQueryKeys.detail(`${orderId}-shiprocket-rates${qs}`),
+    queryFn: async () =>
+      sdk.client.fetch<ShiprocketRatesResponse>(
+        `/admin/orders/${orderId}/shiprocket-rates${qs}`,
+        { method: "GET" }
+      ),
+    ...options,
+  });
+};
+
+export type GenerateShiprocketLabelResponse = {
+  shiprocket_label: {
+    awb?: string;
+    tracking_number?: string;
+    label_url?: string;
+    tracking_url?: string;
+    fulfillment_id: string;
+  };
+};
+
+export type GenerateShiprocketLabelVariables = {
+  preferred_courier_id?: string | number;
+  carrier?: string;
+  /** Real parcel weight; omitted falls back to the backend default (500 g). */
+  weight_grams?: number;
+  dimensions_cm?: { length: number; width: number; height: number };
+};
+
+/**
+ * One-click Shiprocket label for a converted order: creates a fulfillment (or
+ * reuses an existing Shiprocket one) and generates the shipment + label. #404
+ * PR-C. Optionally passes the operator-chosen `preferred_courier_id` (#641)
+ * and the carrier (defaults to "shiprocket" on the backend).
+ */
+export const useGenerateShiprocketLabel = (
+  orderId: string,
+  options?: UseMutationOptions<
+    GenerateShiprocketLabelResponse,
+    FetchError,
+    GenerateShiprocketLabelVariables | undefined
+  >
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (variables?: GenerateShiprocketLabelVariables) => {
+      const body: Record<string, any> = {};
+      if (variables?.preferred_courier_id) body.preferred_courier_id = variables.preferred_courier_id;
+      if (variables?.carrier) body.carrier = variables.carrier;
+      if (variables?.weight_grams) body.weight_grams = variables.weight_grams;
+      if (variables?.dimensions_cm) body.dimensions_cm = variables.dimensions_cm;
+      return sdk.client.fetch<GenerateShiprocketLabelResponse>(
+        `/admin/orders/${orderId}/shiprocket-label`,
+        { method: "POST", body }
+      );
+    },
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.lists(),
+      });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+// ── Carrier-neutral aliases (P4) ──────────────────────────────────────────────
+
+export type FulfillmentRatesQuery = ShiprocketRatesQuery
+export type FulfillmentRatesResponse = ShiprocketRatesResponse
+export type GenerateFulfillmentLabelVariables = GenerateShiprocketLabelVariables
+export type GenerateFulfillmentLabelResponse = GenerateShiprocketLabelResponse
+
+/**
+ * Carrier-neutral alias for `useShiprocketRates`. Defaults carrier to
+ * `"shiprocket"` when omitted. Replaced the Shiprocket-specific hook name
+ * as the primary API going forward.
+ */
+export const useFulfillmentRates = (
+  orderId: string,
+  query?: FulfillmentRatesQuery,
+  options?: Omit<
+    UseQueryOptions<
+      FulfillmentRatesResponse,
+      FetchError,
+      FulfillmentRatesResponse,
+      QueryKey
+    >,
+    "queryFn" | "queryKey"
+  >
+) => useShiprocketRates(orderId, query, options)
+
+/**
+ * Carrier-neutral alias for `useGenerateShiprocketLabel`. Defaults carrier to
+ * `"shiprocket"` when omitted on the backend.
+ */
+export const useGenerateFulfillmentLabel = (
+  orderId: string,
+  options?: UseMutationOptions<
+    GenerateFulfillmentLabelResponse,
+    FetchError,
+    GenerateFulfillmentLabelVariables | undefined
+  >
+) => useGenerateShiprocketLabel(orderId, options)
+
+export type AttachShiprocketAwbResponse = {
+  shiprocket_awb: {
+    awb: string;
+    current_status?: string;
+    synced_state: "delivered" | "shipped" | "pending";
+    fulfillment_id: string;
+  };
+};
+
+/**
+ * Attach an EXISTING Shiprocket AWB (already shipped/delivered outside this
+ * system) to a converted order. Read-only against Shiprocket — looks the AWB up,
+ * stamps it onto the fulfillment, and auto-syncs the fulfillment status. #437.
+ */
+export const useAttachShiprocketAwb = (
+  orderId: string,
+  options?: UseMutationOptions<AttachShiprocketAwbResponse, FetchError, string>
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (awb: string) =>
+      sdk.client.fetch<AttachShiprocketAwbResponse>(
+        `/admin/orders/${orderId}/shiprocket-attach-awb`,
+        { method: "POST", body: { awb } }
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.lists(),
+      });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+export type CancelShipmentResponse = {
+  cancelled_shipment: {
+    fulfillment_id: string;
+    carrier?: string;
+    awb?: string;
+    cancelled_at: string;
+    /** False when the customer email could not be sent (see the seed script). */
+    customer_notified: boolean;
+    /**
+     * The platform-shipping deduction handed back to the partner, when the
+     * cancelled label had booked one. Null for a retail order, a partner on
+     * their own carrier account, or a carrier that quoted no rate.
+     */
+    shipping_reversed?: {
+      amount: number;
+      currency_code: string;
+      carrier: string | null;
+      awb: string | null;
+    } | null;
+  };
+};
+
+export type CancelShipmentVariables = {
+  fulfillmentId: string;
+  reason?: string;
+  /** Cancel even though the fulfillment is already marked shipped. */
+  force?: boolean;
+  /** Defaults to true on the backend. */
+  notify_customer?: boolean;
+};
+
+/**
+ * Void the carrier waybill on a fulfillment — the "the courier fell through /
+ * we're changing partner" path. Cancels at the carrier FIRST, then clears the
+ * refs, so a refusal leaves the live waybill attached rather than orphaned.
+ *
+ * Admin-only by design; there is no partner equivalent.
+ */
+export const useCancelShipment = (
+  orderId: string,
+  options?: UseMutationOptions<
+    CancelShipmentResponse,
+    FetchError,
+    CancelShipmentVariables
+  >
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ fulfillmentId, ...body }: CancelShipmentVariables) =>
+      sdk.client.fetch<CancelShipmentResponse>(
+        `/admin/orders/${orderId}/fulfillments/${fulfillmentId}/cancel-shipment`,
+        { method: "POST", body }
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.lists(),
+      });
+      options?.onSuccess?.(...args);
+    },
+  });
+};
+
+/**
+ * #1918 — attach, replace or DETACH the design behind an ORDER line item.
+ *
+ * ⚠️ Takes an ORDER line item id (`ordli_`), NOT the cart line item (`cali_`)
+ * this page is routed on. The cart-level link dies at checkout; only the order
+ * side can be re-pointed after payment, which is the whole point.
+ *
+ * `design_id: null` detaches. The field is always sent — the route rejects a
+ * missing one rather than reading it as a detach.
+ */
+/**
+ * #1918 — apply EVERY design change on an order as one change, and one email.
+ *
+ * The per-line hook above still exists and still works; it is a batch of one.
+ * What it cannot do is describe three re-points as one decision — called three
+ * times it sends the customer three emails, each about a third of it. This
+ * mirrors Medusa's own order edit, where actions accumulate on a single change
+ * and one notification goes out when it is applied.
+ */
+export const useChangeOrderDesigns = (
+  /** The CART line item this page is keyed on — for cache invalidation only. */
+  pageLineItemId: string
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: {
+      order_id: string;
+      changes: Array<{ line_item_id: string; design_id: string | null }>;
+      /**
+       * #1953 — what production should do about the change. `mode: "new"`
+       * commissions one run per line the change actually MOVES; "none" (the
+       * route's default) leaves production untouched.
+       *
+       * 🔴 This key has to be listed BOTH here and in the body below. The body
+       * is an explicit literal, not a spread, so a field named only in the
+       * type is accepted by TypeScript and then silently dropped on the way
+       * out — the request succeeds and production is simply never asked for.
+       */
+      production?: {
+        mode?: "none" | "new";
+        quantity?: number | null;
+        partner_id?: string | null;
+      };
+      notify?: boolean;
+      dry_run?: boolean;
+    }) =>
+      sdk.client.fetch<any>(`/admin/orders/${vars.order_id}/design-changes`, {
+        method: "POST",
+        body: {
+          changes: vars.changes,
+          production: vars.production,
+          notify: vars.notify,
+          dry_run: vars.dry_run,
+        },
+      }),
+    onSuccess: () => {
+      // Same three caches as the single-line mutation: this page + modal, the
+      // list, and the core order page's "Custom designs" widget by prefix.
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.detail(pageLineItemId),
+      });
+      queryClient.invalidateQueries({ queryKey: designOrdersQueryKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: ["order-design"] });
+    },
+    /**
+     * 🔴 No `...options` spread after onSuccess — see the hook below (#1800).
+     */
+  });
+};
+
+export const useChangeOrderItemDesign = (
+  /** The CART line item this page is keyed on — for cache invalidation only. */
+  pageLineItemId: string
+) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: {
+      order_line_item_id: string;
+      design_id: string | null;
+      notify?: boolean;
+      dry_run?: boolean;
+    }) =>
+      sdk.client.fetch<any>(
+        `/admin/designs/orders/${vars.order_line_item_id}/design`,
+        {
+          method: "POST",
+          body: {
+            design_id: vars.design_id,
+            notify: vars.notify,
+            dry_run: vars.dry_run,
+          },
+        }
+      ),
+    onSuccess: () => {
+      // The design-order page behind this modal (and the modal's own table,
+      // which share this key).
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.detail(pageLineItemId),
+      });
+      // The list, whose rows carry the design name.
+      queryClient.invalidateQueries({ queryKey: designOrdersQueryKeys.lists() });
+      /*
+        🔴 And the CORE order page's "Custom designs" widget, which is keyed
+        ["order-design", orderId] — a different cache entry entirely. Without
+        this, detaching a design here leaves the order page still listing it,
+        and the two screens disagree until a hard refresh. Invalidated by
+        PREFIX because this mutation knows the line item, not the order id.
+      */
+      queryClient.invalidateQueries({ queryKey: ["order-design"] });
+    },
+    /**
+     * 🔴 No `...options` spread after onSuccess. Doing so silently overrides
+     * the invalidation and the screen goes stale until a hard refresh — the bug
+     * #1800 found in 165 admin hooks.
+     */
+  });
+};
+
+/* ─── #1970 PR5 — changing a design order that already exists ─────────────── */
+
+export type AttachDesignOrderCustomerPayload = {
+  /** null detaches the buyer. */
+  customer_id: string | null
+}
+
+export type AttachDesignOrderCustomerResponse = {
+  design_order_customer: {
+    design_id: string
+    cart_id: string
+    customer_id: string | null
+    email?: string | null
+    changed: boolean
+    dismissed_customer_ids?: string[]
+  }
+}
+
+/**
+ * Attach (or detach) the buyer of an existing design order.
+ *
+ * The route writes BOTH the cart and the design↔customer link — see
+ * `decideCustomerAttach` for why one without the other leaves the screen and
+ * checkout disagreeing.
+ */
+export const useAttachDesignOrderCustomer = (
+  lineItemId: string,
+  options?: UseMutationOptions<
+    AttachDesignOrderCustomerResponse,
+    FetchError,
+    AttachDesignOrderCustomerPayload
+  >
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: AttachDesignOrderCustomerPayload) =>
+      sdk.client.fetch<AttachDesignOrderCustomerResponse>(
+        `/admin/designs/orders/${lineItemId}/customer`,
+        { method: "POST", body: payload }
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.detail(lineItemId),
+      })
+      queryClient.invalidateQueries({ queryKey: designOrdersQueryKeys.lists() })
+      options?.onSuccess?.(...args)
+    },
+  })
+}
+
+export type RepriceDesignOrderPayload = {
+  /** Major units, in the cart's own currency. */
+  unit_price: number
+}
+
+export type RepriceDesignOrderResponse = {
+  design_order_reprice: {
+    line_item_id: string
+    design_id: string
+    cart_id: string
+    currency_code: string
+    unit_price: number
+    previous_unit_price: number | null
+  }
+}
+
+/** Set a new custom price on an existing design order line. */
+export const useRepriceDesignOrder = (
+  lineItemId: string,
+  options?: UseMutationOptions<
+    RepriceDesignOrderResponse,
+    FetchError,
+    RepriceDesignOrderPayload
+  >
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: RepriceDesignOrderPayload) =>
+      sdk.client.fetch<RepriceDesignOrderResponse>(
+        `/admin/designs/orders/${lineItemId}/reprice`,
+        { method: "POST", body: payload }
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.detail(lineItemId),
+      })
+      queryClient.invalidateQueries({ queryKey: designOrdersQueryKeys.lists() })
+      options?.onSuccess?.(...args)
+    },
+  })
+}
+
+/** What the cancel route returns. */
+export type CancelDesignOrderResponse = {
+  design_order_cancel: {
+    line_item_id: string
+    design_id: string
+    cart_id: string
+    cancelled_at: string
+    cancelled_reason: string
+  }
+}
+
+/**
+ * Retire a design order that should never be paid (#2176 item 6).
+ *
+ * 🔴 NOT `useCancelDesignOrder` above. That one POSTs to
+ * `/admin/orders/:id/cancel` and cancels the ORDER a design order became —
+ * it only applies once there is one. This cancels the design order itself,
+ * while it is still a cart, and answers 409 the moment an order exists. The
+ * two are mutually exclusive by design, which is why they are named apart:
+ * a screen that reaches for the wrong one gets a 404 or a 409, never a
+ * silently wrong cancellation.
+ *
+ * 🔴 The reason is REQUIRED by the route, not decoration. A cancelled design
+ * order and a stale one look identical a month later, and the reason is the
+ * difference. The route answers 400 without one.
+ *
+ * Soft: the record and its price stay, the checkout link stops working. A
+ * converted design order is refused with 409 — cancel the ORDER instead.
+ */
+export const useCancelPendingDesignOrder = (
+  lineItemId: string,
+  options?: UseMutationOptions<
+    CancelDesignOrderResponse,
+    FetchError,
+    { reason: string }
+  >
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: { reason: string }) =>
+      sdk.client.fetch<CancelDesignOrderResponse>(
+        `/admin/designs/orders/${lineItemId}/cancel`,
+        { method: "POST", body: payload }
+      ),
+    ...options,
+    onSuccess: (...args) => {
+      queryClient.invalidateQueries({
+        queryKey: designOrdersQueryKeys.detail(lineItemId),
+      })
+      queryClient.invalidateQueries({ queryKey: designOrdersQueryKeys.lists() })
+      options?.onSuccess?.(...args)
+    },
+  })
+}
+
+export type AdminCustomerRow = {
+  id: string
+  email: string
+  first_name?: string | null
+  last_name?: string | null
+}
+
+/** Customers to choose from when attaching a buyer. Core Medusa route. */
+export const useCustomerSearch = (q: string) => {
+  return useQuery({
+    queryKey: ["design-order-customer-search", q],
+    queryFn: async () =>
+      sdk.client.fetch<{ customers: AdminCustomerRow[] }>(`/admin/customers`, {
+        query: { limit: 10, ...(q ? { q } : {}) },
+      }),
+  })
+}
+
+export type BuyerWithAddresses = AdminCustomerRow & {
+  default_billing_address?: { country_code?: string | null } | null
+  default_shipping_address?: { country_code?: string | null } | null
+  addresses?: { country_code?: string | null }[] | null
+}
+
+/**
+ * One buyer, WITH their addresses — so a design order can be quoted in their
+ * own currency rather than the platform's default (#2176).
+ *
+ * The addresses are the only thing here the search route does not return, and
+ * they are the whole point: `buyerCountry` reads the DEFAULT billing or
+ * shipping address, never `addresses[0]`.
+ */
+export const useBuyerWithAddresses = (customerId: string | null) => {
+  const { data, ...rest } = useQuery({
+    queryKey: ["design-order-buyer", customerId],
+    enabled: !!customerId,
+    queryFn: async () =>
+      sdk.client.fetch<{ customer: BuyerWithAddresses }>(
+        `/admin/customers/${customerId}`,
+        {
+          query: {
+            fields:
+              "id,email,first_name,last_name,*addresses,*default_billing_address,*default_shipping_address",
+          },
+        }
+      ),
+  })
+  return { buyer: data?.customer ?? null, ...rest }
+}

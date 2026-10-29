@@ -1,0 +1,151 @@
+/dist
+**/.env
+**/.env.development
+**/.DS_Store
+apps/backend/uploads
+/node_modules
+"node_modules 2"/
+# Root yarn.lock is obsolete — project uses pnpm (pnpm-lock.yaml)
+/yarn.lock
+# partner-ui is in the pnpm workspace, no separate yarn.lock needed
+apps/partner-ui/yarn.lock
+yarn-error.log
+.env.railway.worker
+
+.idea
+
+coverage
+
+!src/**
+
+# MikroORM writes a schema snapshot next to module migrations every time it
+# connects to a database (integration tests, dev DB, exec scripts, etc.).
+# These files are per-machine state and regenerate on every run — never commit.
+apps/backend/src/modules/**/migrations/.snapshot-medusa-*.json
+
+./tsconfig.tsbuildinfo
+medusa-db.sql
+build
+.cache
+
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+apps/**/node_modules
+apps/**/dist
+apps/**/.env
+deploy/**/node_modules
+packages/**/node_modules
+packages/**/dist
+apps/**/.yarn/*
+!apps/**/.yarn/patches
+!apps/**/.yarn/plugins
+!apps/**/.yarn/releases
+!apps/**/.yarn/sdks
+!apps/**/.yarn/versions
+
+.medusa
+
+# Turborepo task cache
+.turbo/
+apps/**/.turbo/
+
+# Docusaurus
+apps/docs/.docusaurus/
+apps/docs/build/
+
+.vscode/
+
+apps/backend/static/
+
+/medusa-docs
+
+.mastra/
+
+test_logs.txt
+
+.windsurfrules
+
+apps/backend/src/partner/.next
+apps/backend/src/partner/.env
+apps/backend/src/partner/node_modules/*
+# Local Netlify folder
+.netlify
+.yarn
+
+
+debug/
+
+.claude/
+
+# Generated RAG/contextual index (regenerate with src/scripts/generate-contextual-index.ts)
+.contextual-index/
+
+# Generated specs (stored in DB, regenerate with apps/backend/src/scripts/specs/)
+apps/backend/specs/**
+
+# yalc local plugin linking
+.yalc/
+yalc.lock
+
+.yarnrc.yml
+
+src/.DS_Store
+src/**/*.DS_Store
+
+node_modules 2/
+
+# Vercel CLI artefacts (project-link metadata, pulled env, build output)
+.vercel/
+**/.vercel/
+
+# Local env overrides pulled by `vercel env pull` etc.
+**/.env.local
+**/.env.*.local
+.e2e-seed.json
+.e2e-seed.*.json
+test-results/
+apps/backend/test-results/
+
+# Hyperbee/autobase stores the backend writes on startup. Created at runtime,
+# per-machine, never source — they showed up as untracked noise in every
+# `git status` and are one careless `git add -A` away from being committed.
+apps/backend/_crm_hb_e2e/
+apps/backend/_pp_hb_e2e/
+
+# Local AI agent memory — never commit
+.ai-memory/
+
+
+# Backlog-audit inputs only. Verdicts stay VISIBLE to git so delegate.mjs can
+# see what the drafter wrote — its scope gate reads `git status`, which skips
+# ignored paths. Neither dir is ever committed.
+.audit/issues/
+
+# Delegate run transcripts and per-run results — noise, not history.
+scripts/agent-daemon/delegate-logs/
+
+# 🔴 Vendor credentials, endpoints and correspondence. This repo is PUBLIC.
+.audit/private/
+
+# Wave sentinels — process state, written so a chained batch can wait on a FILE
+# rather than on `pgrep`, which matches the waiter's own command line and hangs.
+.audit/batches/
+
+# Local audit workspace — session notes, never source (public repo)
+.audit/
+e2e/screenshots/
+
+.design/
+# opencode agent configs — local, not shared with the team (yet)
+.opencode/
+
+# Local agent workspace, tool lockfile and demo recordings — per-machine, never committed.
+.agents/
+skills-lock.json
+jyt-pinterest-flow-demo.mp4
+apps/**/.env.bak*

@@ -1,0 +1,194 @@
+import { z } from "@medusajs/framework/zod";
+
+import { DESIGN_PARTNER_STAGE_ROLES } from "../../../modules/designs/partner-stage-roles";
+
+const colorPaletteSchema = z.array(
+  z.object({
+    name: z.string(),
+    code: z.string(),
+  })
+);
+
+const feedbackHistorySchema = z.array(
+  z.object({
+    date: z.union([z.string(), z.date()]),
+    feedback: z.string(),
+    author: z.string(),
+  })
+);
+
+// New structured schemas for colors and size sets
+const designColorSchema = z.object({
+  name: z.string(),
+  hex_code: z.string(),
+  usage_notes: z.string().optional(),
+  order: z.number().optional(),
+});
+
+const designSizeSetSchema = z.object({
+  size_label: z.string(),
+  measurements: z.record(z.string(), z.number()),
+});
+
+export const designSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  // Stays optional: the NOT NULL column it feeds is defaulted in the route
+  // handler (see #1172 note in ./route.ts), matching the partner and store
+  // create paths.
+  description: z.string().optional(),
+  inspiration_sources: z.array(z.string()).optional(),
+  design_type: z.enum(["Original", "Derivative", "Custom", "Collaboration"]).optional(),
+  // #938 — WHAT the design is, as opposed to `design_type` above (how original
+  // it is). Free text, normalised server-side; see modules/designs/lib/
+  // product-type.ts for why this is not an enum.
+  product_type: z.string().max(120).optional().nullable(),
+  status: z.enum([
+    "Conceptual",
+    "In_Development",
+    "Technical_Review",
+    "Sample_Production",
+    "Revision",
+    "Approved",
+    "Rejected",
+    "On_Hold",
+    "Commerce_Ready",
+    "Superseded"
+  ]).optional(),
+  priority: z.enum(["Low", "Medium", "High", "Urgent"]).optional(),
+  target_completion_date: z.union([z.date(), z.string().datetime()]).optional().transform((val) => {
+    if (!val) return null;
+    return val instanceof Date ? val : new Date(val);
+  }),
+  design_files: z.array(z.string()).optional(),
+  thumbnail_url: z.string().url().optional(),
+  custom_sizes: z.record(z.string(), z.any()).optional(),
+  color_palette: colorPaletteSchema.optional(),
+  tags: z.array(z.string()).optional(),
+  /** Per finished unit. See `UpdateDesignSchema` for why clearing is update-only. */
+  estimated_cost: z.number().optional(),
+  cost_currency: z.string().optional(),
+  designer_notes: z.string().optional(),
+  feedback_history: feedbackHistorySchema.optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+  media_files: z.array(z.object({
+    id: z.string().optional(),
+    url: z.string().url(),
+    isThumbnail: z.boolean().optional().default(false)
+  })).optional(),
+  moodboard: z.record(z.string(), z.any()).optional(),
+  // New structured fields (optional)
+  colors: z.array(designColorSchema).optional(),
+  size_sets: z.array(designSizeSetSchema).optional(),
+  origin_source: z.enum(["manual", "ai-mistral", "ai-other"]).optional(),
+  // Optional: link the new design to a customer at creation time
+  customer_id_for_link: z.string().optional(),
+});
+
+/**
+ * Update accepts everything create does — plus the ability to CLEAR the cost
+ * fields.
+ *
+ * 🔴 `estimated_cost` was `z.number().optional()`: optional but not nullable, so
+ * "no cost recorded" was a state the API could produce but never restore. A
+ * design wrongly given a cost — the recalculation that stored 0 because it had
+ * nothing to estimate from, #1564 — could not be put back to unknown through
+ * any route. Omitting a field leaves it alone; sending null clears it.
+ *
+ * `material_cost` / `production_cost` were not in the schema at ALL, and the
+ * validator is strict, so they were rejected outright. The recalculate routes
+ * write them straight through the service and cost panels read them, which left
+ * two persisted money fields with no way to correct them.
+ *
+ * ⚠️ Nullable only on update, deliberately. On create, null and omitted mean
+ * the same thing, and widening the create input would push a `number | null`
+ * into `CreateDesignStepInput` for no gain.
+ */
+export const UpdateDesignSchema = designSchema.partial().extend({
+  estimated_cost: z.number().nullable().optional(),
+  material_cost: z.number().nullable().optional(),
+  production_cost: z.number().nullable().optional(),
+});
+
+export const ReadDesignsQuerySchema = z.object({
+  fields: z.string().optional(),
+  filters: z.object({}).optional(),
+  sort: z.array(z.string()).default(["created_at", "desc"]).optional(),
+  limit: z.number().default(20).optional(),
+  offset: z.number().default(0).optional(),
+})
+
+export const CreateDesignLLMSchema = z.object({
+  designPrompt: z.string(),
+  existingValues: z.record(z.string(), z.any()).optional()
+});
+
+/**
+ * Link partners to a design (#2306 S1).
+ *
+ * `partnerIds` is the original shape and still links with no stage. `partners`
+ * carries a stage per partner. On a partner already on the roster, an OMITTED
+ * `stage_role` leaves theirs alone and an explicit `null` clears it — so a
+ * re-link from an old caller can never wipe a stage someone chose.
+ */
+export const LinkDesignPartnerSchema = z
+  .object({
+    partnerIds: z.array(z.string().min(1)).optional(),
+    partners: z
+      .array(
+        z.object({
+          partner_id: z.string().min(1),
+          stage_role: z.enum(DESIGN_PARTNER_STAGE_ROLES).nullable().optional(),
+        })
+      )
+      .optional(),
+  })
+  .refine((b) => (b.partnerIds?.length ?? 0) + (b.partners?.length ?? 0) > 0, {
+    message: "Pass at least one partner in partnerIds or partners",
+  })
+
+export type Design = z.infer<typeof designSchema>;
+export type UpdateDesign = z.infer<typeof UpdateDesignSchema>;
+export type ReadDesigns = z.infer<typeof ReadDesignsQuerySchema>;
+export type CreateDesignLLM = z.infer<typeof CreateDesignLLMSchema>;
+export type LinkDesignPartner = z.infer<typeof LinkDesignPartnerSchema>;
+/**
+ * Whose design this is (#2111).
+ *
+ * `null` detaches — and it must be spelled `.nullable()` rather than made
+ * optional. An OMITTED key and an explicit `null` are different instructions
+ * here: omitted is a malformed request, null is "this design is nobody's, stop
+ * telling anyone about it". Collapsing them would make a typo a detach.
+ */
+export const AttachDesignCustomerSchema = z.object({
+  customer_id: z.string().min(1).nullable(),
+})
+
+/**
+ * The material a design is waiting for (#2111).
+ *
+ * `notify_customer` is `.optional()` and NOT defaulted here on purpose: the
+ * route reads `!== false`, so an absent flag and an explicit `true` mean the
+ * same thing, and a default would only add a second place for that rule to
+ * live and drift.
+ */
+export const AttachDesignInventoryOrderSchema = z.object({
+  inventory_order_id: z.string().min(1),
+  /**
+   * 🔴 Accepts the STRINGS "true"/"false" as well as real booleans, because the
+   * MCP surface sends strings. Binding this route to a validator is what made
+   * that visible: a bare `z.boolean()` would 400 every call from the tool that
+   * advertises this field, and the tool's own schema says `'false' to
+   * suppress`. The route reads `!== false`, so the coercion has to happen
+   * before it, not after.
+   */
+  notify_customer: z.preprocess(
+    (v) => (v === "false" ? false : v === "true" ? true : v),
+    z.boolean().optional()
+  ),
+  note: z.string().max(500).optional().nullable(),
+})
+
+export type AttachDesignCustomer = z.infer<typeof AttachDesignCustomerSchema>
+export type AttachDesignInventoryOrder = z.infer<
+  typeof AttachDesignInventoryOrderSchema
+>

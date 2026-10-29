@@ -1,0 +1,4215 @@
+{
+  "$schema": "./$schema.json",
+  "general": {
+    "ascending": "बढ़ता क्रम",
+    "descending": "घटता क्रम",
+    "add": "जोड़ें",
+    "start": "प्रारंभ",
+    "end": "समाप्त",
+    "open": "खोलें",
+    "close": "बंद करें",
+    "apply": "लागू करें",
+    "range": "सीमा",
+    "search": "खोजें",
+    "of": "का",
+    "results": "परिणाम",
+    "pages": "पृष्ठ",
+    "next": "अगला",
+    "prev": "पिछला",
+    "is": "है",
+    "timeline": "समयरेखा",
+    "success": "सफल",
+    "warning": "चेतावनी",
+    "tip": "सुझाव",
+    "error": "त्रुटि",
+    "select": "चुनें",
+    "selected": "चयनित",
+    "enabled": "सक्षम",
+    "disabled": "अक्षम",
+    "expired": "समाप्त",
+    "active": "सक्रिय",
+    "revoked": "रद्द",
+    "new": "नया",
+    "modified": "संशोधित",
+    "added": "जोड़ा गया",
+    "removed": "हटाया गया",
+    "admin": "व्यवस्थापक",
+    "store": "स्टोर",
+    "details": "विवरण",
+    "items_one": "{{count}} आइटम",
+    "items_other": "{{count}} आइटम",
+    "countSelected": "{{count}} चयनित",
+    "countOfTotalSelected": "{{total}} में से {{count}} चयनित",
+    "plusCount": "+ {{count}}",
+    "plusCountMore": "+ {{count}} और",
+    "areYouSure": "क्या आप निश्चित हैं?",
+    "areYouSureDescription": "आप {{entity}} {{title}} हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+    "noRecordsFound": "कोई रिकॉर्ड नहीं मिला",
+    "typeToConfirm": "पुष्टि के लिए {val} टाइप करें:",
+    "noResultsTitle": "कोई परिणाम नहीं",
+    "noResultsMessage": "फ़िल्टर या खोज शब्द बदलकर देखें",
+    "noSearchResults": "कोई खोज परिणाम नहीं",
+    "noSearchResultsFor": "<0>'{{query}}'</0> के लिए कोई खोज परिणाम नहीं",
+    "noRecordsTitle": "कोई रिकॉर्ड नहीं",
+    "noRecordsMessage": "दिखाने के लिए कोई रिकॉर्ड नहीं है",
+    "noRecordsMessageFiltered": "फ़िल्टर से मेल खाता कोई रिकॉर्ड नहीं है",
+    "unsavedChangesTitle": "क्या आप वाकई इस फ़ॉर्म से बाहर जाना चाहते हैं?",
+    "unsavedChangesDescription": "आपके पास ऐसे परिवर्तन हैं जो सहेजे नहीं गए; फ़ॉर्म से बाहर निकलने पर ये खो जाएँगे।",
+    "includesTaxTooltip": "इस कॉलम की कीमतें कर सहित हैं।",
+    "excludesTaxTooltip": "इस कॉलम की कीमतें कर रहित हैं।",
+    "noMoreData": "और डेटा नहीं"
+  },
+  "json": {
+    "header": "JSON",
+    "numberOfKeys_one": "{{count}} कुंजी",
+    "numberOfKeys_other": "{{count}} कुंजियाँ",
+    "drawer": {
+      "header_one": "JSON <0>· {{count}} कुंजी</0>",
+      "header_other": "JSON <0>· {{count}} कुंजियाँ</0>",
+      "description": "इस ऑब्जेक्ट के लिए JSON डेटा देखें।"
+    }
+  },
+  "metadata": {
+    "header": "मेटाडेटा",
+    "numberOfKeys_one": "{{count}} की",
+    "numberOfKeys_other": "{{count}} कीज़",
+    "edit": {
+      "header": "मेटाडेटा संपादित करें",
+      "description": "इस ऑब्जेक्ट के लिए मेटाडेटा संपादित करें।",
+      "successToast": "मेटाडेटा सफलतापूर्वक अपडेट किया गया।",
+      "actions": {
+        "insertRowAbove": "ऊपर पंक्ति जोड़ें",
+        "insertRowBelow": "नीचे पंक्ति जोड़ें",
+        "deleteRow": "पंक्ति हटाएं"
+      },
+      "labels": {
+        "key": "की",
+        "value": "वैल्यू"
+      },
+      "complexRow": {
+        "label": "कुछ पंक्तियां अक्षम हैं",
+        "description": "इस ऑब्जेक्ट में नॉन-प्रिमिटिव मेटाडेटा है, जैसे ऐरे या ऑब्जेक्ट, जिन्हें यहां संपादित नहीं किया जा सकता। अक्षम पंक्तियों को संपादित करने के लिए, सीधे API का उपयोग करें।",
+        "tooltip": "यह पंक्ति अक्षम है क्योंकि इसमें नॉन-प्रिमिटिव डेटा है।"
+      }
+    }
+  },
+  "validation": {
+    "mustBeInt": "मान एक पूर्ण संख्या होनी चाहिए।",
+    "mustBePositive": "मान एक धनात्मक संख्या होनी चाहिए।"
+  },
+  "actions": {
+    "save": "सहेजें",
+    "saveAsDraft": "ड्राफ़्ट के रूप में सहेजें",
+    "copy": "कॉपी करें",
+    "copied": "कॉपी किया गया",
+    "duplicate": "डुप्लिकेट",
+    "publish": "प्रकाशित करें",
+    "create": "बनाएँ",
+    "delete": "हटाएँ",
+    "remove": "निकालें",
+    "revoke": "रद्द करें",
+    "cancel": "रद्द करें",
+    "forceConfirm": "ज़बरदस्ती पुष्टि करें",
+    "continueEdit": "संपादन जारी रखें",
+    "enable": "सक्षम करें",
+    "disable": "अक्षम करें",
+    "undo": "पूर्ववत करें",
+    "complete": "पूरा करें",
+    "viewDetails": "विवरण देखें",
+    "back": "वापस",
+    "close": "बंद करें",
+    "showMore": "अधिक दिखाएँ",
+    "continue": "जारी रखें",
+    "continueWithEmail": "ईमेल के साथ जारी रखें",
+    "idCopiedToClipboard": "ID क्लिपबोर्ड पर कॉपी हो गया",
+    "editVariantImages": "वेरिएंट छवियाँ संपादित करें",
+    "editImages": "छवियाँ संपादित करें",
+    "addReason": "कारण जोड़ें",
+    "addNote": "नोट जोड़ें",
+    "reset": "रीसेट करें",
+    "confirm": "पुष्टि करें",
+    "edit": "संपादित करें",
+    "addItems": "आइटम जोड़ें",
+    "download": "डाउनलोड",
+    "clear": "साफ़ करें",
+    "clearAll": "सब साफ़ करें",
+    "apply": "लागू करें",
+    "add": "जोड़ें",
+    "select": "चुनें",
+    "browse": "ब्राउज़ करें",
+    "logout": "लॉग आउट",
+    "hide": "छिपाएँ",
+    "export": "निर्यात",
+    "import": "आयात",
+    "cannotUndo": "यह क्रिया पूर्ववत नहीं की जा सकती"
+  },
+  "operators": {
+    "in": "में"
+  },
+  "app": {
+    "search": {
+      "label": "खोजें",
+      "title": "खोजें",
+      "description": "ऑर्डर, उत्पाद, ग्राहक और अधिक सहित अपने पूरे स्टोर में खोजें।",
+      "allAreas": "सभी क्षेत्र",
+      "navigation": "नेविगेशन",
+      "openResult": "परिणाम खोलें",
+      "showMore": "अधिक दिखाएँ",
+      "placeholder": "खोजें",
+      "noResultsTitle": "कोई परिणाम नहीं मिला",
+      "noResultsMessage": "हमें आपकी खोज से मेल खाता कुछ नहीं मिला।",
+      "emptySearchTitle": "खोजने के लिए टाइप करें",
+      "emptySearchMessage": "खोजने के लिए कीवर्ड या वाक्यांश दर्ज करें।",
+      "loadMore": "{{count}} और लोड करें",
+      "groups": {
+        "all": "सभी क्षेत्र",
+        "customer": "ग्राहक",
+        "customerGroup": "ग्राहक समूह",
+        "product": "उत्पाद",
+        "productVariant": "उत्पाद वेरिएंट",
+        "inventory": "इन्वेंट्री",
+        "reservation": "आरक्षण",
+        "category": "श्रेणियाँ",
+        "collection": "संग्रह",
+        "order": "ऑर्डर",
+        "promotion": "प्रमोशन",
+        "campaign": "अभियान",
+        "priceList": "कीमत सूचियाँ",
+        "user": "उपयोगकर्ता",
+        "region": "क्षेत्र",
+        "taxRegion": "कर क्षेत्र",
+        "returnReason": "वापसी कारण",
+        "salesChannel": "बिक्री चैनल",
+        "productType": "उत्पाद प्रकार",
+        "productTag": "उत्पाद टैग",
+        "location": "स्थान",
+        "shippingProfile": "शिपिंग प्रोफ़ाइल",
+        "publishableApiKey": "प्रकाशन योग्य API कुंजियाँ",
+        "secretApiKey": "गुप्त API कुंजियाँ",
+        "command": "कमांड",
+        "navigation": "नेविगेशन"
+      }
+    },
+    "keyboardShortcuts": {
+      "pageShortcut": "पर जाएँ",
+      "settingShortcut": "सेटिंग्स",
+      "commandShortcut": "कमांड",
+      "then": "फिर",
+      "navigation": {
+        "goToOrders": "ऑर्डर",
+        "goToProducts": "उत्पाद",
+        "goToCollections": "संग्रह",
+        "goToCategories": "श्रेणियाँ",
+        "goToCustomers": "ग्राहक",
+        "goToCustomerGroups": "ग्राहक समूह",
+        "goToInventory": "इन्वेंट्री",
+        "goToReservations": "आरक्षण",
+        "goToPriceLists": "कीमत सूचियाँ",
+        "goToPromotions": "प्रमोशन",
+        "goToCampaigns": "अभियान"
+      },
+      "settings": {
+        "goToSettings": "सेटिंग्स",
+        "goToStore": "स्टोर",
+        "goToUsers": "उपयोगकर्ता",
+        "goToRegions": "क्षेत्र",
+        "goToTaxRegions": "कर क्षेत्र",
+        "goToSalesChannels": "बिक्री चैनल",
+        "goToProductTypes": "उत्पाद प्रकार",
+        "goToLocations": "स्थान",
+        "goToPublishableApiKeys": "प्रकाशन योग्य API कुंजियाँ",
+        "goToSecretApiKeys": "गुप्त API कुंजियाँ",
+        "goToWorkflows": "वर्कफ़्लो",
+        "goToProfile": "प्रोफ़ाइल",
+        "goToReturnReasons": "वापसी कारण"
+      }
+    },
+    "menus": {
+      "user": {
+        "documentation": "दस्तावेज़ीकरण",
+        "changelog": "चेंजलॉग",
+        "shortcuts": "शॉर्टकट",
+        "profileSettings": "प्रोफ़ाइल सेटिंग्स",
+        "theme": {
+          "label": "थीम",
+          "dark": "डार्क",
+          "light": "लाइट",
+          "system": "सिस्टम"
+        }
+      },
+      "store": {
+        "label": "स्टोर",
+        "storeSettings": "स्टोर सेटिंग्स"
+      },
+      "actions": {
+        "logout": "लॉग आउट"
+      }
+    },
+    "nav": {
+      "accessibility": {
+        "title": "नेविगेशन",
+        "description": "डैशबोर्ड के लिए नेविगेशन मेनू।"
+      },
+      "common": {
+        "extensions": "एक्सटेंशन"
+      },
+      "main": {
+        "store": "स्टोर",
+        "storeSettings": "स्टोर सेटिंग्स",
+        "home": "होम",
+        "designs": "डिज़ाइन",
+        "productionRuns": "उत्पादन रन",
+        "tasks": "कार्य",
+        "paymentSubmissions": "भुगतान प्रस्तुतियाँ",
+        "inventoryOrders": "इन्वेंट्री ऑर्डर",
+        "sharedFolders": "साझा फ़ोल्डर",
+        "products": "उत्पाद",
+        "categories": "श्रेणियाँ",
+        "collections": "संग्रह",
+        "productTypes": "प्रकार",
+        "stock": "स्टॉक",
+        "orders": "ऑर्डर",
+        "customers": "ग्राहक",
+        "webStore": "वेबस्टोर",
+        "content": "सामग्री",
+        "theme": "थीम",
+        "analytics": "विश्लेषण"
+      },
+      "settings": {
+        "header": "सेटिंग्स",
+        "general": "सामान्य",
+        "developer": "डेवलपर",
+        "myAccount": "मेरा खाता"
+      }
+    }
+  },
+  "dataGrid": {
+    "columns": {
+      "view": "देखें",
+      "resetToDefault": "डिफ़ॉल्ट पर रीसेट करें",
+      "disabled": "दृश्य कॉलम बदलना अक्षम है।"
+    },
+    "shortcuts": {
+      "label": "शॉर्टकट",
+      "commands": {
+        "undo": "पूर्ववत",
+        "redo": "पुनः करें",
+        "copy": "कॉपी",
+        "paste": "पेस्ट",
+        "edit": "संपादित करें",
+        "delete": "हटाएँ",
+        "clear": "साफ़ करें",
+        "moveUp": "ऊपर ले जाएँ",
+        "moveDown": "नीचे ले जाएँ",
+        "moveLeft": "बाएँ ले जाएँ",
+        "moveRight": "दाएँ ले जाएँ",
+        "moveTop": "सबसे ऊपर ले जाएँ",
+        "moveBottom": "सबसे नीचे ले जाएँ",
+        "selectDown": "नीचे चुनें",
+        "selectUp": "ऊपर चुनें",
+        "selectColumnDown": "कॉलम नीचे चुनें",
+        "selectColumnUp": "कॉलम ऊपर चुनें",
+        "focusToolbar": "टूलबार पर फ़ोकस",
+        "focusCancel": "रद्द पर फ़ोकस"
+      }
+    },
+    "errors": {
+      "fixError": "त्रुटि ठीक करें",
+      "count_one": "{{count}} त्रुटि",
+      "count_other": "{{count}} त्रुटियाँ"
+    }
+  },
+  "filters": {
+    "sortLabel": "क्रमबद्ध करें",
+    "filterLabel": "फ़िल्टर",
+    "searchLabel": "खोजें",
+    "date": {
+      "today": "आज",
+      "lastSevenDays": "पिछले 7 दिन",
+      "lastThirtyDays": "पिछले 30 दिन",
+      "lastNinetyDays": "पिछले 90 दिन",
+      "lastTwelveMonths": "पिछले 12 महीने",
+      "custom": "कस्टम",
+      "from": "से",
+      "to": "तक",
+      "starting": "शुरू",
+      "ending": "समाप्त"
+    },
+    "compare": {
+      "lessThan": "से कम",
+      "greaterThan": "से अधिक",
+      "exact": "बिलकुल",
+      "range": "सीमा",
+      "lessThanLabel": "{{value}} से कम",
+      "greaterThanLabel": "{{value}} से अधिक",
+      "andLabel": "और"
+    },
+    "sorting": {
+      "alphabeticallyAsc": "A से Z",
+      "alphabeticallyDesc": "Z से A",
+      "dateAsc": "पहले नवीनतम",
+      "dateDesc": "पहले पुराने"
+    },
+    "radio": {
+      "yes": "हाँ",
+      "no": "नहीं",
+      "true": "सही",
+      "false": "गलत"
+    },
+    "addFilter": "फ़िल्टर जोड़ें"
+  },
+  "errorBoundary": {
+    "badRequestTitle": "400 - गलत अनुरोध",
+    "badRequestMessage": "त्रुटिपूर्ण सिंटैक्स के कारण सर्वर अनुरोध को समझ नहीं सका।",
+    "notFoundTitle": "404 - इस पते पर कोई पृष्ठ नहीं है",
+    "notFoundMessage": "URL जाँचकर फिर से प्रयास करें, या खोज बार से वह ढूँढें जिसे आप खोज रहे हैं।",
+    "internalServerErrorTitle": "500 - आंतरिक सर्वर त्रुटि",
+    "internalServerErrorMessage": "सर्वर पर एक अप्रत्याशित त्रुटि हुई। कृपया बाद में पुनः प्रयास करें।",
+    "defaultTitle": "एक त्रुटि हुई",
+    "defaultMessage": "इस पृष्ठ को प्रस्तुत करते समय एक अप्रत्याशित त्रुटि हुई।",
+    "noMatchMessage": "आप जिस पृष्ठ की तलाश कर रहे हैं वह मौजूद नहीं है।",
+    "backToDashboard": "डैशबोर्ड पर वापस जाएँ"
+  },
+  "addresses": {
+    "title": "पते",
+    "shippingAddress": {
+      "header": "शिपिंग पता",
+      "editHeader": "शिपिंग पता संपादित करें",
+      "editLabel": "शिपिंग पता",
+      "label": "शिपिंग पता"
+    },
+    "billingAddress": {
+      "header": "बिलिंग पता",
+      "editHeader": "बिलिंग पता संपादित करें",
+      "editLabel": "बिलिंग पता",
+      "label": "बिलिंग पता",
+      "sameAsShipping": "शिपिंग पते के समान"
+    },
+    "contactHeading": "संपर्क",
+    "locationHeading": "स्थान"
+  },
+  "email": {
+    "editHeader": "ईमेल संपादित करें",
+    "editLabel": "ईमेल",
+    "label": "ईमेल"
+  },
+  "transferOwnership": {
+    "header": "स्वामित्व हस्तांतरित करें",
+    "label": "स्वामित्व हस्तांतरित करें",
+    "details": {
+      "order": "ऑर्डर विवरण",
+      "draft": "ड्राफ़्ट विवरण"
+    },
+    "currentOwner": {
+      "label": "वर्तमान स्वामी",
+      "hint": "ऑर्डर का वर्तमान स्वामी।"
+    },
+    "newOwner": {
+      "label": "नया स्वामी",
+      "hint": "ऑर्डर हस्तांतरित करने के लिए नया स्वामी।"
+    },
+    "validation": {
+      "mustBeDifferent": "नया स्वामी वर्तमान स्वामी से भिन्न होना चाहिए।",
+      "required": "नया स्वामी आवश्यक है।"
+    }
+  },
+  "sales_channels": {
+    "availableIn": "<0>{{x}}</0> में से <1>{{y}}</1> सेल्स चैनलों में उपलब्ध"
+  },
+  "products": {
+    "domain": "उत्पाद",
+    "list": {
+      "noRecordsMessage": "बिक्री शुरू करने के लिए अपना पहला उत्पाद बनाएं।"
+    },
+    "edit": {
+      "header": "उत्पाद संपादित करें",
+      "description": "उत्पाद विवरण संपादित करें।",
+      "successToast": "उत्पाद {{title}} सफलतापूर्वक अपडेट किया गया।"
+    },
+    "create": {
+      "title": "उत्पाद बनाएं",
+      "description": "नया उत्पाद बनाएं।",
+      "header": "सामान्य",
+      "tabs": {
+        "details": "विवरण",
+        "organize": "व्यवस्थित करें",
+        "variants": "वेरिएंट",
+        "inventory": "इन्वेंटरी किट"
+      },
+      "errors": {
+        "variants": "कृपया कम से कम एक वेरिएंट चुनें।",
+        "options": "कृपया कम से कम एक विकल्प बनाएं।",
+        "uniqueSku": "SKU अद्वितीय होना चाहिए।"
+      },
+      "inventory": {
+        "heading": "इन्वेंटरी किट",
+        "label": "वेरिएंट की इन्वेंटरी किट में इन्वेंटरी आइटम जोड़ें।",
+        "itemPlaceholder": "इन्वेंटरी आइटम चुनें",
+        "quantityPlaceholder": "किट के लिए इनमें से कितने की आवश्यकता है?"
+      },
+      "variants": {
+        "header": "वेरिएंट",
+        "subHeadingTitle": "हां, यह वेरिएंट वाला उत्पाद है",
+        "subHeadingDescription": "अनचेक करने पर, हम आपके लिए एक डिफ़ॉल्ट वेरिएंट बनाएंगे",
+        "optionTitle": {
+          "placeholder": "साइज़"
+        },
+        "optionValues": {
+          "placeholder": "छोटा, मध्यम, बड़ा"
+        },
+        "productVariants": {
+          "label": "उत्पाद वेरिएंट",
+          "hint": "यह रैंकिंग आपके स्टोरफ्रंट में वेरिएंट के क्रम को प्रभावित करेगी।",
+          "alert": "वेरिएंट बनाने के लिए विकल्प जोड़ें।",
+          "tip": "अनचेक किए गए वेरिएंट नहीं बनाए जाएंगे। आप बाद में हमेशा वेरिएंट बना और संपादित कर सकते हैं लेकिन यह सूची आपके उत्पाद विकल्पों में भिन्नताओं के अनुरूप है।"
+        },
+        "productOptions": {
+          "label": "उत्पाद विकल्प",
+          "hint": "उत्पाद के लिए विकल्प परिभाषित करें, जैसे रंग, साइज़, आदि।"
+        }
+      },
+      "successToast": "उत्पाद {{title}} सफलतापूर्वक बनाया गया।"
+    },
+    "export": {
+      "header": "उत्पाद सूची निर्यात करें",
+      "description": "उत्पाद सूची को CSV फ़ाइल में निर्यात करें।",
+      "success": {
+        "title": "हम आपके निर्यात को प्रोसेस कर रहे हैं",
+        "description": "डेटा निर्यात करने में कुछ मिनट लग सकते हैं। पूरा होने पर हम आपको सूचित करेंगे।"
+      },
+      "filters": {
+        "title": "फ़िल्टर",
+        "description": "इस दृश्य को समायोजित करने के लिए तालिका अवलोकन में फ़िल्टर लागू करें"
+      },
+      "columns": {
+        "title": "कॉलम",
+        "description": "विशिष्ट आवश्यकताओं को पूरा करने के लिए निर्यात किए गए डेटा को अनुकूलित करें"
+      }
+    },
+    "import": {
+      "header": "उत्पाद सूची आयात करें",
+      "uploadLabel": "उत्पाद आयात करें",
+      "uploadHint": "CSV फ़ाइल को ड्रैग और ड्रॉप करें या अपलोड करने के लिए क्लिक करें",
+      "description": "पूर्व-निर्धारित प्रारूप में CSV फ़ाइल प्रदान करके उत्पाद आयात करें",
+      "template": {
+        "title": "अपनी सूची को कैसे व्यवस्थित करें इसके बारे में अनिश्चित हैं?",
+        "description": "सही प्रारूप का पालन सुनिश्चित करने के लिए नीचे दिया गया टेम्पलेट डाउनलोड करें।"
+      },
+      "upload": {
+        "title": "CSV फ़ाइल अपलोड करें",
+        "description": "आयात के माध्यम से आप उत्पाद जोड़ या अपडेट कर सकते हैं। मौजूदा उत्पादों को अपडेट करने के लिए आपको मौजूदा हैंडल और ID का उपयोग करना होगा, मौजूदा वेरिएंट को अपडेट करने के लिए आपको मौजूदा ID का उपयोग करना होगा। उत्पाद आयात करने से पहले हम आपसे पुष्टि मांगेंगे।",
+        "preprocessing": "प्रीप्रोसेसिंग...",
+        "productsToCreate": "उत्पाद बनाए जाएंगे",
+        "productsToUpdate": "उत्पाद अपडेट किए जाएंगे"
+      },
+      "success": {
+        "title": "हम आपके आयात को प्रोसेस कर रहे हैं",
+        "description": "डेटा आयात करने में कुछ समय लग सकता है। पूरा होने पर हम आपको सूचित करेंगे।"
+      }
+    },
+    "deleteWarning": "आप उत्पाद {{title}} को हटाने वाले हैं। इस क्रिया को पूर्ववत नहीं किया जा सकता।",
+    "variants": {
+      "header": "वेरिएंट",
+      "empty": {
+        "heading": "कोई वेरिएंट नहीं",
+        "description": "प्रदर्शित करने के लिए कोई वेरिएंट नहीं हैं।"
+      },
+      "filtered": {
+        "heading": "कोई परिणाम नहीं",
+        "description": "कोई भी वेरिएंट वर्तमान फ़िल्टर मानदंड से मेल नहीं खाता।"
+      }
+    },
+    "attributes": "विशेषताएं",
+    "editAttributes": "विशेषताएं संपादित करें",
+    "editOptions": "विकल्प संपादित करें",
+    "editPrices": "मूल्य संपादित करें",
+    "media": {
+      "label": "मीडिया",
+      "editHint": "अपने स्टोरफ्रंट में उत्पाद को प्रदर्शित करने के लिए मीडिया जोड़ें।",
+      "manageImageVariants": "संबद्ध वेरिएंट प्रबंधित करें",
+      "makeThumbnail": "थंबनेल बनाएं",
+      "uploadImagesLabel": "छवियां अपलोड करें",
+      "uploadImagesHint": "छवियों को यहां ड्रैग और ड्रॉप करें या अपलोड करने के लिए क्लिक करें।",
+      "invalidFileType": "'{{name}}' समर्थित फ़ाइल प्रकार नहीं है। समर्थित फ़ाइल प्रकार हैं: {{types}}।",
+      "fileTooLarge": "एक या अधिक फ़ाइलें अधिकतम फ़ाइल साइज़ {{size}} से अधिक हैं: {{name}}",
+      "failedToUpload": "जोड़े गए मीडिया को अपलोड करने में विफल। कृपया पुनः प्रयास करें।",
+      "deleteWarning_one": "आप {{count}} छवि हटाने वाले हैं। इस क्रिया को पूर्ववत नहीं किया जा सकता।",
+      "deleteWarning_other": "आप {{count}} छवियां हटाने वाले हैं। इस क्रिया को पूर्ववत नहीं किया जा सकता।",
+      "deleteWarningWithThumbnail_one": "आप थंबनेल सहित {{count}} छवि हटाने वाले हैं। इस क्रिया को पूर्ववत नहीं किया जा सकता।",
+      "deleteWarningWithThumbnail_other": "आप थंबनेल सहित {{count}} छवियां हटाने वाले हैं। इस क्रिया को पूर्ववत नहीं किया जा सकता।",
+      "thumbnailTooltip": "थंबनेल",
+      "galleryLabel": "गैलरी",
+      "downloadImageLabel": "वर्तमान छवि डाउनलोड करें",
+      "deleteImageLabel": "वर्तमान छवि हटाएं",
+      "emptyState": {
+        "header": "अभी तक कोई मीडिया नहीं",
+        "description": "अपने स्टोरफ्रंट में प्रदर्शित करने के लिए मीडिया जोड़ें।",
+        "action": "मीडिया जोड़ें"
+      },
+      "successToast": "मीडिया सफलतापूर्वक अपडेट किया गया।",
+      "variantImages": "वेरिएंट छवियां",
+      "showAvailableImages": "उपलब्ध छवियां दिखाएं",
+      "availableImages": "छवियां चुनें",
+      "selectToAdd": "वेरिएंट में उत्पाद छवियां जोड़ें। नई छवियां जोड़ने के लिए, पहले उन्हें उत्पाद में जोड़ें।",
+      "removeSelected": "चयनित हटाएं"
+    },
+    "variantMedia": {
+      "label": "वेरिएंट मीडिया",
+      "manageVariants": "वेरिएंट प्रबंधित करें",
+      "addToMultipleVariants": "एकाधिक वेरिएंट में जोड़ें",
+      "manageVariantsDescription": "छवि के लिए संबद्ध वेरिएंट प्रबंधित करें",
+      "successToast": "छवि वेरिएंट सफलतापूर्वक अपडेट किए गए।",
+      "emptyState": {
+        "header": "अभी तक कोई मीडिया नहीं",
+        "description": "अपने स्टोरफ्रंट में प्रदर्शित करने के लिए वेरिएंट में मीडिया जोड़ें।",
+        "action": "मीडिया जोड़ें"
+      }
+    },
+    "discountableHint": "अनचेक करने पर, इस उत्पाद पर छूट लागू नहीं होगी।",
+    "noSalesChannels": "किसी भी बिक्री चैनल में उपलब्ध नहीं",
+    "variantCount_one": "{{count}} वेरिएंट",
+    "variantCount_other": "{{count}} वेरिएंट",
+    "deleteVariantWarning": "आप वेरिएंट {{title}} को हटाने वाले हैं। इस क्रिया को पूर्ववत नहीं किया जा सकता।",
+    "productStatus": {
+      "draft": "ड्राफ़्ट",
+      "published": "प्रकाशित",
+      "proposed": "प्रस्तावित",
+      "rejected": "अस्वीकृत"
+    },
+    "columns": {
+      "product_display": "उत्पाद",
+      "variants_count": "वेरिएंट",
+      "sales_channels_display": "बिक्री चैनल",
+      "collection": "संग्रह",
+      "status": "स्थिति",
+      "thumbnail": "थंबनेल",
+      "title": "शीर्षक",
+      "handle": "हैंडल",
+      "created_at": "बनाया गया",
+      "updated_at": "अपडेट किया गया"
+    },
+    "fields": {
+      "title": {
+        "label": "शीर्षक",
+        "hint": "अपने उत्पाद को एक संक्षिप्त और स्पष्ट शीर्षक दें।<0/>खोज इंजन के लिए 50-60 वर्ण अनुशंसित लंबाई है।",
+        "placeholder": "विंटर जैकेट"
+      },
+      "subtitle": {
+        "label": "उपशीर्षक",
+        "placeholder": "गर्म और आरामदायक"
+      },
+      "handle": {
+        "label": "हैंडल",
+        "tooltip": "हैंडल का उपयोग आपके स्टोरफ्रंट में उत्पाद को संदर्भित करने के लिए किया जाता है। यदि निर्दिष्ट नहीं है, तो हैंडल उत्पाद शीर्षक से जेनरेट किया जाएगा।",
+        "placeholder": "winter-jacket"
+      },
+      "description": {
+        "label": "विवरण",
+        "hint": "अपने उत्पाद को एक संक्षिप्त और स्पष्ट विवरण दें।<0/>खोज इंजन के लिए 120-160 वर्ण अनुशंसित लंबाई है।",
+        "placeholder": "एक गर्म और आरामदायक जैकेट"
+      },
+      "discountable": {
+        "label": "छूट योग्य",
+        "hint": "अनचेक करने पर, इस उत्पाद पर छूट लागू नहीं होगी"
+      },
+      "shipping_profile": {
+        "label": "शिपिंग प्रोफ़ाइल",
+        "hint": "उत्पाद को शिपिंग प्रोफ़ाइल से कनेक्ट करें"
+      },
+      "type": {
+        "label": "प्रकार"
+      },
+      "collection": {
+        "label": "संग्रह"
+      },
+      "categories": {
+        "label": "श्रेणियां"
+      },
+      "tags": {
+        "label": "टैग"
+      },
+      "sales_channels": {
+        "label": "बिक्री चैनल",
+        "hint": "यदि अछूता छोड़ दिया जाए तो यह उत्पाद केवल डिफ़ॉल्ट बिक्री चैनल में उपलब्ध होगा।"
+      },
+      "countryOrigin": {
+        "label": "मूल देश"
+      },
+      "material": {
+        "label": "सामग्री"
+      },
+      "width": {
+        "label": "चौड़ाई"
+      },
+      "length": {
+        "label": "लंबाई"
+      },
+      "height": {
+        "label": "ऊंचाई"
+      },
+      "weight": {
+        "label": "वज़न"
+      },
+      "options": {
+        "label": "उत्पाद विकल्प",
+        "hint": "विकल्पों का उपयोग उत्पाद के रंग, साइज़ आदि को परिभाषित करने के लिए किया जाता है",
+        "add": "विकल्प जोड़ें",
+        "optionTitle": "विकल्प शीर्षक",
+        "optionTitlePlaceholder": "रंग",
+        "variations": "भिन्नताएं (अल्पविराम से अलग)",
+        "variantionsPlaceholder": "लाल, नीला, हरा"
+      },
+      "variants": {
+        "label": "उत्पाद वेरिएंट",
+        "hint": "अनचेक किए गए वेरिएंट नहीं बनाए जाएंगे, यह रैंकिंग प्रभावित करेगी कि आपके फ्रंटएंड में वेरिएंट कैसे रैंक किए जाते हैं।"
+      },
+      "mid_code": {
+        "label": "Mid कोड"
+      },
+      "hs_code": {
+        "label": "HS कोड"
+      }
+    },
+    "variant": {
+      "edit": {
+        "header": "वेरिएंट संपादित करें",
+        "success": "उत्पाद वेरिएंट सफलतापूर्वक संपादित किया गया"
+      },
+      "create": {
+        "header": "वेरिएंट विवरण"
+      },
+      "deleteWarning": "क्या आप वाकई इस वेरिएंट को हटाना चाहते हैं?",
+      "pricesPagination": "1 - {{current}} कुल {{total}} मूल्यों में से",
+      "tableItemAvailable": "{{availableCount}} उपलब्ध",
+      "tableItem_one": "{{availableCount}} उपलब्ध {{locationCount}} स्थान पर",
+      "tableItem_other": "{{availableCount}} उपलब्ध {{locationCount}} स्थानों पर",
+      "inventory": {
+        "notManaged": "प्रबंधित नहीं",
+        "manageItems": "इन्वेंटरी आइटम प्रबंधित करें",
+        "notManagedDesc": "इस वेरिएंट के लिए इन्वेंटरी प्रबंधित नहीं है। वेरिएंट की इन्वेंटरी ट्रैक करने के लिए 'इन्वेंटरी प्रबंधित करें' चालू करें।",
+        "manageKit": "इन्वेंटरी किट प्रबंधित करें",
+        "navigateToItem": "इन्वेंटरी आइटम पर जाएं",
+        "actions": {
+          "inventoryItems": "इन्वेंटरी आइटम पर जाएं",
+          "inventoryKit": "इन्वेंटरी आइटम दिखाएं"
+        },
+        "inventoryKit": "इन्वेंटरी किट",
+        "inventoryKitHint": "क्या यह वेरिएंट कई इन्वेंटरी आइटम से मिलकर बना है?",
+        "validation": {
+          "itemId": "कृपया इन्वेंटरी आइटम चुनें।",
+          "quantity": "मात्रा आवश्यक है। कृपया एक सकारात्मक संख्या दर्ज करें।"
+        },
+        "header": "स्टॉक और इन्वेंटरी",
+        "editItemDetails": "आइटम विवरण संपादित करें",
+        "manageInventoryLabel": "इन्वेंटरी प्रबंधित करें",
+        "manageInventoryHint": "सक्षम होने पर, जब ऑर्डर और रिटर्न बनाए जाते हैं तो हम आपके लिए इन्वेंटरी मात्रा बदल देंगे।",
+        "allowBackordersLabel": "बैकऑर्डर की अनुमति दें",
+        "allowBackordersHint": "सक्षम होने पर, ग्राहक वेरिएंट खरीद सकते हैं भले ही कोई उपलब्ध मात्रा न हो।",
+        "toast": {
+          "levelsBatch": "इन्वेंटरी स्तर अपडेट किए गए।",
+          "update": "इन्वेंटरी आइटम सफलतापूर्वक अपडेट किया गया।",
+          "updateLevel": "इन्वेंटरी स्तर सफलतापूर्वक अपडेट किया गया।",
+          "itemsManageSuccess": "इन्वेंटरी आइटम सफलतापूर्वक अपडेट किए गए।"
+        }
+      }
+    },
+    "options": {
+      "header": "विकल्प",
+      "edit": {
+        "header": "विकल्प संपादित करें",
+        "successToast": "विकल्प {{title}} सफलतापूर्वक अपडेट किया गया।"
+      },
+      "create": {
+        "header": "विकल्प बनाएं",
+        "successToast": "विकल्प {{title}} सफलतापूर्वक बनाया गया।"
+      },
+      "deleteWarning": "आप उत्पाद विकल्प: {{title}} को हटाने वाले हैं। इस क्रिया को पूर्ववत नहीं किया जा सकता।"
+    },
+    "organization": {
+      "header": "व्यवस्थित करें",
+      "edit": {
+        "header": "संगठन संपादित करें",
+        "toasts": {
+          "success": "{{title}} का संगठन सफलतापूर्वक अपडेट किया गया।"
+        }
+      }
+    },
+    "stock": {
+      "heading": "उत्पाद स्टॉक स्तर और स्थान प्रबंधित करें",
+      "description": "उत्पाद के सभी वेरिएंट के लिए स्टॉक की गई इन्वेंटरी स्तर अपडेट करें।",
+      "loading": "रुकिए इसमें कुछ समय लग सकता है...",
+      "tooltips": {
+        "alreadyManaged": "यह इन्वेंटरी आइटम पहले से ही {{title}} के अंतर्गत संपादन योग्य है।",
+        "alreadyManagedWithSku": "यह इन्वेंटरी आइटम पहले से ही {{title}} ({{sku}}) के अंतर्गत संपादन योग्य है।"
+      }
+    },
+    "shippingProfile": {
+      "header": "शिपिंग कॉन्फ़िगरेशन",
+      "edit": {
+        "header": "शिपिंग कॉन्फ़िगरेशन",
+        "toasts": {
+          "success": "{{title}} के लिए शिपिंग प्रोफ़ाइल सफलतापूर्वक अपडेट की गई।"
+        }
+      },
+      "create": {
+        "errors": {
+          "required": "शिपिंग प्रोफ़ाइल आवश्यक है"
+        }
+      }
+    },
+    "toasts": {
+      "delete": {
+        "success": {
+          "header": "उत्पाद हटाया गया",
+          "description": "{{title}} सफलतापूर्वक हटाया गया।"
+        },
+        "error": {
+          "header": "उत्पाद हटाने में विफल"
+        }
+      }
+    },
+    "prices": {
+      "edit": {
+        "successToast": "मूल्य सफलतापूर्वक अपडेट किए गए"
+      }
+    }
+  },
+  "collections": {
+    "domain": "संग्रह",
+    "subtitle": "उत्पादों को संग्रह में व्यवस्थित करें।",
+    "createCollection": "संग्रह बनाएं",
+    "createCollectionHint": "अपने उत्पादों को व्यवस्थित करने के लिए एक नया संग्रह बनाएं।",
+    "createSuccess": "संग्रह सफलतापूर्वक बनाया गया।",
+    "editCollection": "संग्रह संपादित करें",
+    "handleTooltip": "हैंडल का उपयोग आपके स्टोरफ्रंट में संग्रह को संदर्भित करने के लिए किया जाता है। यदि निर्दिष्ट नहीं किया गया, तो हैंडल संग्रह शीर्षक से उत्पन्न होगा।",
+    "deleteWarning": "आप संग्रह {{title}} को हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+    "removeSingleProductWarning": "आप उत्पाद {{title}} को संग्रह से हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+    "removeProductsWarning_one": "आप संग्रह से {{count}} उत्पाद हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+    "removeProductsWarning_other": "आप संग्रह से {{count}} उत्पाद हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+    "products": {
+      "list": {
+        "noRecordsMessage": "संग्रह में कोई उत्पाद नहीं हैं।"
+      },
+      "add": {
+        "successToast_one": "उत्पाद सफलतापूर्वक संग्रह में जोड़ा गया।",
+        "successToast_other": "उत्पाद सफलतापूर्वक संग्रह में जोड़े गए।"
+      },
+      "remove": {
+        "successToast_one": "उत्पाद सफलतापूर्वक संग्रह से हटाया गया।",
+        "successToast_other": "उत्पाद सफलतापूर्वक संग्रह से हटाए गए।"
+      }
+    }
+  },
+  "categories": {
+    "domain": "श्रेणियाँ",
+    "subtitle": "उत्पादों को श्रेणियों में व्यवस्थित करें, और उन श्रेणियों की रैंकिंग और पदानुक्रम प्रबंधित करें।",
+    "create": {
+      "header": "श्रेणी बनाएं",
+      "hint": "अपने उत्पादों को व्यवस्थित करने के लिए एक नई श्रेणी बनाएं।",
+      "tabs": {
+        "details": "विवरण",
+        "organize": "रैंकिंग व्यवस्थित करें"
+      },
+      "successToast": "श्रेणी {{name}} सफलतापूर्वक बनाई गई।"
+    },
+    "edit": {
+      "header": "श्रेणी संपादित करें",
+      "description": "विवरण अपडेट करने के लिए श्रेणी संपादित करें।",
+      "successToast": "श्रेणी सफलतापूर्वक अपडेट की गई।"
+    },
+    "delete": {
+      "confirmation": "आप श्रेणी {{name}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "श्रेणी {{name}} सफलतापूर्वक हटाई गई।"
+    },
+    "products": {
+      "add": {
+        "disabledTooltip": "उत्पाद पहले से ही इस श्रेणी में है।",
+        "successToast_one": "श्रेणी में {{count}} उत्पाद जोड़ा गया।",
+        "successToast_other": "श्रेणी में {{count}} उत्पाद जोड़े गए।"
+      },
+      "remove": {
+        "confirmation_one": "आप श्रेणी से {{count}} उत्पाद हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+        "confirmation_other": "आप श्रेणी से {{count}} उत्पाद हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+        "successToast_one": "श्रेणी से {{count}} उत्पाद हटाया गया।",
+        "successToast_other": "श्रेणी से {{count}} उत्पाद हटाए गए।"
+      },
+      "list": {
+        "noRecordsMessage": "श्रेणी में कोई उत्पाद नहीं हैं।"
+      }
+    },
+    "organize": {
+      "header": "व्यवस्थित करें",
+      "action": "रैंकिंग संपादित करें"
+    },
+    "fields": {
+      "visibility": {
+        "label": "दृश्यता",
+        "internal": "आंतरिक",
+        "public": "सार्वजनिक"
+      },
+      "status": {
+        "label": "स्थिति",
+        "active": "सक्रिय",
+        "inactive": "निष्क्रिय"
+      },
+      "path": {
+        "label": "पथ",
+        "tooltip": "श्रेणी का पूर्ण पथ दिखाएं।"
+      },
+      "children": {
+        "label": "उपश्रेणियाँ"
+      },
+      "new": {
+        "label": "नया"
+      }
+    }
+  },
+  "inventory": {
+    "domain": "इन्वेंटरी",
+    "subtitle": "अपनी इन्वेंटरी आइटम प्रबंधित करें",
+    "reserved": "आरक्षित",
+    "available": "उपलब्ध",
+    "locationLevels": "स्थान",
+    "associatedVariants": "संबद्ध वेरिएंट",
+    "manageLocations": "स्थान प्रबंधित करें",
+    "manageLocationQuantity": "स्थान मात्रा प्रबंधित करें",
+    "deleteWarning": "आप एक इन्वेंटरी आइटम हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "editItemDetails": "आइटम विवरण संपादित करें",
+    "quantityAcrossLocations": "{{quantity}} {{locations}} स्थानों में",
+    "levelDeleted": "इन्वेंटरी स्तर सफलतापूर्वक हटाया गया।",
+    "create": {
+      "title": "इन्वेंटरी आइटम बनाएं",
+      "details": "विवरण",
+      "availability": "उपलब्धता",
+      "locations": "स्थान",
+      "attributes": "विशेषताएं",
+      "requiresShipping": "शिपिंग आवश्यक है",
+      "requiresShippingHint": "क्या इन्वेंटरी आइटम को शिपिंग की आवश्यकता है?",
+      "successToast": "इन्वेंटरी आइटम सफलतापूर्वक बनाया गया।"
+    },
+    "reservation": {
+      "header": "{{itemName}} का आरक्षण",
+      "editItemDetails": "आरक्षण संपादित करें",
+      "lineItemId": "लाइन आइटम ID",
+      "orderID": "ऑर्डर ID",
+      "description": "विवरण",
+      "location": "स्थान",
+      "inStockAtLocation": "इस स्थान पर स्टॉक में",
+      "availableAtLocation": "इस स्थान पर उपलब्ध",
+      "reservedAtLocation": "इस स्थान पर आरक्षित",
+      "reservedAmount": "आरक्षित मात्रा",
+      "create": "आरक्षण बनाएं",
+      "itemToReserve": "आरक्षित करने के लिए आइटम",
+      "quantityPlaceholder": "आप कितना आरक्षित करना चाहते हैं?",
+      "descriptionPlaceholder": "यह किस प्रकार का आरक्षण है?",
+      "successToast": "आरक्षण सफलतापूर्वक बनाया गया।",
+      "updateSuccessToast": "आरक्षण सफलतापूर्वक अपडेट किया गया।",
+      "deleteSuccessToast": "आरक्षण सफलतापूर्वक हटाया गया।",
+      "errors": {
+        "noAvaliableQuantity": "स्टॉक स्थान पर उपलब्ध मात्रा नहीं है।",
+        "quantityOutOfRange": "न्यूनतम मात्रा 1 है और अधिकतम मात्रा {{max}} है"
+      }
+    },
+    "adjustInventory": {
+      "errors": {
+        "stockedQuantity": "स्टॉक की गई मात्रा को आरक्षित मात्रा {{quantity}} से कम अपडेट नहीं किया जा सकता।"
+      }
+    },
+    "toast": {
+      "updateLocations": "स्थान सफलतापूर्वक अपडेट किए गए।",
+      "updateLevel": "इन्वेंटरी स्तर सफलतापूर्वक अपडेट किया गया।",
+      "updateItem": "इन्वेंटरी आइटम सफलतापूर्वक अपडेट किया गया।"
+    },
+    "stock": {
+      "title": "इन्वेंटरी स्तर अपडेट करें",
+      "description": "चयनित इन्वेंटरी आइटम के लिए स्टॉक इन्वेंटरी स्तर अपडेट करें।",
+      "action": "स्टॉक स्तर संपादित करें",
+      "placeholder": "सक्षम नहीं",
+      "disablePrompt_one": "आप {{count}} स्थान स्तर को अक्षम करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "disablePrompt_other": "आप {{count}} स्थान स्तरों को अक्षम करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "disabledToggleTooltip": "अक्षम नहीं किया जा सकता: अक्षम करने से पहले आने वाली और/या आरक्षित मात्रा साफ़ करें।",
+      "successToast": "इन्वेंटरी स्तर सफलतापूर्वक अपडेट किए गए।"
+    }
+  },
+  "giftCards": {
+    "domain": "गिफ्ट कार्ड",
+    "editGiftCard": "गिफ्ट कार्ड संपादित करें",
+    "createGiftCard": "गिफ्ट कार्ड बनाएं",
+    "createGiftCardHint": "मैन्युअल रूप से एक गिफ्ट कार्ड बनाएं जिसे आपके स्टोर में भुगतान विधि के रूप में उपयोग किया जा सकता है।",
+    "selectRegionFirst": "पहले एक क्षेत्र चुनें",
+    "deleteGiftCardWarning": "आप गिफ्ट कार्ड {{code}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "balanceHigherThanValue": "शेष राशि मूल राशि से अधिक नहीं हो सकती।",
+    "balanceLowerThanZero": "शेष राशि ऋणात्मक नहीं हो सकती।",
+    "expiryDateHint": "गिफ्ट कार्ड की समाप्ति तिथि के संबंध में विभिन्न देशों में अलग-अलग कानून हैं। समाप्ति तिथि निर्धारित करने से पहले स्थानीय नियमों की जांच अवश्य करें।",
+    "regionHint": "गिफ्ट कार्ड का क्षेत्र बदलने से इसकी मुद्रा भी बदल जाएगी, जिससे इसके मौद्रिक मूल्य पर प्रभाव पड़ सकता है।",
+    "enabledHint": "निर्दिष्ट करें कि गिफ्ट कार्ड सक्षम है या अक्षम।",
+    "balance": "शेष राशि",
+    "currentBalance": "वर्तमान शेष राशि",
+    "initialBalance": "प्रारंभिक शेष राशि",
+    "personalMessage": "व्यक्तिगत संदेश",
+    "recipient": "प्राप्तकर्ता"
+  },
+  "customers": {
+    "domain": "ग्राहक",
+    "list": {
+      "noRecordsMessage": "आपके ग्राहक यहाँ दिखाई देंगे।"
+    },
+    "create": {
+      "header": "ग्राहक बनाएं",
+      "hint": "नया ग्राहक बनाएं और उनका विवरण प्रबंधित करें।",
+      "successToast": "ग्राहक {{email}} सफलतापूर्वक बनाया गया।"
+    },
+    "groups": {
+      "label": "ग्राहक समूह",
+      "remove": "क्या आप वाकई ग्राहक को \"{{name}}\" ग्राहक समूह से हटाना चाहते हैं?",
+      "removeMany": "क्या आप वाकई ग्राहक को निम्नलिखित ग्राहक समूहों से हटाना चाहते हैं: {{groups}}?",
+      "alreadyAddedTooltip": "ग्राहक पहले से इस ग्राहक समूह में है।",
+      "list": {
+        "noRecordsMessage": "यह ग्राहक किसी भी समूह से संबंधित नहीं है।"
+      },
+      "add": {
+        "success": "ग्राहक जोड़ा गया: {{groups}}।",
+        "list": {
+          "noRecordsMessage": "कृपया पहले एक ग्राहक समूह बनाएं।"
+        }
+      },
+      "removed": {
+        "success": "ग्राहक हटाया गया: {{groups}}।",
+        "list": {
+          "noRecordsMessage": "कृपया पहले एक ग्राहक समूह बनाएं।"
+        }
+      }
+    },
+    "edit": {
+      "header": "ग्राहक संपादित करें",
+      "emailDisabledTooltip": "पंजीकृत ग्राहकों के लिए ईमेल पता बदला नहीं जा सकता।",
+      "successToast": "ग्राहक {{email}} सफलतापूर्वक अपडेट किया गया।"
+    },
+    "delete": {
+      "title": "ग्राहक हटाएं",
+      "description": "आप ग्राहक {{email}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "ग्राहक {{email}} सफलतापूर्वक हटाया गया।"
+    },
+    "fields": {
+      "guest": "अतिथि",
+      "registered": "पंजीकृत",
+      "groups": "समूह"
+    },
+    "registered": "पंजीकृत",
+    "guest": "अतिथि",
+    "hasAccount": "खाता है",
+    "addresses": {
+      "title": "पते",
+      "fields": {
+        "addressName": "पते का नाम",
+        "address1": "पता 1",
+        "address2": "पता 2",
+        "city": "शहर",
+        "province": "प्रांत",
+        "postalCode": "पिन कोड",
+        "country": "देश",
+        "phone": "फ़ोन",
+        "company": "कंपनी",
+        "countryCode": "देश कोड",
+        "provinceCode": "प्रांत कोड"
+      },
+      "create": {
+        "header": "पता बनाएं",
+        "hint": "ग्राहक के लिए नया पता बनाएं।",
+        "successToast": "पता सफलतापूर्वक बनाया गया।"
+      }
+    }
+  },
+  "customerGroups": {
+    "domain": "ग्राहक समूह",
+    "subtitle": "ग्राहकों को समूहों में व्यवस्थित करें। समूहों के लिए अलग प्रमोशन और कीमतें हो सकती हैं।",
+    "list": {
+      "empty": {
+        "heading": "कोई ग्राहक समूह नहीं",
+        "description": "प्रदर्शित करने के लिए कोई ग्राहक समूह नहीं हैं।"
+      },
+      "filtered": {
+        "heading": "कोई परिणाम नहीं",
+        "description": "वर्तमान फ़िल्टर मानदंड से कोई ग्राहक समूह मेल नहीं खाता।"
+      }
+    },
+    "create": {
+      "header": "ग्राहक समूह बनाएं",
+      "hint": "अपने ग्राहकों को विभाजित करने के लिए एक नया ग्राहक समूह बनाएं।",
+      "successToast": "ग्राहक समूह {{name}} सफलतापूर्वक बनाया गया।"
+    },
+    "edit": {
+      "header": "ग्राहक समूह संपादित करें",
+      "successToast": "ग्राहक समूह {{name}} सफलतापूर्वक अपडेट किया गया।"
+    },
+    "delete": {
+      "title": "ग्राहक समूह हटाएं",
+      "description": "आप ग्राहक समूह {{name}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "ग्राहक समूह {{name}} सफलतापूर्वक हटाया गया।"
+    },
+    "customers": {
+      "alreadyAddedTooltip": "ग्राहक को पहले ही समूह में जोड़ा जा चुका है।",
+      "add": {
+        "successToast_one": "ग्राहक को समूह में सफलतापूर्वक जोड़ा गया।",
+        "successToast_other": "ग्राहकों को समूह में सफलतापूर्वक जोड़ा गया।",
+        "list": {
+          "noRecordsMessage": "पहले एक ग्राहक बनाएं।"
+        }
+      },
+      "remove": {
+        "title_one": "ग्राहक हटाएं",
+        "title_other": "ग्राहक हटाएं",
+        "description_one": "आप ग्राहक समूह से {{count}} ग्राहक को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+        "description_other": "आप ग्राहक समूह से {{count}} ग्राहकों को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।"
+      },
+      "list": {
+        "noRecordsMessage": "इस समूह में ग्राहक नहीं हैं।"
+      }
+    }
+  },
+  "orders": {
+    "giftCardsStoreCreditLines": "गिफ्ट कार्ड और क्रेडिट लाइन",
+    "creditLines": {
+      "title": "क्रेडिट लाइन",
+      "total": "सभी क्रेडिट लाइन का योग",
+      "creditOrDebit": "क्रेडिट / डेबिट",
+      "createCreditLine": "क्रेडिट लाइन बनाएं",
+      "createCreditLineSuccess": "क्रेडिट लाइन सफलतापूर्वक बनाई गई",
+      "createCreditLineError": "क्रेडिट लाइन बनाने में त्रुटि",
+      "createCreditLineDescription": "राशि {{amount}} के लिए क्रेडिट लाइन बनाएं",
+      "operation": "ऑपरेशन",
+      "credit": "क्रेडिट",
+      "creditDescription": "ऑर्डर में सकारात्मक राशि जोड़ता है",
+      "debit": "डेबिट",
+      "debitDescription": "ऑर्डर से नकारात्मक राशि घटाता है"
+    },
+    "balanceSettlement": {
+      "title": "बैलेंस सेटलमेंट",
+      "settlementType": "सेटलमेंट प्रकार",
+      "settlementTypes": {
+        "paymentMethod": "पेमेंट विधि",
+        "paymentMethodDescription": "पेमेंट विधि में राशि रिफंड करें",
+        "creditLine": "स्टोर क्रेडिट",
+        "creditLineDescription": "स्टोर क्रेडिट के रूप में राशि रिफंड करें"
+      }
+    },
+    "domain": "ऑर्डर",
+    "claim": "क्लेम",
+    "exchange": "एक्सचेंज",
+    "return": "रिटर्न",
+    "cancelWarning": "आप ऑर्डर {{id}} को कैंसल करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "orderCanceled": "ऑर्डर सफलतापूर्वक कैंसल किया गया",
+    "onDateFromSalesChannel": "{{date}} को {{salesChannel}} से",
+    "list": {
+      "noRecordsMessage": "आपके ऑर्डर यहां दिखाई देंगे।"
+    },
+    "status": {
+      "not_paid": "भुगतान नहीं किया गया",
+      "pending": "लंबित",
+      "completed": "पूर्ण",
+      "draft": "ड्राफ्ट",
+      "archived": "संग्रहीत",
+      "canceled": "कैंसल किया गया",
+      "requires_action": "कार्रवाई आवश्यक"
+    },
+    "summary": {
+      "requestReturn": "रिटर्न अनुरोध करें",
+      "allocateItems": "आइटम आवंटित करें",
+      "editOrder": "ऑर्डर संपादित करें",
+      "editOrderContinue": "ऑर्डर संपादन जारी रखें",
+      "inventoryKit": "{{count}}x इन्वेंटरी आइटम शामिल हैं",
+      "itemTotal": "आइटम कुल",
+      "shippingTotal": "शिपिंग कुल",
+      "discountTotal": "छूट कुल",
+      "taxTotalIncl": "टैक्स कुल (शामिल)",
+      "itemSubtotal": "आइटम उपयोग",
+      "shippingSubtotal": "शिपिंग उपयोग",
+      "discountSubtotal": "छूट उपयोग",
+      "taxTotal": "टैक्स कुल",
+      "totalAfterDiscount": "छूट के बाद कुल"
+    },
+    "transfer": {
+      "title": "स्वामित्व ट्रांसफर करें",
+      "requestSuccess": "ऑर्डर ट्रांसफर अनुरोध भेजा गया: {{email}}।",
+      "currentOwner": "वर्तमान स्वामी",
+      "newOwner": "नया स्वामी",
+      "currentOwnerDescription": "वर्तमान में इस ऑर्डर से संबंधित ग्राहक।",
+      "newOwnerDescription": "वह ग्राहक जिसे यह ऑर्डर ट्रांसफर करना है।"
+    },
+    "payment": {
+      "title": "भुगतान",
+      "isReadyToBeCaptured": "भुगतान <0/> कैप्चर करने के लिए तैयार है।",
+      "totalPaidByCustomer": "ग्राहक द्वारा कुल भुगतान",
+      "totalStoreCreditRefunds": "कुल स्टोर क्रेडिट रिफंड",
+      "capture": "भुगतान कैप्चर करें",
+      "capture_short": "कैप्चर",
+      "refund": "रिफंड",
+      "markAsPaid": "भुगतान किया गया चिह्नित करें",
+      "statusLabel": "भुगतान स्थिति",
+      "statusTitle": "भुगतान स्थिति",
+      "status": {
+        "notPaid": "भुगतान नहीं किया गया",
+        "authorized": "अधिकृत",
+        "partiallyAuthorized": "आंशिक रूप से अधिकृत",
+        "awaiting": "प्रतीक्षारत",
+        "captured": "कैप्चर किया गया",
+        "partiallyRefunded": "आंशिक रूप से रिफंड किया गया",
+        "partiallyCaptured": "आंशिक रूप से कैप्चर किया गया",
+        "refunded": "रिफंड किया गया",
+        "canceled": "कैंसल किया गया",
+        "requiresAction": "कार्रवाई आवश्यक"
+      },
+      "capturePayment": "{{amount}} का भुगतान कैप्चर किया जाएगा।",
+      "capturePaymentSuccess": "{{amount}} का भुगतान सफलतापूर्वक कैप्चर किया गया",
+      "markAsPaidPayment": "{{amount}} का भुगतान भुगतान किया गया चिह्नित किया जाएगा।",
+      "markAsPaidPaymentSuccess": "{{amount}} का भुगतान सफलतापूर्वक भुगतान किया गया चिह्नित किया गया",
+      "createRefund": "रिफंड बनाएं",
+      "refundPaymentSuccess": "{{amount}} राशि का रिफंड सफल",
+      "createRefundWrongQuantity": "मात्रा 1 और {{number}} के बीच एक संख्या होनी चाहिए",
+      "refundAmount": "{{ amount }} रिफंड करें",
+      "paymentLink": "{{ amount }} के लिए भुगतान लिंक कॉपी करें",
+      "selectPaymentToRefund": "रिफंड करने के लिए भुगतान चुनें"
+    },
+    "edits": {
+      "title": "ऑर्डर संपादित करें",
+      "confirm": "संपादन पुष्टि करें",
+      "confirmText": "आप ऑर्डर संपादन की पुष्टि करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "cancel": "संपादन कैंसल करें",
+      "currentItems": "वर्तमान आइटम",
+      "currentItemsDescription": "आइटम मात्रा समायोजित करें या हटाएं।",
+      "addItemsDescription": "आप ऑर्डर में नए आइटम जोड़ सकते हैं।",
+      "addItems": "आइटम जोड़ें",
+      "amountPaid": "भुगतान की गई राशि",
+      "newTotal": "नया कुल",
+      "differenceDue": "देय अंतर",
+      "create": "ऑर्डर संपादित करें",
+      "currentTotal": "वर्तमान कुल",
+      "noteHint": "संपादन के लिए आंतरिक नोट जोड़ें",
+      "cancelSuccessToast": "ऑर्डर संपादन कैंसल किया गया",
+      "createSuccessToast": "ऑर्डर संपादन अनुरोध बनाया गया",
+      "activeChangeError": "ऑर्डर पर पहले से एक सक्रिय ऑर्डर परिवर्तन है (रिटर्न, क्लेम, एक्सचेंज आदि)। कृपया ऑर्डर संपादित करने से पहले परिवर्तन समाप्त करें या कैंसल करें।",
+      "panel": {
+        "title": "ऑर्डर संपादन अनुरोधित",
+        "titlePending": "ऑर्डर संपादन लंबित"
+      },
+      "toast": {
+        "canceledSuccessfully": "ऑर्डर संपादन कैंसल किया गया",
+        "confirmedSuccessfully": "ऑर्डर संपादन पुष्टि की गई"
+      },
+      "validation": {
+        "quantityLowerThanFulfillment": "मात्रा को पूर्ण की गई मात्रा से कम या बराबर सेट नहीं किया जा सकता"
+      }
+    },
+    "edit": {
+      "email": {
+        "title": "ईमेल संपादित करें",
+        "requestSuccess": "ऑर्डर ईमेल {{email}} में अपडेट किया गया।"
+      },
+      "shippingAddress": {
+        "title": "शिपिंग पता संपादित करें",
+        "requestSuccess": "ऑर्डर शिपिंग पता अपडेट किया गया।"
+      },
+      "billingAddress": {
+        "title": "बिलिंग पता संपादित करें",
+        "requestSuccess": "ऑर्डर बिलिंग पता अपडेट किया गया।"
+      }
+    },
+    "returns": {
+      "create": "रिटर्न बनाएं",
+      "confirm": "रिटर्न पुष्टि करें",
+      "confirmText": "आप रिटर्न की पुष्टि करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "inbound": "इनबाउंड",
+      "outbound": "आउटबाउंड",
+      "sendNotification": "सूचना भेजें",
+      "sendNotificationHint": "ग्राहक को रिटर्न के बारे में सूचित करें।",
+      "returnTotal": "रिटर्न कुल",
+      "inboundTotal": "इनबाउंड कुल",
+      "estDifference": "अनुमानित अंतर",
+      "outstandingAmount": "बकाया राशि",
+      "reason": "कारण",
+      "reasonHint": "चुनें कि ग्राहक आइटम क्यों रिटर्न करना चाहता है।",
+      "note": "नोट",
+      "noInventoryLevel": "कोई इन्वेंटरी स्तर नहीं",
+      "noInventoryLevelDesc": "चयनित स्थान पर चयनित आइटम के लिए इन्वेंटरी स्तर नहीं है। रिटर्न का अनुरोध किया जा सकता है लेकिन चयनित स्थान के लिए इन्वेंटरी स्तर बनाए जाने तक प्राप्त नहीं किया जा सकता।",
+      "noteHint": "यदि आप कुछ निर्दिष्ट करना चाहते हैं तो स्वतंत्र रूप से टाइप कर सकते हैं।",
+      "location": "स्थान",
+      "locationHint": "चुनें कि आप आइटम किस स्थान पर रिटर्न करना चाहते हैं।",
+      "inboundShipping": "रिटर्न शिपिंग",
+      "inboundShippingHint": "चुनें कि आप किस विधि का उपयोग करना चाहते हैं।",
+      "returnableQuantityLabel": "रिटर्न योग्य मात्रा",
+      "refundableAmountLabel": "रिफंड योग्य राशि",
+      "returnRequestedInfo": "{{requestedItemsCount}}x आइटम रिटर्न अनुरोधित",
+      "returnReceivedInfo": "{{requestedItemsCount}}x आइटम रिटर्न प्राप्त",
+      "itemReceived": "आइटम प्राप्त",
+      "returnRequested": "रिटर्न अनुरोधित",
+      "damagedItemReceived": "क्षतिग्रस्त आइटम प्राप्त",
+      "damagedItemsReturned": "{{quantity}}x क्षतिग्रस्त आइटम रिटर्न किए गए",
+      "activeChangeError": "इस ऑर्डर पर एक सक्रिय ऑर्डर परिवर्तन प्रगति में है। कृपया पहले परिवर्तन समाप्त करें या रद्द करें।",
+      "cancel": {
+        "title": "रिटर्न कैंसल करें",
+        "description": "क्या आप वाकई रिटर्न अनुरोध कैंसल करना चाहते हैं?"
+      },
+      "placeholders": {
+        "noReturnShippingOptions": {
+          "title": "कोई रिटर्न शिपिंग विकल्प नहीं मिला",
+          "hint": "स्थान के लिए कोई रिटर्न शिपिंग विकल्प नहीं बनाया गया। आप <LinkComponent>स्थान और शिपिंग</LinkComponent> पर एक बना सकते हैं।"
+        },
+        "outboundShippingOptions": {
+          "title": "कोई आउटबाउंड शिपिंग विकल्प नहीं मिला",
+          "hint": "स्थान के लिए कोई आउटबाउंड शिपिंग विकल्प नहीं बनाया गया। आप <LinkComponent>स्थान और शिपिंग</LinkComponent> पर एक बना सकते हैं।"
+        }
+      },
+      "receive": {
+        "action": "आइटम प्राप्त करें",
+        "receiveItems": "{{ returnType }} {{ id }}",
+        "restockAll": "सभी आइटम पुनः स्टॉक करें",
+        "itemsLabel": "आइटम प्राप्त",
+        "title": "#{{returnId}} के लिए आइटम प्राप्त करें",
+        "sendNotificationHint": "ग्राहक को प्राप्त रिटर्न के बारे में सूचित करें।",
+        "inventoryWarning": "कृपया ध्यान दें कि हम आपके ऊपर दिए गए इनपुट के आधार पर स्वचालित रूप से इन्वेंटरी स्तर समायोजित करेंगे।",
+        "writeOffInputLabel": "कितने आइटम क्षतिग्रस्त हैं?",
+        "toast": {
+          "success": "रिटर्न सफलतापूर्वक प्राप्त किया गया।",
+          "errorLargeValue": "मात्रा अनुरोधित आइटम मात्रा से अधिक है।",
+          "errorNegativeValue": "मात्रा नकारात्मक मान नहीं हो सकती।",
+          "errorLargeDamagedValue": "क्षतिग्रस्त आइटम मात्रा + गैर क्षतिग्रस्त प्राप्त मात्रा रिटर्न पर कुल आइटम मात्रा से अधिक है। कृपया गैर क्षतिग्रस्त आइटम की मात्रा कम करें।"
+        }
+      },
+      "toast": {
+        "canceledSuccessfully": "रिटर्न सफलतापूर्वक कैंसल किया गया",
+        "confirmedSuccessfully": "रिटर्न सफलतापूर्वक पुष्टि की गई"
+      },
+      "panel": {
+        "title": "रिटर्न आरंभ किया गया",
+        "description": "पूर्ण करने के लिए एक खुला रिटर्न अनुरोध है"
+      }
+    },
+    "claims": {
+      "create": "क्लेम बनाएं",
+      "confirm": "क्लेम पुष्टि करें",
+      "confirmText": "आप क्लेम की पुष्टि करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "manage": "क्लेम प्रबंधित करें",
+      "outbound": "आउटबाउंड",
+      "outboundItemAdded": "{{itemsCount}}x क्लेम के माध्यम से जोड़ा गया",
+      "outboundTotal": "आउटबाउंड कुल",
+      "outboundShipping": "आउटबाउंड शिपिंग",
+      "outboundShippingHint": "चुनें कि आप किस विधि का उपयोग करना चाहते हैं।",
+      "refundAmount": "अनुमानित अंतर",
+      "activeChangeError": "इस ऑर्डर पर एक सक्रिय ऑर्डर परिवर्तन है। कृपया पिछला परिवर्तन समाप्त करें या रद्द करें।",
+      "actions": {
+        "cancelClaim": {
+          "successToast": "क्लेम सफलतापूर्वक कैंसल किया गया।"
+        }
+      },
+      "cancel": {
+        "title": "क्लेम कैंसल करें",
+        "description": "क्या आप वाकई क्लेम कैंसल करना चाहते हैं?"
+      },
+      "tooltips": {
+        "onlyReturnShippingOptions": "इस सूची में केवल रिटर्न शिपिंग विकल्प शामिल होंगे।"
+      },
+      "toast": {
+        "canceledSuccessfully": "क्लेम सफलतापूर्वक कैंसल किया गया",
+        "confirmedSuccessfully": "क्लेम सफलतापूर्वक पुष्टि की गई"
+      },
+      "panel": {
+        "title": "क्लेम आरंभ किया गया",
+        "description": "पूर्ण करने के लिए एक खुला क्लेम अनुरोध है"
+      }
+    },
+    "exchanges": {
+      "create": "एक्सचेंज बनाएं",
+      "manage": "एक्सचेंज प्रबंधित करें",
+      "confirm": "एक्सचेंज पुष्टि करें",
+      "confirmText": "आप एक्सचेंज की पुष्टि करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "outbound": "आउटबाउंड",
+      "outboundItemAdded": "{{itemsCount}}x एक्सचेंज के माध्यम से जोड़ा गया",
+      "outboundTotal": "आउटबाउंड कुल",
+      "outboundShipping": "आउटबाउंड शिपिंग",
+      "outboundShippingHint": "चुनें कि आप किस विधि का उपयोग करना चाहते हैं।",
+      "refundAmount": "अनुमानित अंतर",
+      "carryOverPromotion": "प्रमोशन आगे ले जाएं",
+      "carryOverPromotionHint": "एक्सचेंज आइटम पर ऑर्डर के प्रमोशन लागू करें",
+      "carryOverPromotionTooltip": "केवल EACH आवंटन के साथ निश्चित प्रकार के प्रमोशन और EACH या ACROSS आवंटन के साथ प्रतिशत प्रकार के प्रमोशन आउटबाउंड एक्सचेंज आइटम पर आगे ले जाए जा सकते हैं।",
+      "activeChangeError": "इस ऑर्डर पर एक सक्रिय ऑर्डर परिवर्तन है। कृपया पिछला परिवर्तन समाप्त करें या रद्द करें।",
+      "actions": {
+        "cancelExchange": {
+          "successToast": "एक्सचेंज सफलतापूर्वक कैंसल किया गया।"
+        }
+      },
+      "cancel": {
+        "title": "एक्सचेंज कैंसल करें",
+        "description": "क्या आप वाकई एक्सचेंज कैंसल करना चाहते हैं?"
+      },
+      "tooltips": {
+        "onlyReturnShippingOptions": "इस सूची में केवल रिटर्न शिपिंग विकल्प शामिल होंगे।"
+      },
+      "toast": {
+        "canceledSuccessfully": "एक्सचेंज सफलतापूर्वक कैंसल किया गया",
+        "confirmedSuccessfully": "एक्सचेंज सफलतापूर्वक पुष्टि की गई"
+      },
+      "panel": {
+        "title": "एक्सचेंज आरंभ किया गया",
+        "description": "पूर्ण करने के लिए एक खुला एक्सचेंज अनुरोध है"
+      }
+    },
+    "reservations": {
+      "allocatedLabel": "आवंटित",
+      "notAllocatedLabel": "आवंटित नहीं"
+    },
+    "allocateItems": {
+      "action": "आइटम आवंटित करें",
+      "title": "ऑर्डर आइटम आवंटित करें",
+      "locationDescription": "चुनें कि आप किस स्थान से आवंटित करना चाहते हैं।",
+      "itemsToAllocate": "आवंटित करने के लिए आइटम",
+      "itemsToAllocateDesc": "उन आइटम की संख्या चुनें जिन्हें आप आवंटित करना चाहते हैं",
+      "search": "आइटम खोजें",
+      "consistsOf": "{{num}}x इन्वेंटरी आइटम शामिल हैं",
+      "requires": "प्रति वेरिएंट {{num}} आवश्यक",
+      "toast": {
+        "created": "आइटम सफलतापूर्वक आवंटित किए गए",
+        "error": "निम्नलिखित आइटम आवंटित करने में विफल: {{items}}"
+      },
+      "error": {
+        "quantityNotAllocated": "अनावंटित आइटम हैं।"
+      }
+    },
+    "shipment": {
+      "title": "फुलफिलमेंट को शिप किया गया चिह्नित करें",
+      "trackingNumber": "ट्रैकिंग नंबर",
+      "trackingUrl": "ट्रैकिंग URL",
+      "labelUrl": "लेबल URL",
+      "addTracking": "ट्रैकिंग नंबर जोड़ें",
+      "sendNotification": "सूचना भेजें",
+      "sendNotificationHint": "ग्राहक को इस शिपमेंट के बारे में सूचित करें।",
+      "toastCreated": "शिपमेंट सफलतापूर्वक बनाया गया।"
+    },
+    "fulfillment": {
+      "cancelWarning": "आप फुलफिलमेंट कैंसल करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "markAsDeliveredWarning": "आप फुलफिलमेंट को डिलीवर किया गया चिह्नित करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "differentOptionSelected": "चयनित शिपिंग विकल्प ग्राहक द्वारा चुने गए विकल्प से भिन्न है।",
+      "disabledItemTooltip": "आपके द्वारा चुना गया शिपिंग विकल्प इस आइटम की फुलफिलमेंट की अनुमति नहीं देता",
+      "unfulfilledItems": "अपूर्ण आइटम",
+      "statusLabel": "फुलफिलमेंट स्थिति",
+      "statusTitle": "फुलफिलमेंट स्थिति",
+      "fulfillItems": "आइटम पूर्ण करें",
+      "awaitingFulfillmentBadge": "फुलफिलमेंट प्रतीक्षारत",
+      "requiresShipping": "शिपिंग आवश्यक",
+      "number": "फुलफिलमेंट #{{number}}",
+      "itemsToFulfill": "पूर्ण करने के लिए आइटम",
+      "create": "फुलफिलमेंट बनाएं",
+      "available": "उपलब्ध",
+      "inStock": "स्टॉक में",
+      "markAsShipped": "शिप किया गया चिह्नित करें",
+      "markAsPickedUp": "पिक अप किया गया चिह्नित करें",
+      "markAsDelivered": "डिलीवर किया गया चिह्नित करें",
+      "itemsToFulfillDesc": "पूर्ण करने के लिए आइटम और मात्रा चुनें",
+      "locationDescription": "चुनें कि आप किस स्थान से आइटम पूर्ण करना चाहते हैं।",
+      "sendNotificationHint": "बनाए गए फुलफिलमेंट के बारे में ग्राहकों को सूचित करें।",
+      "methodDescription": "ग्राहक द्वारा चुनी गई विधि से भिन्न शिपिंग विधि चुनें",
+      "error": {
+        "wrongQuantity": "फुलफिलमेंट के लिए केवल एक आइटम उपलब्ध है",
+        "wrongQuantity_other": "मात्रा 1 और {{number}} के बीच एक संख्या होनी चाहिए",
+        "noItems": "पूर्ण करने के लिए कोई आइटम नहीं।",
+        "noShippingOption": "शिपिंग विकल्प आवश्यक है",
+        "noLocation": "स्थान आवश्यक है"
+      },
+      "status": {
+        "notFulfilled": "पूर्ण नहीं किया गया",
+        "partiallyFulfilled": "आंशिक रूप से पूर्ण",
+        "fulfilled": "पूर्ण",
+        "partiallyShipped": "आंशिक रूप से शिप किया गया",
+        "shipped": "शिप किया गया",
+        "delivered": "डिलीवर किया गया",
+        "partiallyDelivered": "आंशिक रूप से डिलीवर किया गया",
+        "partiallyReturned": "आंशिक रूप से रिटर्न किया गया",
+        "returned": "रिटर्न किया गया",
+        "canceled": "कैंसल किया गया",
+        "requiresAction": "कार्रवाई आवश्यक"
+      },
+      "toast": {
+        "created": "फुलफिलमेंट सफलतापूर्वक बनाया गया",
+        "canceled": "फुलफिलमेंट सफलतापूर्वक कैंसल किया गया",
+        "fulfillmentShipped": "पहले से शिप किए गए फुलफिलमेंट को कैंसल नहीं किया जा सकता",
+        "fulfillmentDelivered": "फुलफिलमेंट सफलतापूर्वक डिलीवर किया गया चिह्नित किया गया",
+        "fulfillmentPickedUp": "फुलफिलमेंट सफलतापूर्वक पिक अप किया गया चिह्नित किया गया"
+      },
+      "trackingLabel": "ट्रैकिंग",
+      "shippingFromLabel": "से शिपिंग",
+      "itemsLabel": "आइटम"
+    },
+    "refund": {
+      "title": "रिफंड बनाएं",
+      "sendNotificationHint": "बनाए गए रिफंड के बारे में ग्राहकों को सूचित करें।",
+      "systemPayment": "सिस्टम भुगतान",
+      "systemPaymentDesc": "आपके एक या अधिक भुगतान सिस्टम भुगतान हैं। ध्यान रखें कि ऐसे भुगतानों के लिए कैप्चर और रिफंड Medusa द्वारा संभाले नहीं जाते।",
+      "error": {
+        "amountToLarge": "मूल ऑर्डर राशि से अधिक रिफंड नहीं किया जा सकता।",
+        "amountNegative": "रिफंड राशि एक सकारात्मक संख्या होनी चाहिए।",
+        "reasonRequired": "कृपया रिफंड कारण चुनें।"
+      }
+    },
+    "customer": {
+      "contactLabel": "संपर्क",
+      "editEmail": "ईमेल संपादित करें",
+      "transferOwnership": "स्वामित्व ट्रांसफर करें",
+      "editBillingAddress": "बिलिंग पता संपादित करें",
+      "editShippingAddress": "शिपिंग पता संपादित करें"
+    },
+    "activity": {
+      "header": "गतिविधि",
+      "showMoreActivities_one": "{{count}} और गतिविधि दिखाएं",
+      "showMoreActivities_other": "{{count}} और गतिविधियां दिखाएं",
+      "comment": {
+        "label": "टिप्पणी",
+        "placeholder": "टिप्पणी छोड़ें",
+        "addButtonText": "टिप्पणी जोड़ें",
+        "deleteButtonText": "टिप्पणी हटाएं"
+      },
+      "from": "से",
+      "to": "को",
+      "events": {
+        "common": {
+          "toReturn": "रिटर्न करने के लिए",
+          "toSend": "भेजने के लिए"
+        },
+        "placed": {
+          "title": "ऑर्डर दिया गया",
+          "fromSalesChannel": "{{salesChannel}} से"
+        },
+        "canceled": {
+          "title": "ऑर्डर कैंसल किया गया"
+        },
+        "payment": {
+          "awaiting": "भुगतान प्रतीक्षारत",
+          "captured": "भुगतान कैप्चर किया गया",
+          "canceled": "भुगतान कैंसल किया गया",
+          "refunded": "भुगतान रिफंड किया गया"
+        },
+        "fulfillment": {
+          "created": "आइटम पूर्ण किए गए",
+          "canceled": "फुलफिलमेंट कैंसल किया गया",
+          "shipped": "आइटम शिप किए गए",
+          "delivered": "आइटम डिलीवर किए गए",
+          "items_one": "{{count}} आइटम",
+          "items_other": "{{count}} आइटम"
+        },
+        "return": {
+          "created": "रिटर्न #{{returnId}} अनुरोधित",
+          "canceled": "रिटर्न #{{returnId}} कैंसल किया गया",
+          "received": "रिटर्न #{{returnId}} प्राप्त",
+          "items_one": "{{count}} आइटम रिटर्न किया गया",
+          "items_other": "{{count}} आइटम रिटर्न किए गए"
+        },
+        "note": {
+          "comment": "टिप्पणी",
+          "byLine": "{{author}} द्वारा"
+        },
+        "claim": {
+          "created": "क्लेम #{{claimId}} अनुरोधित",
+          "canceled": "क्लेम #{{claimId}} कैंसल किया गया",
+          "itemsInbound": "{{count}} आइटम रिटर्न करने के लिए",
+          "itemsOutbound": "{{count}} आइटम भेजने के लिए"
+        },
+        "exchange": {
+          "created": "एक्सचेंज #{{exchangeId}} अनुरोधित",
+          "canceled": "एक्सचेंज #{{exchangeId}} कैंसल किया गया",
+          "itemsInbound": "{{count}} आइटम रिटर्न करने के लिए",
+          "itemsOutbound": "{{count}} आइटम भेजने के लिए"
+        },
+        "edit": {
+          "requested": "ऑर्डर संपादन #{{editId}} अनुरोधित",
+          "confirmed": "ऑर्डर संपादन #{{editId}} पुष्टि की गई"
+        },
+        "transfer": {
+          "requested": "ऑर्डर ट्रांसफर #{{transferId}} अनुरोधित",
+          "confirmed": "ऑर्डर ट्रांसफर #{{transferId}} पुष्टि की गई",
+          "declined": "ऑर्डर ट्रांसफर #{{transferId}} अस्वीकृत"
+        },
+        "update_order": {
+          "shipping_address": "शिपिंग पता अपडेट किया गया",
+          "billing_address": "बिलिंग पता अपडेट किया गया",
+          "email": "ईमेल अपडेट किया गया"
+        }
+      }
+    },
+    "fields": {
+      "displayId": "डिस्प्ले ID",
+      "refundableAmount": "रिफंड योग्य राशि",
+      "returnableQuantity": "रिटर्न योग्य मात्रा"
+    }
+  },
+  "draftOrders": {
+    "domain": "ड्राफ्ट ऑर्डर",
+    "deleteWarning": "आप ड्राफ्ट ऑर्डर {{id}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "paymentLinkLabel": "पेमेंट लिंक",
+    "cartIdLabel": "कार्ट ID",
+    "markAsPaid": {
+      "label": "भुगतान किया गया के रूप में चिह्नित करें",
+      "warningTitle": "भुगतान किया गया के रूप में चिह्नित करें",
+      "warningDescription": "आप ड्राफ्ट ऑर्डर को भुगतान किया गया के रूप में चिह्नित करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती, और बाद में भुगतान एकत्र करना संभव नहीं होगा।"
+    },
+    "status": {
+      "open": "खुला",
+      "completed": "पूर्ण"
+    },
+    "create": {
+      "createDraftOrder": "ड्राफ्ट ऑर्डर बनाएं",
+      "createDraftOrderHint": "ऑर्डर दिए जाने से पहले उसके विवरण प्रबंधित करने के लिए एक नया ड्राफ्ट ऑर्डर बनाएं।",
+      "chooseRegionHint": "क्षेत्र चुनें",
+      "existingItemsLabel": "मौजूदा आइटम",
+      "existingItemsHint": "ड्राफ्ट ऑर्डर में मौजूदा उत्पाद जोड़ें।",
+      "customItemsLabel": "कस्टम आइटम",
+      "customItemsHint": "ड्राफ्ट ऑर्डर में कस्टम आइटम जोड़ें।",
+      "addExistingItemsAction": "मौजूदा आइटम जोड़ें",
+      "addCustomItemAction": "कस्टम आइटम जोड़ें",
+      "noCustomItemsAddedLabel": "अभी तक कोई कस्टम आइटम नहीं जोड़ा गया",
+      "noExistingItemsAddedLabel": "अभी तक कोई मौजूदा आइटम नहीं जोड़ा गया",
+      "chooseRegionTooltip": "पहले एक क्षेत्र चुनें",
+      "useExistingCustomerLabel": "मौजूदा ग्राहक का उपयोग करें",
+      "addShippingMethodsAction": "शिपिंग विधियां जोड़ें",
+      "unitPriceOverrideLabel": "यूनिट मूल्य ओवरराइड",
+      "shippingOptionLabel": "शिपिंग विकल्प",
+      "shippingOptionHint": "ड्राफ्ट ऑर्डर के लिए शिपिंग विकल्प चुनें।",
+      "shippingPriceOverrideLabel": "शिपिंग मूल्य ओवरराइड",
+      "shippingPriceOverrideHint": "ड्राफ्ट ऑर्डर के लिए शिपिंग मूल्य ओवरराइड करें।",
+      "sendNotificationLabel": "सूचना भेजें",
+      "sendNotificationHint": "ड्राफ्ट ऑर्डर बनने पर ग्राहक को सूचना भेजें।"
+    },
+    "validation": {
+      "requiredEmailOrCustomer": "ईमेल या ग्राहक आवश्यक है।",
+      "requiredItems": "कम से कम एक आइटम आवश्यक है।",
+      "invalidEmail": "ईमेल एक वैध ईमेल पता होना चाहिए।"
+    }
+  },
+  "stockLocations": {
+    "domain": "स्थान और शिपिंग",
+    "list": {
+      "description": "अपने स्टोर के स्टॉक स्थानों और शिपिंग विकल्पों को प्रबंधित करें।",
+      "noRecordsMessage": "कोई रिकॉर्ड नहीं",
+      "noRecordsMessageEmpty": "कोई स्थान नहीं मिला",
+      "noRecordsMessageFiltered": "फ़िल्टर से मेल खाने वाला कोई स्थान नहीं मिला"
+    },
+    "create": {
+      "header": "स्टॉक स्थान बनाएं",
+      "hint": "स्टॉक स्थान एक भौतिक साइट है जहां उत्पाद संग्रहीत और शिप किए जाते हैं।",
+      "successToast": "स्थान {{name}} सफलतापूर्वक बनाया गया।"
+    },
+    "edit": {
+      "header": "स्टॉक स्थान संपादित करें",
+      "viewInventory": "इन्वेंटरी देखें",
+      "successToast": "स्थान {{name}} सफलतापूर्वक अपडेट किया गया।"
+    },
+    "delete": {
+      "confirmation": "आप स्टॉक स्थान \"{{name}}\" को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "स्थान \"{{name}}\" सफलतापूर्वक हटाया गया।"
+    },
+    "fulfillmentProviders": {
+      "header": "फुलफिलमेंट प्रदाता",
+      "shippingOptionsTooltip": "इस ड्रॉपडाउन में केवल इस स्थान के लिए सक्षम प्रदाता होंगे। यदि ड्रॉपडाउन अक्षम है तो उन्हें स्थान में जोड़ें।",
+      "label": "कनेक्टेड फुलफिलमेंट प्रदाता",
+      "connectedTo": "{{total}} में से {{count}} फुलफिलमेंट प्रदाताओं से कनेक्टेड",
+      "noProviders": "यह स्टॉक स्थान किसी भी फुलफिलमेंट प्रदाता से कनेक्ट नहीं है।",
+      "action": "प्रदाता कनेक्ट करें",
+      "successToast": "स्टॉक स्थान के लिए फुलफिलमेंट प्रदाता सफलतापूर्वक अपडेट किए गए।"
+    },
+    "fulfillmentSets": {
+      "pickup": {
+        "header": "पिकअप"
+      },
+      "shipping": {
+        "header": "शिपिंग"
+      },
+      "disable": {
+        "confirmation": "क्या आप वाकई \"{{name}}\" को अक्षम करना चाहते हैं? इससे सभी संबंधित सर्विस ज़ोन और शिपिंग विकल्प हटा दिए जाएंगे, और इसे पूर्ववत नहीं किया जा सकता।",
+        "pickup": "पिकअप सफलतापूर्वक अक्षम किया गया।",
+        "shipping": "शिपिंग सफलतापूर्वक अक्षम की गई।"
+      },
+      "enable": {
+        "pickup": "पिकअप सफलतापूर्वक सक्षम किया गया।",
+        "shipping": "शिपिंग सफलतापूर्वक सक्षम की गई।"
+      }
+    },
+    "sidebar": {
+      "header": "शिपिंग कॉन्फ़िगरेशन",
+      "shippingProfiles": {
+        "label": "शिपिंग प्रोफाइल",
+        "description": "शिपिंग आवश्यकताओं के अनुसार उत्पादों को समूहित करें"
+      },
+      "shippingOptionTypes": {
+        "label": "शिपिंग विकल्प प्रकार",
+        "description": "शिपिंग विकल्पों को प्रकार के अनुसार समूहित करें"
+      }
+    },
+    "salesChannels": {
+      "header": "सेल्स चैनल",
+      "hint": "इस स्थान से कनेक्टेड सेल्स चैनलों को प्रबंधित करें।",
+      "label": "कनेक्टेड सेल्स चैनल",
+      "connectedTo": "{{total}} में से {{count}} सेल्स चैनलों से कनेक्टेड",
+      "noChannels": "यह स्थान किसी भी सेल्स चैनल से कनेक्ट नहीं है।",
+      "action": "सेल्स चैनल कनेक्ट करें",
+      "successToast": "सेल्स चैनल सफलतापूर्वक अपडेट किए गए।"
+    },
+    "pickupOptions": {
+      "edit": {
+        "header": "पिकअप विकल्प संपादित करें"
+      }
+    },
+    "shippingOptions": {
+      "create": {
+        "shipping": {
+          "header": "{{zone}} के लिए शिपिंग विकल्प बनाएं",
+          "hint": "इस स्थान से उत्पादों को कैसे शिप किया जाता है, यह परिभाषित करने के लिए एक नया शिपिंग विकल्प बनाएं।",
+          "label": "शिपिंग विकल्प",
+          "successToast": "शिपिंग विकल्प {{name}} सफलतापूर्वक बनाया गया।"
+        },
+        "pickup": {
+          "header": "{{zone}} के लिए पिकअप विकल्प बनाएं",
+          "hint": "इस स्थान से उत्पादों को कैसे पिकअप किया जाता है, यह परिभाषित करने के लिए एक नया पिकअप विकल्प बनाएं।",
+          "label": "पिकअप विकल्प",
+          "successToast": "पिकअप विकल्प {{name}} सफलतापूर्वक बनाया गया।"
+        },
+        "returns": {
+          "header": "{{zone}} के लिए रिटर्न विकल्प बनाएं",
+          "hint": "इस स्थान पर उत्पादों को कैसे रिटर्न किया जाता है, यह परिभाषित करने के लिए एक नया रिटर्न विकल्प बनाएं।",
+          "label": "रिटर्न विकल्प",
+          "successToast": "रिटर्न विकल्प {{name}} सफलतापूर्वक बनाया गया।"
+        },
+        "tabs": {
+          "details": "विवरण",
+          "prices": "मूल्य"
+        },
+        "action": "विकल्प बनाएं"
+      },
+      "delete": {
+        "confirmation": "आप शिपिंग विकल्प \"{{name}}\" को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+        "successToast": "शिपिंग विकल्प {{name}} सफलतापूर्वक हटाया गया।"
+      },
+      "edit": {
+        "header": "शिपिंग विकल्प संपादित करें",
+        "action": "विकल्प संपादित करें",
+        "successToast": "शिपिंग विकल्प {{name}} सफलतापूर्वक अपडेट किया गया।"
+      },
+      "pricing": {
+        "action": "मूल्य संपादित करें"
+      },
+      "conditionalPrices": {
+        "header": "{{name}} के लिए सशर्त मूल्य",
+        "description": "कार्ट आइटम कुल के आधार पर इस शिपिंग विकल्प के लिए सशर्त मूल्य प्रबंधित करें।",
+        "attributes": {
+          "cartItemTotal": "कार्ट आइटम कुल"
+        },
+        "summaries": {
+          "range": "यदि <0>{{attribute}}</0> <1>{{gte}}</1> और <2>{{lte}}</2> के बीच है",
+          "greaterThan": "यदि <0>{{attribute}}</0> ≥ <1>{{gte}}</1>",
+          "lessThan": "यदि <0>{{attribute}}</0> ≤ <1>{{lte}}</1>"
+        },
+        "actions": {
+          "addPrice": "मूल्य जोड़ें",
+          "manageConditionalPrices": "सशर्त मूल्य प्रबंधित करें"
+        },
+        "rules": {
+          "amount": "शिपिंग विकल्प मूल्य",
+          "gte": "न्यूनतम कार्ट आइटम कुल",
+          "lte": "अधिकतम कार्ट आइटम कुल"
+        },
+        "customRules": {
+          "label": "कस्टम नियम",
+          "tooltip": "इस सशर्त मूल्य में ऐसे नियम हैं जिन्हें डैशबोर्ड में प्रबंधित नहीं किया जा सकता।",
+          "eq": "कार्ट आइटम कुल बराबर होना चाहिए",
+          "gt": "कार्ट आइटम कुल अधिक होना चाहिए",
+          "lt": "कार्ट आइटम कुल कम होना चाहिए"
+        },
+        "errors": {
+          "amountRequired": "शिपिंग विकल्प मूल्य आवश्यक है",
+          "minOrMaxRequired": "न्यूनतम या अधिकतम कार्ट आइटम कुल में से कम से कम एक प्रदान किया जाना चाहिए",
+          "minGreaterThanMax": "न्यूनतम कार्ट आइटम कुल अधिकतम कार्ट आइटम कुल से कम या बराबर होना चाहिए",
+          "duplicateAmount": "प्रत्येक शर्त के लिए शिपिंग विकल्प मूल्य अद्वितीय होना चाहिए",
+          "overlappingConditions": "सभी मूल्य नियमों में शर्तें अद्वितीय होनी चाहिए"
+        }
+      },
+      "fields": {
+        "count": {
+          "shipping_one": "{{count}} शिपिंग विकल्प",
+          "shipping_other": "{{count}} शिपिंग विकल्प",
+          "pickup_one": "{{count}} पिकअप विकल्प",
+          "pickup_other": "{{count}} पिकअप विकल्प",
+          "returns_one": "{{count}} रिटर्न विकल्प",
+          "returns_other": "{{count}} रिटर्न विकल्प"
+        },
+        "priceType": {
+          "label": "मूल्य प्रकार",
+          "options": {
+            "fixed": {
+              "label": "निश्चित",
+              "hint": "शिपिंग विकल्प का मूल्य निश्चित है और ऑर्डर की सामग्री के आधार पर नहीं बदलता।"
+            },
+            "calculated": {
+              "label": "गणना की गई",
+              "hint": "शिपिंग विकल्प का मूल्य चेकआउट के दौरान फुलफिलमेंट प्रदाता द्वारा गणना की जाती है।"
+            }
+          }
+        },
+        "enableInStore": {
+          "label": "स्टोर में सक्षम करें",
+          "hint": "क्या ग्राहक चेकआउट के दौरान इस विकल्प का उपयोग कर सकते हैं।"
+        },
+        "provider": "फुलफिलमेंट प्रदाता",
+        "profile": "शिपिंग प्रोफाइल",
+        "type": "शिपिंग विकल्प प्रकार",
+        "fulfillmentOption": "फुलफिलमेंट विकल्प"
+      }
+    },
+    "serviceZones": {
+      "create": {
+        "headerPickup": "{{location}} से पिकअप के लिए सर्विस ज़ोन बनाएं",
+        "headerShipping": "{{location}} से शिपिंग के लिए सर्विस ज़ोन बनाएं",
+        "action": "सर्विस ज़ोन बनाएं",
+        "successToast": "सर्विस ज़ोन {{name}} सफलतापूर्वक बनाया गया।"
+      },
+      "edit": {
+        "header": "सर्विस ज़ोन संपादित करें",
+        "successToast": "सर्विस ज़ोन {{name}} सफलतापूर्वक अपडेट किया गया।"
+      },
+      "delete": {
+        "confirmation": "आप सर्विस ज़ोन \"{{name}}\" को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+        "successToast": "सर्विस ज़ोन {{name}} सफलतापूर्वक हटाया गया।"
+      },
+      "manageAreas": {
+        "header": "{{name}} के लिए क्षेत्र प्रबंधित करें",
+        "action": "क्षेत्र प्रबंधित करें",
+        "label": "क्षेत्र",
+        "hint": "उन भौगोलिक क्षेत्रों का चयन करें जो सर्विस ज़ोन कवर करता है।",
+        "successToast": "{{name}} के लिए क्षेत्र सफलतापूर्वक अपडेट किए गए।"
+      },
+      "fields": {
+        "noRecords": "शिपिंग विकल्प जोड़ने के लिए कोई सर्विस ज़ोन नहीं है।",
+        "tip": "सर्विस ज़ोन भौगोलिक क्षेत्रों या एरिया का संग्रह है। इसका उपयोग उपलब्ध शिपिंग विकल्पों को परिभाषित स्थानों के सेट तक सीमित करने के लिए किया जाता है।"
+      }
+    }
+  },
+  "shippingProfile": {
+    "domain": "शिपिंग प्रोफ़ाइल",
+    "subtitle": "समान शिपिंग आवश्यकताओं वाले उत्पादों को प्रोफ़ाइल में समूहित करें।",
+    "create": {
+      "header": "शिपिंग प्रोफ़ाइल बनाएं",
+      "hint": "समान शिपिंग आवश्यकताओं वाले उत्पादों को समूहित करने के लिए एक नई शिपिंग प्रोफ़ाइल बनाएं।",
+      "successToast": "शिपिंग प्रोफ़ाइल {{name}} सफलतापूर्वक बनाई गई।"
+    },
+    "delete": {
+      "title": "शिपिंग प्रोफ़ाइल हटाएं",
+      "description": "आप शिपिंग प्रोफ़ाइल {{name}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "शिपिंग प्रोफ़ाइल {{name}} सफलतापूर्वक हटाई गई।"
+    },
+    "tooltip": {
+      "type": "शिपिंग प्रोफ़ाइल प्रकार दर्ज करें, उदाहरण के लिए: भारी, बड़े आकार का, केवल माल ढुलाई, आदि।"
+    }
+  },
+  "taxRegions": {
+    "domain": "कर क्षेत्र",
+    "list": {
+      "hint": "प्रबंधित करें कि जब ग्राहक विभिन्न देशों और क्षेत्रों से खरीदारी करते हैं तो आप उनसे क्या शुल्क लेते हैं।"
+    },
+    "delete": {
+      "confirmation": "आप एक कर क्षेत्र हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "कर क्षेत्र सफलतापूर्वक हटा दिया गया।"
+    },
+    "create": {
+      "header": "कर क्षेत्र बनाएं",
+      "hint": "किसी विशिष्ट देश के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।",
+      "errors": {
+        "missingProvider": "कर क्षेत्र बनाते समय प्रदाता आवश्यक है।",
+        "missingCountry": "कर क्षेत्र बनाते समय देश आवश्यक है।"
+      },
+      "successToast": "कर क्षेत्र सफलतापूर्वक बनाया गया।"
+    },
+    "edit": {
+      "header": "कर क्षेत्र संपादित करें",
+      "hint": "कर क्षेत्र विवरण संपादित करें।",
+      "successToast": "कर क्षेत्र सफलतापूर्वक अपडेट किया गया।"
+    },
+    "province": {
+      "header": "प्रांत",
+      "create": {
+        "header": "प्रांत कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट प्रांत के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "provider": {
+      "header": "कर प्रदाता"
+    },
+    "state": {
+      "header": "राज्य",
+      "create": {
+        "header": "राज्य कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट राज्य के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "stateOrTerritory": {
+      "header": "राज्य या क्षेत्र",
+      "create": {
+        "header": "राज्य/क्षेत्र कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट राज्य/क्षेत्र के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "county": {
+      "header": "काउंटी",
+      "create": {
+        "header": "काउंटी कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट काउंटी के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "region": {
+      "header": "क्षेत्र",
+      "create": {
+        "header": "क्षेत्र कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट क्षेत्र के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "department": {
+      "header": "विभाग",
+      "create": {
+        "header": "विभाग कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट विभाग के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "territory": {
+      "header": "क्षेत्र",
+      "create": {
+        "header": "क्षेत्र कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट क्षेत्र के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "prefecture": {
+      "header": "प्रीफेक्चर",
+      "create": {
+        "header": "प्रीफेक्चर कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट प्रीफेक्चर के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "district": {
+      "header": "जिले",
+      "create": {
+        "header": "जिला कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट जिले के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "governorate": {
+      "header": "गवर्नरेट",
+      "create": {
+        "header": "गवर्नरेट कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट गवर्नरेट के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "canton": {
+      "header": "कैंटन",
+      "create": {
+        "header": "कैंटन कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट कैंटन के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "emirate": {
+      "header": "अमीरात",
+      "create": {
+        "header": "अमीरात कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट अमीरात के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "sublevel": {
+      "header": "उपस्तर",
+      "create": {
+        "header": "उपस्तर कर क्षेत्र बनाएं",
+        "hint": "किसी विशिष्ट उपस्तर के लिए कर दरें परिभाषित करने हेतु नया कर क्षेत्र बनाएं।"
+      }
+    },
+    "taxOverrides": {
+      "header": "ओवरराइड",
+      "create": {
+        "header": "ओवरराइड बनाएं",
+        "hint": "चयनित शर्तों के लिए डिफ़ॉल्ट कर दरों को ओवरराइड करने वाली कर दर बनाएं।"
+      },
+      "edit": {
+        "header": "ओवरराइड संपादित करें",
+        "hint": "चयनित शर्तों के लिए डिफ़ॉल्ट कर दरों को ओवरराइड करने वाली कर दर संपादित करें।"
+      }
+    },
+    "taxRates": {
+      "create": {
+        "header": "कर दर बनाएं",
+        "hint": "किसी क्षेत्र के लिए कर दर परिभाषित करने हेतु नई कर दर बनाएं।",
+        "successToast": "कर दर सफलतापूर्वक बनाई गई।"
+      },
+      "edit": {
+        "header": "कर दर संपादित करें",
+        "hint": "किसी क्षेत्र के लिए कर दर परिभाषित करने हेतु कर दर संपादित करें।",
+        "successToast": "कर दर सफलतापूर्वक अपडेट की गई।"
+      },
+      "delete": {
+        "confirmation": "आप कर दर \"{{name}}\" हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+        "successToast": "कर दर सफलतापूर्वक हटा दी गई।"
+      }
+    },
+    "fields": {
+      "isCombinable": {
+        "label": "संयोज्य",
+        "hint": "क्या यह कर दर कर क्षेत्र की डिफ़ॉल्ट दर के साथ संयोजित की जा सकती है।",
+        "true": "संयोज्य",
+        "false": "संयोज्य नहीं"
+      },
+      "defaultTaxRate": {
+        "label": "डिफ़ॉल्ट कर दर",
+        "tooltip": "इस क्षेत्र के लिए डिफ़ॉल्ट कर दर। उदाहरण किसी देश या क्षेत्र के लिए मानक VAT दर है।",
+        "action": "डिफ़ॉल्ट कर दर बनाएं"
+      },
+      "taxRate": "कर दर",
+      "taxCode": "कर कोड",
+      "taxProvider": "कर प्रदाता",
+      "targets": {
+        "label": "लक्ष्य",
+        "hint": "वे लक्ष्य चुनें जिन पर यह कर दर लागू होगी।",
+        "options": {
+          "product": "उत्पाद",
+          "productCollection": "उत्पाद संग्रह",
+          "productTag": "उत्पाद टैग",
+          "productType": "उत्पाद प्रकार",
+          "customerGroup": "ग्राहक समूह",
+          "shippingOption": "शिपिंग विकल्प"
+        },
+        "operators": {
+          "in": "में",
+          "on": "पर",
+          "and": "और"
+        },
+        "placeholders": {
+          "product": "उत्पाद खोजें",
+          "productCollection": "उत्पाद संग्रह खोजें",
+          "productTag": "उत्पाद टैग खोजें",
+          "productType": "उत्पाद प्रकार खोजें",
+          "customerGroup": "ग्राहक समूह खोजें",
+          "shippingOption": "शिपिंग विकल्प खोजें"
+        },
+        "tags": {
+          "product": "उत्पाद",
+          "productCollection": "उत्पाद संग्रह",
+          "productTag": "उत्पाद टैग",
+          "productType": "उत्पाद प्रकार",
+          "customerGroup": "ग्राहक समूह",
+          "shippingOption": "शिपिंग विकल्प"
+        },
+        "modal": {
+          "header": "लक्ष्य जोड़ें"
+        },
+        "values_one": "{{count}} मान",
+        "values_other": "{{count}} मान",
+        "numberOfTargets_one": "{{count}} लक्ष्य",
+        "numberOfTargets_other": "{{count}} लक्ष्य",
+        "additionalValues_one": "और {{count}} अधिक मान",
+        "additionalValues_other": "और {{count}} अधिक मान",
+        "action": "लक्ष्य जोड़ें"
+      },
+      "sublevels": {
+        "labels": {
+          "province": "प्रांत",
+          "state": "राज्य",
+          "region": "क्षेत्र",
+          "stateOrTerritory": "राज्य/क्षेत्र",
+          "department": "विभाग",
+          "county": "काउंटी",
+          "territory": "क्षेत्र",
+          "prefecture": "प्रीफेक्चर",
+          "district": "जिला",
+          "governorate": "गवर्नरेट",
+          "emirate": "अमीरात",
+          "canton": "कैंटन",
+          "sublevel": "उपस्तर कोड"
+        },
+        "placeholders": {
+          "province": "प्रांत चुनें",
+          "state": "राज्य चुनें",
+          "region": "क्षेत्र चुनें",
+          "stateOrTerritory": "राज्य/क्षेत्र चुनें",
+          "department": "विभाग चुनें",
+          "county": "काउंटी चुनें",
+          "territory": "क्षेत्र चुनें",
+          "prefecture": "प्रीफेक्चर चुनें",
+          "district": "जिला चुनें",
+          "governorate": "गवर्नरेट चुनें",
+          "emirate": "अमीरात चुनें",
+          "canton": "कैंटन चुनें"
+        },
+        "tooltips": {
+          "sublevel": "उपस्तर कर क्षेत्र के लिए ISO 3166-2 कोड दर्ज करें।",
+          "notPartOfCountry": "{{province}}, {{country}} का हिस्सा नहीं लगता। कृपया जांचें कि यह सही है या नहीं।"
+        },
+        "alert": {
+          "header": "इस कर क्षेत्र के लिए उपस्तर क्षेत्र अक्षम हैं",
+          "description": "इस क्षेत्र के लिए उपस्तर क्षेत्र डिफ़ॉल्ट रूप से अक्षम हैं। आप उन्हें सक्षम कर सकते हैं ताकि प्रांत, राज्य या क्षेत्र जैसे उपस्तर क्षेत्र बना सकें।",
+          "action": "उपस्तर क्षेत्र सक्षम करें"
+        }
+      },
+      "noDefaultRate": {
+        "label": "कोई डिफ़ॉल्ट दर नहीं",
+        "tooltip": "इस कर क्षेत्र में डिफ़ॉल्ट कर दर नहीं है। यदि कोई मानक दर है, जैसे देश का VAT, तो कृपया इसे इस क्षेत्र में जोड़ें।"
+      }
+    }
+  },
+  "promotions": {
+    "domain": "प्रमोशन",
+    "sections": {
+      "details": "प्रमोशन विवरण"
+    },
+    "tabs": {
+      "template": "प्रकार",
+      "details": "विवरण",
+      "campaign": "कैम्पेन"
+    },
+    "fields": {
+      "type": "प्रकार",
+      "value_type": "मूल्य प्रकार",
+      "value": "मूल्य",
+      "campaign": "कैम्पेन",
+      "method": "विधि",
+      "allocation": "आवंटन",
+      "allocationTooltip": "Each प्रत्येक आइटम पर मात्रा सीमा लागू करता है, जबकि Once पूरे कार्ट पर मात्रा सीमा लागू करता है",
+      "addCondition": "शर्त जोड़ें",
+      "clearAll": "सभी साफ़ करें",
+      "taxInclusive": "टैक्स सहित",
+      "usageLimit": "उपयोग सीमा",
+      "usage": "उपयोग",
+      "amount": {
+        "tooltip": "राशि सेट करने के लिए करेंसी कोड चुनें"
+      },
+      "conditions": {
+        "rules": {
+          "title": "यह कोड कौन उपयोग कर सकता है?",
+          "description": "किस ग्राहक को प्रमोशन कोड उपयोग करने की अनुमति है? यदि अछूता छोड़ दिया जाए तो प्रमोशन कोड सभी ग्राहकों द्वारा उपयोग किया जा सकता है।"
+        },
+        "target-rules": {
+          "order": {
+            "title": "प्रमोशन किन आइटम पर लागू होगा?",
+            "description": "प्रमोशन उन आइटम पर लागू होगा जो निम्नलिखित शर्तों से मेल खाते हैं।"
+          },
+          "shipping_methods": {
+            "title": "प्रमोशन किन शिपिंग विधियों पर लागू होगा?",
+            "description": "प्रमोशन उन शिपिंग विधियों पर लागू होगा जो निम्नलिखित शर्तों से मेल खाती हैं।"
+          },
+          "items": {
+            "title": "प्रमोशन किन आइटम पर लागू होगा?",
+            "description": "प्रमोशन उन आइटम पर लागू होगा जो निम्नलिखित शर्तों से मेल खाते हैं।"
+          }
+        },
+        "buy-rules": {
+          "title": "प्रमोशन अनलॉक करने के लिए कार्ट में क्या होना चाहिए?",
+          "description": "यदि ये शर्तें मेल खाती हैं, तो हम लक्षित आइटम पर प्रमोशन सक्षम करते हैं।"
+        }
+      }
+    },
+    "tooltips": {
+      "campaignType": "खर्च बजट सेट करने के लिए प्रमोशन में करेंसी कोड चुना जाना चाहिए।"
+    },
+    "errors": {
+      "requiredField": "आवश्यक फ़ील्ड",
+      "promotionTabError": "आगे बढ़ने से पहले प्रमोशन टैब में त्रुटियां ठीक करें"
+    },
+    "toasts": {
+      "promotionCreateSuccess": "प्रमोशन ({{code}}) सफलतापूर्वक बनाया गया।"
+    },
+    "create": {},
+    "edit": {
+      "title": "प्रमोशन विवरण संपादित करें",
+      "rules": {
+        "title": "उपयोग शर्तें संपादित करें"
+      },
+      "target-rules": {
+        "title": "आइटम शर्तें संपादित करें"
+      },
+      "buy-rules": {
+        "title": "खरीद नियम संपादित करें"
+      }
+    },
+    "campaign": {
+      "header": "कैम्पेन",
+      "edit": {
+        "header": "कैम्पेन संपादित करें",
+        "successToast": "प्रमोशन का कैम्पेन सफलतापूर्वक अपडेट किया गया।"
+      },
+      "actions": {
+        "goToCampaign": "कैम्पेन पर जाएं"
+      }
+    },
+    "campaign_currency": {
+      "tooltip": "यह प्रमोशन की करेंसी है। इसे विवरण टैब से बदलें।"
+    },
+    "form": {
+      "required": "आवश्यक",
+      "and": "और",
+      "selectAttribute": "विशेषता चुनें",
+      "campaign": {
+        "existing": {
+          "title": "मौजूदा कैम्पेन",
+          "description": "मौजूदा कैम्पेन में प्रमोशन जोड़ें।",
+          "placeholder": {
+            "title": "कोई मौजूदा कैम्पेन नहीं",
+            "desc": "आप कई प्रमोशन ट्रैक करने और बजट सीमा सेट करने के लिए एक बना सकते हैं।"
+          }
+        },
+        "new": {
+          "title": "नया कैम्पेन",
+          "description": "इस प्रमोशन के लिए एक नया कैम्पेन बनाएं।"
+        },
+        "none": {
+          "title": "कैम्पेन के बिना",
+          "description": "प्रमोशन को कैम्पेन से जोड़े बिना आगे बढ़ें"
+        }
+      },
+      "taxInclusive": {
+        "title": "क्या प्रमोशन में टैक्स शामिल है?",
+        "description": "टैक्स के बाद प्रमोशन लागू करने के लिए यह फ़ील्ड सक्षम करें"
+      },
+      "status": {
+        "label": "स्थिति",
+        "draft": {
+          "title": "ड्राफ़्ट",
+          "description": "ग्राहक अभी तक कोड का उपयोग नहीं कर पाएंगे"
+        },
+        "active": {
+          "title": "सक्रिय",
+          "description": "ग्राहक कोड का उपयोग कर पाएंगे"
+        },
+        "inactive": {
+          "title": "निष्क्रिय",
+          "description": "ग्राहक अब कोड का उपयोग नहीं कर पाएंगे"
+        }
+      },
+      "method": {
+        "label": "विधि",
+        "code": {
+          "title": "प्रमोशन कोड",
+          "description": "ग्राहकों को चेकआउट पर यह कोड दर्ज करना होगा"
+        },
+        "automatic": {
+          "title": "स्वचालित",
+          "description": "ग्राहकों को चेकआउट पर यह प्रमोशन दिखाई देगा"
+        }
+      },
+      "max_quantity": {
+        "title": "अधिकतम मात्रा",
+        "description": "आइटम की अधिकतम मात्रा जिस पर यह प्रमोशन लागू होता है।"
+      },
+      "type": {
+        "standard": {
+          "title": "स्टैंडर्ड",
+          "description": "एक स्टैंडर्ड प्रमोशन"
+        },
+        "buyget": {
+          "title": "Buy Get",
+          "description": "X खरीदें Y पाएं प्रमोशन"
+        }
+      },
+      "allocation": {
+        "each": {
+          "title": "Each",
+          "description": "प्रत्येक आइटम पर मूल्य लागू करता है"
+        },
+        "across": {
+          "title": "Across",
+          "description": "आइटम पर मूल्य लागू करता है"
+        },
+        "once": {
+          "title": "Once",
+          "description": "सीमित संख्या में आइटम पर मूल्य लागू करता है"
+        }
+      },
+      "code": {
+        "title": "कोड",
+        "description": "वह कोड जो आपके ग्राहक चेकआउट के दौरान दर्ज करेंगे।"
+      },
+      "value": {
+        "title": "प्रमोशन मूल्य",
+        "invalid": "अमान्य प्रमोशन मूल्य"
+      },
+      "value_type": {
+        "fixed": {
+          "title": "निश्चित राशि",
+          "description": "छूट की जाने वाली राशि। जैसे 100"
+        },
+        "percentage": {
+          "title": "प्रतिशत",
+          "description": "राशि पर छूट का प्रतिशत। जैसे 8%"
+        }
+      },
+      "limit": {
+        "title": "उपयोग सीमा",
+        "description": "सभी ऑर्डर में इस प्रमोशन का अधिकतम उपयोग। असीमित उपयोग के लिए खाली छोड़ें।"
+      }
+    },
+    "deleteWarning": "आप प्रमोशन {{code}} को हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+    "createPromotionTitle": "प्रमोशन बनाएं",
+    "type": "प्रमोशन प्रकार",
+    "conditions": {
+      "add": "शर्त जोड़ें",
+      "list": {
+        "noRecordsMessage": "प्रमोशन किन आइटम पर लागू होता है यह प्रतिबंधित करने के लिए एक शर्त जोड़ें।"
+      }
+    }
+  },
+  "campaigns": {
+    "domain": "कैंपेन",
+    "details": "कैंपेन विवरण",
+    "status": {
+      "active": "सक्रिय",
+      "expired": "समाप्त",
+      "scheduled": "निर्धारित"
+    },
+    "delete": {
+      "title": "क्या आप सुनिश्चित हैं?",
+      "description": "आप कैंपेन '{{name}}' को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "कैंपेन '{{name}}' सफलतापूर्वक हटाया गया।"
+    },
+    "edit": {
+      "header": "कैंपेन संपादित करें",
+      "description": "कैंपेन का विवरण संपादित करें।",
+      "successToast": "कैंपेन '{{name}}' सफलतापूर्वक अपडेट किया गया।"
+    },
+    "configuration": {
+      "header": "कॉन्फ़िगरेशन",
+      "edit": {
+        "header": "कैंपेन कॉन्फ़िगरेशन संपादित करें",
+        "description": "कैंपेन का कॉन्फ़िगरेशन संपादित करें।",
+        "successToast": "कैंपेन कॉन्फ़िगरेशन सफलतापूर्वक अपडेट किया गया।"
+      }
+    },
+    "create": {
+      "title": "कैंपेन बनाएं",
+      "description": "प्रचार कैंपेन बनाएं।",
+      "hint": "प्रचार कैंपेन बनाएं।",
+      "header": "कैंपेन बनाएं",
+      "successToast": "कैंपेन '{{name}}' सफलतापूर्वक बनाया गया।"
+    },
+    "fields": {
+      "name": "नाम",
+      "identifier": "पहचानकर्ता",
+      "start_date": "आरंभ तिथि",
+      "end_date": "समाप्ति तिथि",
+      "total_spend": "बजट खर्च",
+      "total_used": "बजट उपयोग",
+      "totalUsedByAttribute": "कुल उपयोग",
+      "budget_limit": "बजट सीमा",
+      "campaign_id": {
+        "hint": "अक्षम कैंपेन का बजट प्रमोशन से भिन्न मुद्रा में है।"
+      }
+    },
+    "budget": {
+      "attribute": {
+        "customer_id": "ग्राहक",
+        "customer_email": "ईमेल"
+      },
+      "create": {
+        "hint": "कैंपेन के लिए बजट बनाएं।",
+        "header": "कैंपेन बजट"
+      },
+      "details": "कैंपेन बजट",
+      "fields": {
+        "type": "प्रकार",
+        "currency": "मुद्रा",
+        "limit": "सीमा",
+        "used": "उपयोग किया गया",
+        "budgetAttribute": "प्रति सीमा उपयोग",
+        "budgetAttributeTooltip": "परिभाषित करें कि प्रत्येक ग्राहक या ईमेल द्वारा प्रमोशन का कितनी बार उपयोग किया जा सकता है।",
+        "totalUsedByAttribute": "बजट सीमा प्रति: {{attribute}}",
+        "totalUsedByAttributeCustomerId": "बजट सीमा प्रति ग्राहक",
+        "totalUsedByAttributeEmail": "बजट सीमा प्रति ईमेल"
+      },
+      "type": {
+        "spend": {
+          "title": "खर्च",
+          "description": "सभी प्रमोशन उपयोगों की कुल छूट राशि पर सीमा निर्धारित करें।"
+        },
+        "usage": {
+          "title": "उपयोग",
+          "description": "प्रमोशन का कितनी बार उपयोग किया जा सकता है, इस पर सीमा निर्धारित करें।"
+        },
+        "useByAttribute": {
+          "title": "विशेषता द्वारा उपयोग (ग्राहक आईडी, ईमेल, आदि)",
+          "titleCustomerId": "प्रति ग्राहक उपयोग",
+          "titleEmail": "प्रति ईमेल उपयोग",
+          "description": "किसी विशिष्ट विशेषता मान द्वारा प्रमोशन का कितनी बार उपयोग किया जा सकता है, इस पर सीमा निर्धारित करें।"
+        }
+      },
+      "edit": {
+        "header": "कैंपेन बजट संपादित करें"
+      }
+    },
+    "promotions": {
+      "remove": {
+        "title": "कैंपेन से प्रमोशन हटाएं",
+        "description": "आप कैंपेन से {{count}} प्रमोशन हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।"
+      },
+      "alreadyAdded": "यह प्रमोशन पहले से ही कैंपेन में जोड़ा जा चुका है।",
+      "alreadyAddedDiffCampaign": "यह प्रमोशन पहले से ही एक अलग कैंपेन ({{name}}) में जोड़ा जा चुका है।",
+      "currencyMismatch": "प्रमोशन और कैंपेन की मुद्रा मेल नहीं खाती",
+      "toast": {
+        "success": "कैंपेन में {{count}} प्रमोशन सफलतापूर्वक जोड़े गए"
+      },
+      "add": {
+        "list": {
+          "noRecordsMessage": "पहले एक प्रमोशन बनाएं।"
+        }
+      },
+      "list": {
+        "noRecordsMessage": "कैंपेन में कोई प्रमोशन नहीं हैं।"
+      }
+    },
+    "deleteCampaignWarning": "आप कैंपेन {{name}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "totalSpend": "<0>{{amount}}</0> <1>{{currency}}</1>"
+  },
+  "priceLists": {
+    "domain": "मूल्य सूचियाँ",
+    "subtitle": "विशिष्ट शर्तों के लिए बिक्री बनाएं या मूल्य ओवरराइड करें।",
+    "delete": {
+      "confirmation": "आप मूल्य सूची \"{{title}}\" को हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+      "successToast": "मूल्य सूची \"{{title}}\" सफलतापूर्वक हटा दी गई।"
+    },
+    "create": {
+      "header": "मूल्य सूची बनाएं",
+      "subheader": "अपने उत्पादों की कीमतों को प्रबंधित करने के लिए एक नई मूल्य सूची बनाएं।",
+      "tabs": {
+        "details": "विवरण",
+        "products": "उत्पाद",
+        "prices": "मूल्य"
+      },
+      "successToast": "मूल्य सूची {{title}} सफलतापूर्वक बनाई गई।",
+      "products": {
+        "list": {
+          "noRecordsMessage": "पहले एक उत्पाद बनाएं।"
+        }
+      }
+    },
+    "edit": {
+      "header": "मूल्य सूची संपादित करें",
+      "successToast": "मूल्य सूची {{title}} सफलतापूर्वक अपडेट की गई।"
+    },
+    "configuration": {
+      "header": "कॉन्फ़िगरेशन",
+      "edit": {
+        "header": "मूल्य सूची कॉन्फ़िगरेशन संपादित करें",
+        "description": "मूल्य सूची का कॉन्फ़िगरेशन संपादित करें।",
+        "successToast": "मूल्य सूची कॉन्फ़िगरेशन सफलतापूर्वक अपडेट किया गया।"
+      }
+    },
+    "products": {
+      "header": "उत्पाद",
+      "actions": {
+        "addProducts": "उत्पाद जोड़ें",
+        "editPrices": "मूल्य संपादित करें"
+      },
+      "delete": {
+        "confirmation_one": "आप मूल्य सूची में {{count}} उत्पाद के मूल्य हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+        "confirmation_other": "आप मूल्य सूची में {{count}} उत्पादों के मूल्य हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+        "successToast_one": "{{count}} उत्पाद के मूल्य सफलतापूर्वक हटाए गए।",
+        "successToast_other": "{{count}} उत्पादों के मूल्य सफलतापूर्वक हटाए गए।"
+      },
+      "add": {
+        "successToast": "मूल्य सूची में मूल्य सफलतापूर्वक जोड़े गए।"
+      },
+      "edit": {
+        "successToast": "मूल्य सफलतापूर्वक अपडेट किए गए।"
+      }
+    },
+    "fields": {
+      "priceOverrides": {
+        "label": "मूल्य ओवरराइड",
+        "header": "मूल्य ओवरराइड"
+      },
+      "status": {
+        "label": "स्थिति",
+        "options": {
+          "active": "सक्रिय",
+          "draft": "ड्राफ़्ट",
+          "expired": "समाप्त",
+          "scheduled": "निर्धारित"
+        }
+      },
+      "type": {
+        "label": "प्रकार",
+        "hint": "आप जो मूल्य सूची बनाना चाहते हैं उसका प्रकार चुनें।",
+        "options": {
+          "sale": {
+            "label": "बिक्री",
+            "description": "बिक्री मूल्य उत्पादों के लिए अस्थायी मूल्य परिवर्तन हैं।"
+          },
+          "override": {
+            "label": "ओवरराइड",
+            "description": "ओवरराइड का उपयोग आमतौर पर ग्राहक-विशिष्ट मूल्य बनाने के लिए किया जाता है।"
+          }
+        }
+      },
+      "startsAt": {
+        "label": "क्या मूल्य सूची की प्रारंभ तिथि है?",
+        "hint": "भविष्य में सक्रिय होने के लिए मूल्य सूची को शेड्यूल करें।"
+      },
+      "endsAt": {
+        "label": "क्या मूल्य सूची की समाप्ति तिथि है?",
+        "hint": "भविष्य में निष्क्रिय होने के लिए मूल्य सूची को शेड्यूल करें।"
+      },
+      "customerAvailability": {
+        "header": "ग्राहक समूह चुनें",
+        "label": "ग्राहक उपलब्धता",
+        "hint": "चुनें कि मूल्य सूची किन ग्राहक समूहों पर लागू होनी चाहिए।",
+        "placeholder": "ग्राहक समूह खोजें",
+        "attribute": "ग्राहक समूह"
+      }
+    }
+  },
+  "profile": {
+    "domain": "प्रोफ़ाइल",
+    "manageYourProfileDetails": "अपनी प्रोफ़ाइल का विवरण प्रबंधित करें।",
+    "fields": {
+      "languageLabel": "भाषा",
+      "onboardingLabel": "ऑनबोर्डिंग",
+      "onboardingCompleted": "पूर्ण",
+      "onboardingNotCompleted": "अधूरा",
+      "usageInsightsLabel": "उपयोग अंतर्दृष्टि"
+    },
+    "edit": {
+      "header": "प्रोफ़ाइल संपादित करें",
+      "languageHint": "डैशबोर्ड में आप जिस भाषा का उपयोग करना चाहते हैं। इससे आपके स्टोर की भाषा नहीं बदलती।",
+      "languagePlaceholder": "भाषा चुनें",
+      "usageInsightsHint": "उपयोग अंतर्दृष्टि साझा करें और Medusa को बेहतर बनाने में हमारी मदद करें। हम क्या एकत्र करते हैं और उसका उपयोग कैसे करते हैं, इसके बारे में अधिक जानकारी हमारे <0>दस्तावेज़ीकरण</0> में पढ़ें।"
+    },
+    "toast": {
+      "edit": "प्रोफ़ाइल परिवर्तन सहेजे गए"
+    }
+  },
+  "users": {
+    "domain": "उपयोगकर्ता",
+    "editUser": "उपयोगकर्ता संपादित करें",
+    "inviteUser": "उपयोगकर्ता आमंत्रित करें",
+    "inviteUserHint": "अपने स्टोर में नया उपयोगकर्ता आमंत्रित करें।",
+    "sendInvite": "आमंत्रण भेजें",
+    "pendingInvites": "लंबित आमंत्रण",
+    "deleteInviteWarning": "आप {{email}} के लिए आमंत्रण हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+    "resendInvite": "आमंत्रण पुनः भेजें",
+    "copyInviteLink": "आमंत्रण लिंक कॉपी करें",
+    "expiredOnDate": "{{date}} को समाप्त",
+    "validFromUntil": "<0>{{from}}</0> से <1>{{until}}</1> तक मान्य",
+    "acceptedOnDate": "{{date}} को स्वीकृत",
+    "inviteStatus": {
+      "accepted": "स्वीकृत",
+      "pending": "लंबित",
+      "expired": "समाप्त"
+    },
+    "roles": {
+      "admin": "एडमिन",
+      "developer": "डेवलपर",
+      "member": "सदस्य"
+    },
+    "list": {
+      "empty": {
+        "heading": "कोई उपयोगकर्ता नहीं मिला",
+        "description": "एक बार उपयोगकर्ता को आमंत्रित करने के बाद, वे यहां दिखाई देंगे।"
+      },
+      "filtered": {
+        "heading": "कोई परिणाम नहीं",
+        "description": "वर्तमान फ़िल्टर मानदंड से कोई उपयोगकर्ता मेल नहीं खाता।"
+      }
+    },
+    "deleteUserWarning": "आप उपयोगकर्ता {{name}} को हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+    "deleteUserSuccess": "उपयोगकर्ता {{name}} सफलतापूर्वक हटाया गया",
+    "invite": "आमंत्रित करें"
+  },
+  "store": {
+    "domain": "स्टोर",
+    "manageYourStoresDetails": "अपने स्टोर का विवरण प्रबंधित करें",
+    "editStore": "स्टोर संपादित करें",
+    "defaultCurrency": "डिफ़ॉल्ट मुद्रा",
+    "defaultLocale": "डिफ़ॉल्ट लोकेल",
+    "defaultRegion": "डिफ़ॉल्ट क्षेत्र",
+    "defaultSalesChannel": "डिफ़ॉल्ट बिक्री चैनल",
+    "defaultLocation": "डिफ़ॉल्ट स्थान",
+    "swapLinkTemplate": "स्वैप लिंक टेम्पलेट",
+    "paymentLinkTemplate": "भुगतान लिंक टेम्पलेट",
+    "inviteLinkTemplate": "आमंत्रण लिंक टेम्पलेट",
+    "locales": "लोकेल",
+    "currencies": "मुद्राएं",
+    "addCurrencies": "मुद्राएं जोड़ें",
+    "enableTaxInclusivePricing": "कर सहित मूल्य निर्धारण सक्षम करें",
+    "disableTaxInclusivePricing": "कर सहित मूल्य निर्धारण अक्षम करें",
+    "removeCurrencyWarning_one": "आप अपने स्टोर से {{count}} मुद्रा हटाने वाले हैं। आगे बढ़ने से पहले सुनिश्चित करें कि आपने इस मुद्रा का उपयोग करने वाली सभी कीमतें हटा दी हैं।",
+    "removeCurrencyWarning_other": "आप अपने स्टोर से {{count}} मुद्राएं हटाने वाले हैं। आगे बढ़ने से पहले सुनिश्चित करें कि आपने इन मुद्राओं का उपयोग करने वाली सभी कीमतें हटा दी हैं।",
+    "removeLocaleWarning_one": "आप अपने स्टोर से {{count}} लोकेल हटाने वाले हैं। इस लोकेल का उपयोग करने वाला कोई भी अनुवाद हटा दिया जाएगा।",
+    "removeLocaleWarning_other": "आप अपने स्टोर से {{count}} लोकेल हटाने वाले हैं। इन लोकेल का उपयोग करने वाले सभी अनुवाद हटा दिए जाएंगे।",
+    "currencyAlreadyAdded": "यह मुद्रा पहले से ही आपके स्टोर में जोड़ी जा चुकी है।",
+    "localeAlreadyAdded": "यह लोकेल पहले से ही आपके स्टोर में जोड़ा जा चुका है।",
+    "edit": {
+      "header": "स्टोर संपादित करें"
+    },
+    "toast": {
+      "update": "स्टोर सफलतापूर्वक अपडेट किया गया",
+      "currenciesUpdated": "मुद्राएं सफलतापूर्वक अपडेट की गईं",
+      "localesUpdated": "लोकेल सफलतापूर्वक अपडेट किए गए",
+      "currenciesRemoved": "स्टोर से मुद्राएं सफलतापूर्वक हटाई गईं",
+      "localesRemoved": "स्टोर से लोकेल सफलतापूर्वक हटाए गए",
+      "updatedTaxInclusivitySuccessfully": "कर सहित मूल्य निर्धारण सफलतापूर्वक अपडेट किया गया"
+    }
+  },
+  "regions": {
+    "domain": "क्षेत्र",
+    "subtitle": "क्षेत्र वह इलाका है जहाँ आप उत्पाद बेचते हैं। यह कई देशों को कवर कर सकता है, और इसमें अलग-अलग कर दरें, प्रदाता और मुद्रा होती है।",
+    "createRegion": "क्षेत्र बनाएं",
+    "createRegionHint": "देशों के समूह के लिए कर दरें और प्रदाता प्रबंधित करें।",
+    "addCountries": "देश जोड़ें",
+    "editRegion": "क्षेत्र संपादित करें",
+    "countriesHint": "इस क्षेत्र में शामिल देश जोड़ें।",
+    "deleteRegionWarning": "आप क्षेत्र {{name}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "removeCountriesWarning_one": "आप क्षेत्र से {{count}} देश को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "removeCountriesWarning_other": "आप क्षेत्र से {{count}} देशों को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "removeCountryWarning": "आप क्षेत्र से देश {{name}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "automaticTaxesHint": "सक्षम होने पर, कर केवल शिपिंग पते के आधार पर चेकआउट के समय गणना किए जाएंगे।",
+    "taxInclusiveHint": "सक्षम होने पर, क्षेत्र में कीमतें कर सहित होंगी।",
+    "providersHint": "जोड़ें कि इस क्षेत्र में कौन से भुगतान प्रदाता उपलब्ध हैं।",
+    "shippingOptions": "शिपिंग विकल्प",
+    "deleteShippingOptionWarning": "आप शिपिंग विकल्प {{name}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "return": "रिटर्न",
+    "outbound": "आउटबाउंड",
+    "priceType": "मूल्य प्रकार",
+    "flatRate": "फ्लैट रेट",
+    "calculated": "गणना की गई",
+    "list": {
+      "noRecordsMessage": "उन क्षेत्रों के लिए एक क्षेत्र बनाएं जहाँ आप बेचते हैं।"
+    },
+    "toast": {
+      "delete": "क्षेत्र सफलतापूर्वक हटाया गया",
+      "edit": "क्षेत्र संपादन सहेजा गया",
+      "create": "क्षेत्र सफलतापूर्वक बनाया गया",
+      "countries": "क्षेत्र के देश सफलतापूर्वक अपडेट किए गए"
+    },
+    "shippingOption": {
+      "createShippingOption": "शिपिंग विकल्प बनाएं",
+      "createShippingOptionHint": "क्षेत्र के लिए एक नया शिपिंग विकल्प बनाएं।",
+      "editShippingOption": "शिपिंग विकल्प संपादित करें",
+      "fulfillmentMethod": "पूर्ति विधि",
+      "type": {
+        "outbound": "आउटबाउंड",
+        "outboundHint": "इसका उपयोग करें यदि आप ग्राहक को उत्पाद भेजने के लिए शिपिंग विकल्प बना रहे हैं।",
+        "return": "रिटर्न",
+        "returnHint": "इसका उपयोग करें यदि आप ग्राहक द्वारा आपको उत्पाद वापस करने के लिए शिपिंग विकल्प बना रहे हैं।"
+      },
+      "priceType": {
+        "label": "मूल्य प्रकार",
+        "flatRate": "फ्लैट रेट",
+        "calculated": "गणना की गई"
+      },
+      "availability": {
+        "adminOnly": "केवल एडमिन",
+        "adminOnlyHint": "सक्षम होने पर, शिपिंग विकल्प केवल एडमिन डैशबोर्ड में उपलब्ध होगा, स्टोरफ्रंट में नहीं।"
+      },
+      "taxInclusiveHint": "सक्षम होने पर, शिपिंग विकल्प की कीमत कर सहित होगी।",
+      "requirements": {
+        "label": "आवश्यकताएं",
+        "hint": "शिपिंग विकल्प के लिए आवश्यकताएं निर्दिष्ट करें।"
+      }
+    }
+  },
+  "taxes": {
+    "domain": "कर क्षेत्र",
+    "domainDescription": "अपने कर क्षेत्र का प्रबंधन करें",
+    "countries": {
+      "taxCountriesHint": "कर सेटिंग्स सूचीबद्ध देशों पर लागू होती हैं।"
+    },
+    "settings": {
+      "editTaxSettings": "कर सेटिंग्स संपादित करें",
+      "taxProviderLabel": "कर प्रदाता",
+      "systemTaxProviderLabel": "सिस्टम कर प्रदाता",
+      "calculateTaxesAutomaticallyLabel": "कर स्वचालित रूप से गणना करें",
+      "calculateTaxesAutomaticallyHint": "सक्षम होने पर, कर दरों की गणना स्वचालित रूप से की जाएगी और कार्ट पर लागू की जाएगी। अक्षम होने पर, चेकआउट पर करों की मैन्युअल गणना करनी होगी। तृतीय-पक्ष कर प्रदाताओं के साथ उपयोग के लिए मैन्युअल कर अनुशंसित हैं।",
+      "applyTaxesOnGiftCardsLabel": "गिफ्ट कार्ड पर कर लागू करें",
+      "applyTaxesOnGiftCardsHint": "सक्षम होने पर, चेकआउट पर गिफ्ट कार्ड पर कर लागू किए जाएंगे। कुछ देशों में, कर नियमों के अनुसार खरीद पर गिफ्ट कार्ड पर कर लागू करना आवश्यक है।",
+      "defaultTaxRateLabel": "डिफ़ॉल्ट कर दर",
+      "defaultTaxCodeLabel": "डिफ़ॉल्ट कर कोड"
+    },
+    "defaultRate": {
+      "sectionTitle": "डिफ़ॉल्ट कर दर"
+    },
+    "taxRate": {
+      "sectionTitle": "कर दरें",
+      "createTaxRate": "कर दर बनाएं",
+      "createTaxRateHint": "क्षेत्र के लिए एक नई कर दर बनाएं।",
+      "deleteRateDescription": "आप कर दर {{name}} को हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+      "editRateAction": "दर संपादित करें",
+      "editOverridesAction": "ओवरराइड संपादित करें",
+      "editOverridesTitle": "कर दर ओवरराइड संपादित करें",
+      "editOverridesHint": "कर दर के लिए ओवरराइड निर्दिष्ट करें।",
+      "deleteTaxRateWarning": "आप कर दर {{name}} को हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+      "productOverridesLabel": "उत्पाद ओवरराइड",
+      "productOverridesHint": "कर दर के लिए उत्पाद ओवरराइड निर्दिष्ट करें।",
+      "addProductOverridesAction": "उत्पाद ओवरराइड जोड़ें",
+      "productTypeOverridesLabel": "उत्पाद प्रकार ओवरराइड",
+      "productTypeOverridesHint": "कर दर के लिए उत्पाद प्रकार ओवरराइड निर्दिष्ट करें।",
+      "addProductTypeOverridesAction": "उत्पाद प्रकार ओवरराइड जोड़ें",
+      "shippingOptionOverridesLabel": "शिपिंग विकल्प ओवरराइड",
+      "shippingOptionOverridesHint": "कर दर के लिए शिपिंग विकल्प ओवरराइड निर्दिष्ट करें।",
+      "addShippingOptionOverridesAction": "शिपिंग विकल्प ओवरराइड जोड़ें",
+      "productOverridesHeader": "उत्पाद",
+      "productTypeOverridesHeader": "उत्पाद प्रकार",
+      "shippingOptionOverridesHeader": "शिपिंग विकल्प"
+    }
+  },
+  "locations": {
+    "domain": "स्थान",
+    "editLocation": "स्थान संपादित करें",
+    "addSalesChannels": "बिक्री चैनल जोड़ें",
+    "noLocationsFound": "कोई स्थान नहीं मिला",
+    "selectLocations": "उन स्थानों का चयन करें जहाँ वस्तु का स्टॉक है।",
+    "deleteLocationWarning": "आप स्थान {{name}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+    "removeSalesChannelsWarning_one": "आप स्थान से {{count}} बिक्री चैनल हटाने वाले हैं।",
+    "removeSalesChannelsWarning_other": "आप स्थान से {{count}} बिक्री चैनल हटाने वाले हैं।",
+    "toast": {
+      "create": "स्थान सफलतापूर्वक बनाया गया",
+      "update": "स्थान सफलतापूर्वक अपडेट किया गया",
+      "removeChannel": "बिक्री चैनल सफलतापूर्वक हटाया गया"
+    }
+  },
+  "reservations": {
+    "domain": "आरक्षण",
+    "subtitle": "इन्वेंट्री आइटम की आरक्षित मात्रा प्रबंधित करें।",
+    "deleteWarning": "आप एक आरक्षण हटाने वाले हैं। इस क्रिया को पूर्ववत नहीं किया जा सकता।"
+  },
+  "salesChannels": {
+    "domain": "बिक्री चैनल",
+    "subtitle": "उन ऑनलाइन और ऑफ़लाइन चैनलों को प्रबंधित करें जिन पर आप उत्पाद बेचते हैं।",
+    "list": {
+      "empty": {
+        "heading": "कोई बिक्री चैनल नहीं मिला",
+        "description": "एक बार बिक्री चैनल बनाने के बाद, यह यहाँ दिखाई देगा।"
+      },
+      "filtered": {
+        "heading": "कोई परिणाम नहीं",
+        "description": "वर्तमान फ़िल्टर मानदंड से कोई बिक्री चैनल मेल नहीं खाता।"
+      }
+    },
+    "createSalesChannel": "बिक्री चैनल बनाएं",
+    "createSalesChannelHint": "अपने उत्पादों को बेचने के लिए एक नया बिक्री चैनल बनाएं।",
+    "enabledHint": "निर्दिष्ट करें कि बिक्री चैनल सक्षम है या नहीं।",
+    "removeProductsWarning_one": "आप {{sales_channel}} से {{count}} उत्पाद हटाने वाले हैं।",
+    "removeProductsWarning_other": "आप {{sales_channel}} से {{count}} उत्पाद हटाने वाले हैं।",
+    "addProducts": "उत्पाद जोड़ें",
+    "editSalesChannel": "बिक्री चैनल संपादित करें",
+    "productAlreadyAdded": "उत्पाद पहले से ही बिक्री चैनल में जोड़ा जा चुका है।",
+    "deleteSalesChannelWarning": "आप बिक्री चैनल {{name}} को हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+    "toast": {
+      "create": "बिक्री चैनल सफलतापूर्वक बनाया गया",
+      "update": "बिक्री चैनल सफलतापूर्वक अपडेट किया गया",
+      "delete": "बिक्री चैनल सफलतापूर्वक हटाया गया"
+    },
+    "tooltip": {
+      "cannotDeleteDefault": "डिफ़ॉल्ट बिक्री चैनल हटाया नहीं जा सकता"
+    },
+    "products": {
+      "list": {
+        "noRecordsMessage": "बिक्री चैनल में कोई उत्पाद नहीं है।"
+      },
+      "add": {
+        "list": {
+          "noRecordsMessage": "पहले एक उत्पाद बनाएं।"
+        }
+      }
+    }
+  },
+  "apiKeyManagement": {
+    "domain": {
+      "publishable": "Publishable API Keys",
+      "secret": "Secret API Keys"
+    },
+    "subtitle": {
+      "publishable": "स्टोरफ्रंट में उपयोग की जाने वाली API keys को प्रबंधित करें ताकि अनुरोधों को विशिष्ट बिक्री चैनलों तक सीमित किया जा सके।",
+      "secret": "एडमिन एप्लिकेशन में एडमिन उपयोगकर्ताओं को प्रमाणित करने के लिए उपयोग की जाने वाली API keys को प्रबंधित करें।"
+    },
+    "status": {
+      "active": "सक्रिय",
+      "revoked": "निरस्त"
+    },
+    "type": {
+      "publishable": "Publishable",
+      "secret": "Secret"
+    },
+    "create": {
+      "createPublishableHeader": "Publishable API Key बनाएं",
+      "createPublishableHint": "अनुरोधों को विशिष्ट बिक्री चैनलों तक सीमित करने के लिए एक नई publishable API key बनाएं।",
+      "createSecretHeader": "Secret API Key बनाएं",
+      "createSecretHint": "प्रमाणित एडमिन उपयोगकर्ता के रूप में Medusa API तक पहुंचने के लिए एक नई secret API key बनाएं।",
+      "secretKeyCreatedHeader": "Secret Key बनाई गई",
+      "secretKeyCreatedHint": "आपकी नई secret key जेनरेट हो गई है। इसे अभी कॉपी करें और सुरक्षित रूप से संग्रहीत करें। यह केवल इस बार प्रदर्शित होगी।",
+      "copySecretTokenSuccess": "Secret key क्लिपबोर्ड पर कॉपी हो गई।",
+      "copySecretTokenFailure": "Secret key को क्लिपबोर्ड पर कॉपी करने में विफल।",
+      "successToast": "API key सफलतापूर्वक बनाई गई।"
+    },
+    "edit": {
+      "header": "API Key संपादित करें",
+      "description": "API key का शीर्षक संपादित करें।",
+      "successToast": "API key {{title}} सफलतापूर्वक अपडेट की गई।"
+    },
+    "salesChannels": {
+      "title": "बिक्री चैनल जोड़ें",
+      "description": "वे बिक्री चैनल जोड़ें जिन तक API key को सीमित किया जाना चाहिए।",
+      "successToast_one": "{{count}} बिक्री चैनल API key में सफलतापूर्वक जोड़ा गया।",
+      "successToast_other": "{{count}} बिक्री चैनल API key में सफलतापूर्वक जोड़े गए।",
+      "alreadyAddedTooltip": "बिक्री चैनल पहले से ही API key में जोड़ा जा चुका है।",
+      "list": {
+        "noRecordsMessage": "Publishable API key के दायरे में कोई बिक्री चैनल नहीं हैं।"
+      }
+    },
+    "delete": {
+      "warning": "आप API key {{title}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "API key {{title}} सफलतापूर्वक हटाई गई।"
+    },
+    "revoke": {
+      "warning": "आप API key {{title}} को निरस्त करने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "API key {{title}} सफलतापूर्वक निरस्त की गई।"
+    },
+    "addSalesChannels": {
+      "list": {
+        "noRecordsMessage": "पहले एक बिक्री चैनल बनाएं।"
+      }
+    },
+    "removeSalesChannel": {
+      "warning": "आप API key से बिक्री चैनल {{name}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "warningBatch_one": "आप API key से {{count}} बिक्री चैनल को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "warningBatch_other": "आप API key से {{count}} बिक्री चैनल को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "बिक्री चैनल API key से सफलतापूर्वक हटाया गया।",
+      "successToastBatch_one": "{{count}} बिक्री चैनल API key से सफलतापूर्वक हटाया गया।",
+      "successToastBatch_other": "{{count}} बिक्री चैनल API key से सफलतापूर्वक हटाए गए।"
+    },
+    "actions": {
+      "revoke": "API key निरस्त करें",
+      "copy": "API key कॉपी करें",
+      "copySuccessToast": "API key क्लिपबोर्ड पर कॉपी हो गई।"
+    },
+    "table": {
+      "lastUsedAtHeader": "अंतिम उपयोग",
+      "createdAtHeader": "निरस्त किया गया"
+    },
+    "fields": {
+      "lastUsedAtLabel": "अंतिम उपयोग",
+      "revokedByLabel": "निरस्तकर्ता",
+      "revokedAtLabel": "निरस्त किया गया",
+      "createdByLabel": "निर्माता"
+    }
+  },
+  "returnReasons": {
+    "domain": "रिटर्न कारण",
+    "subtitle": "रिटर्न किए गए आइटम के कारणों को प्रबंधित करें।",
+    "calloutHint": "रिटर्न को वर्गीकृत करने के लिए कारणों को प्रबंधित करें।",
+    "editReason": "रिटर्न कारण संपादित करें",
+    "create": {
+      "header": "रिटर्न कारण जोड़ें",
+      "subtitle": "रिटर्न के सबसे सामान्य कारण निर्दिष्ट करें।",
+      "hint": "रिटर्न को वर्गीकृत करने के लिए एक नया रिटर्न कारण बनाएं।",
+      "successToast": "रिटर्न कारण {{label}} सफलतापूर्वक बनाया गया।"
+    },
+    "edit": {
+      "header": "रिटर्न कारण संपादित करें",
+      "subtitle": "रिटर्न कारण का मान संपादित करें।",
+      "successToast": "रिटर्न कारण {{label}} सफलतापूर्वक अपडेट किया गया।"
+    },
+    "delete": {
+      "confirmation": "आप रिटर्न कारण \"{{label}}\" को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "रिटर्न कारण \"{{label}}\" सफलतापूर्वक हटाया गया।"
+    },
+    "fields": {
+      "value": {
+        "label": "मान",
+        "placeholder": "wrong_size",
+        "tooltip": "मान रिटर्न कारण के लिए एक अद्वितीय पहचानकर्ता होना चाहिए।"
+      },
+      "label": {
+        "label": "लेबल",
+        "placeholder": "गलत साइज़"
+      },
+      "description": {
+        "label": "विवरण",
+        "placeholder": "ग्राहक को गलत साइज़ मिला"
+      }
+    }
+  },
+  "refundReasons": {
+    "domain": "रिफंड कारण",
+    "subtitle": "रिफंड जारी करने के कारणों को प्रबंधित करें।",
+    "calloutHint": "रिफंड को वर्गीकृत करने के कारणों को प्रबंधित करें।",
+    "editReason": "रिफंड कारण संपादित करें",
+    "create": {
+      "header": "रिफंड कारण जोड़ें",
+      "subtitle": "रिफंड के सबसे सामान्य कारण निर्दिष्ट करें।",
+      "hint": "रिफंड को वर्गीकृत करने के लिए एक नया रिफंड कारण बनाएं।",
+      "successToast": "रिफंड कारण {{label}} सफलतापूर्वक बनाया गया।"
+    },
+    "edit": {
+      "header": "रिफंड कारण संपादित करें",
+      "subtitle": "रिफंड कारण का मान संपादित करें।",
+      "successToast": "रिफंड कारण {{label}} सफलतापूर्वक अपडेट किया गया।"
+    },
+    "delete": {
+      "confirmation": "आप रिफंड कारण \"{{label}}\" को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "रिफंड कारण सफलतापूर्वक हटाया गया।"
+    },
+    "fields": {
+      "label": {
+        "label": "लेबल",
+        "placeholder": "सद्भावना का संकेत"
+      },
+      "code": {
+        "label": "कोड",
+        "placeholder": "gesture_of_goodwill"
+      },
+      "description": {
+        "label": "विवरण",
+        "placeholder": "ग्राहक का खरीदारी अनुभव खराब रहा"
+      }
+    }
+  },
+  "login": {
+    "forgotPassword": "पासवर्ड भूल गए? - <0>रीसेट करें</0>",
+    "title": "पार्टनर डैशबोर्ड में आपका स्वागत है",
+    "hint": "खाते तक पहुँचने के लिए साइन इन करें"
+  },
+  "invite": {
+    "title": "पार्टनर डैशबोर्ड में आपका स्वागत है",
+    "hint": "नीचे अपना खाता बनाएँ",
+    "backToLogin": "लॉगिन पर वापस जाएँ",
+    "createAccount": "खाता बनाएँ",
+    "alreadyHaveAccount": "क्या आपके पास पहले से खाता है? - <0>लॉग इन करें</0>",
+    "emailTooltip": "आपका ईमेल नहीं बदला जा सकता। यदि आप दूसरा ईमेल उपयोग करना चाहते हैं, तो नया आमंत्रण भेजा जाना चाहिए।",
+    "invalidInvite": "यह आमंत्रण अमान्य है या समाप्त हो चुका है।",
+    "successTitle": "आपका खाता पंजीकृत हो गया है",
+    "successHint": "Medusa Admin के साथ तुरंत शुरुआत करें।",
+    "successAction": "Medusa Admin शुरू करें",
+    "invalidTokenTitle": "आपका आमंत्रण टोकन अमान्य है",
+    "invalidTokenHint": "नया आमंत्रण लिंक माँगने का प्रयास करें।",
+    "passwordMismatch": "पासवर्ड मेल नहीं खाते",
+    "toast": {
+      "accepted": "आमंत्रण सफलतापूर्वक स्वीकार किया गया"
+    }
+  },
+  "resetPassword": {
+    "title": "पासवर्ड रीसेट करें",
+    "hint": "नीचे अपना ईमेल दर्ज करें, और हम आपको पासवर्ड रीसेट करने के निर्देश भेजेंगे।",
+    "email": "ईमेल",
+    "sendResetInstructions": "रीसेट निर्देश भेजें",
+    "backToLogin": "<0>लॉगिन पर वापस जाएँ</0>",
+    "newPasswordHint": "नीचे नया पासवर्ड चुनें।",
+    "invalidTokenTitle": "आपका रीसेट टोकन अमान्य है",
+    "invalidTokenHint": "नया रीसेट लिंक माँगने का प्रयास करें।",
+    "expiredTokenTitle": "आपका रीसेट टोकन समाप्त हो चुका है",
+    "goToResetPassword": "पासवर्ड रीसेट पर जाएँ",
+    "resetPassword": "पासवर्ड रीसेट करें",
+    "newPassword": "नया पासवर्ड",
+    "repeatNewPassword": "नया पासवर्ड दोहराएँ",
+    "tokenExpiresIn": "टोकन <0>{{time}}</0> मिनट में समाप्त होगा",
+    "successfulRequestTitle": "आपको सफलतापूर्वक ईमेल भेजा गया",
+    "successfulRequest": "हमने आपको एक ईमेल भेजा है जिसका उपयोग आप अपना पासवर्ड रीसेट करने के लिए कर सकते हैं। यदि कुछ मिनटों के बाद भी न मिले तो अपने स्पैम फ़ोल्डर की जाँच करें।",
+    "successfulResetTitle": "पासवर्ड रीसेट सफल",
+    "successfulReset": "कृपया लॉगिन पृष्ठ पर लॉगिन करें।",
+    "passwordMismatch": "पासवर्ड मेल नहीं खाते",
+    "invalidLinkTitle": "आपका रीसेट लिंक अमान्य है",
+    "invalidLinkHint": "अपना पासवर्ड फिर से रीसेट करने का प्रयास करें।"
+  },
+  "workflowExecutions": {
+    "domain": "वर्कफ़्लो",
+    "subtitle": "अपने Medusa एप्लिकेशन में वर्कफ़्लो निष्पादन देखें और ट्रैक करें।",
+    "transactionIdLabel": "ट्रांज़ैक्शन ID",
+    "workflowIdLabel": "वर्कफ़्लो ID",
+    "progressLabel": "प्रगति",
+    "stepsCompletedLabel_one": "{{count}} स्टेप में से {{completed}}",
+    "stepsCompletedLabel_other": "{{count}} स्टेप में से {{completed}}",
+    "list": {
+      "noRecordsMessage": "अभी तक कोई वर्कफ़्लो निष्पादित नहीं हुआ है।"
+    },
+    "history": {
+      "sectionTitle": "इतिहास",
+      "runningState": "चल रहा है...",
+      "awaitingState": "प्रतीक्षारत",
+      "failedState": "विफल",
+      "skippedState": "छोड़ा गया",
+      "skippedFailureState": "छोड़ा गया (विफलता)",
+      "definitionLabel": "परिभाषा",
+      "outputLabel": "आउटपुट",
+      "compensateInputLabel": "कम्पेनसेट इनपुट",
+      "revertedLabel": "वापस लिया गया",
+      "errorLabel": "त्रुटि"
+    },
+    "state": {
+      "done": "पूर्ण",
+      "failed": "विफल",
+      "reverted": "वापस लिया गया",
+      "invoking": "आह्वान हो रहा है",
+      "compensating": "कम्पेनसेट हो रहा है",
+      "notStarted": "शुरू नहीं हुआ"
+    },
+    "transaction": {
+      "state": {
+        "waitingToCompensate": "कम्पेनसेट करने की प्रतीक्षा में"
+      }
+    },
+    "step": {
+      "state": {
+        "skipped": "छोड़ा गया",
+        "skippedFailure": "छोड़ा गया (विफलता)",
+        "dormant": "निष्क्रिय",
+        "timeout": "टाइमआउट"
+      }
+    }
+  },
+  "shippingOptionTypes": {
+    "domain": "शिपिंग विकल्प प्रकार",
+    "subtitle": "अपने शिपिंग विकल्पों को प्रकारों में व्यवस्थित करें।",
+    "create": {
+      "header": "शिपिंग विकल्प प्रकार बनाएं",
+      "hint": "अपने शिपिंग विकल्पों को वर्गीकृत करने के लिए एक नया शिपिंग विकल्प प्रकार बनाएं।",
+      "successToast": "शिपिंग विकल्प प्रकार {{label}} सफलतापूर्वक बनाया गया।"
+    },
+    "edit": {
+      "header": "शिपिंग विकल्प प्रकार संपादित करें",
+      "successToast": "शिपिंग विकल्प प्रकार {{label}} सफलतापूर्वक अपडेट किया गया।"
+    },
+    "delete": {
+      "confirmation": "आप शिपिंग विकल्प प्रकार \"{{label}}\" को हटाने वाले हैं। यह क्रिया पूर्ववत नहीं की जा सकती।",
+      "successToast": "शिपिंग विकल्प प्रकार \"{{label}}\" सफलतापूर्वक हटाया गया।"
+    },
+    "fields": {
+      "label": "लेबल",
+      "code": "कोड",
+      "description": "विवरण"
+    }
+  },
+  "productTypes": {
+    "domain": "उत्पाद प्रकार",
+    "subtitle": "अपने उत्पादों को प्रकारों में व्यवस्थित करें।",
+    "create": {
+      "header": "उत्पाद प्रकार बनाएं",
+      "hint": "अपने उत्पादों को वर्गीकृत करने के लिए एक नया उत्पाद प्रकार बनाएं।",
+      "successToast": "उत्पाद प्रकार {{value}} सफलतापूर्वक बनाया गया।"
+    },
+    "edit": {
+      "header": "उत्पाद प्रकार संपादित करें",
+      "successToast": "उत्पाद प्रकार {{value}} सफलतापूर्वक अपडेट किया गया।"
+    },
+    "delete": {
+      "confirmation": "आप उत्पाद प्रकार \"{{value}}\" को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "उत्पाद प्रकार \"{{value}}\" सफलतापूर्वक हटाया गया।"
+    },
+    "fields": {
+      "value": "मान"
+    }
+  },
+  "productTags": {
+    "domain": "उत्पाद टैग",
+    "create": {
+      "header": "उत्पाद टैग बनाएं",
+      "subtitle": "अपने उत्पादों को वर्गीकृत करने के लिए एक नया उत्पाद टैग बनाएं।",
+      "successToast": "उत्पाद टैग {{value}} सफलतापूर्वक बनाया गया।"
+    },
+    "edit": {
+      "header": "उत्पाद टैग संपादित करें",
+      "subtitle": "उत्पाद टैग का मान संपादित करें।",
+      "successToast": "उत्पाद टैग {{value}} सफलतापूर्वक अपडेट किया गया।"
+    },
+    "delete": {
+      "confirmation": "आप उत्पाद टैग {{value}} को हटाने वाले हैं। यह कार्रवाई पूर्ववत नहीं की जा सकती।",
+      "successToast": "उत्पाद टैग {{value}} सफलतापूर्वक हटाया गया।"
+    },
+    "fields": {
+      "value": "मान"
+    }
+  },
+  "notifications": {
+    "domain": "सूचनाएं",
+    "emptyState": {
+      "title": "कोई सूचना नहीं",
+      "description": "आपके पास इस समय कोई सूचना नहीं है, लेकिन जब होगी तो वे यहां दिखाई देंगी।"
+    },
+    "accessibility": {
+      "description": "Medusa गतिविधियों के बारे में सूचनाएं यहां सूचीबद्ध होंगी।"
+    }
+  },
+  "errors": {
+    "serverError": "सर्वर त्रुटि - बाद में पुनः प्रयास करें।",
+    "invalidCredentials": "गलत ईमेल या पासवर्ड"
+  },
+  "statuses": {
+    "scheduled": "निर्धारित",
+    "expired": "समाप्त",
+    "active": "सक्रिय",
+    "inactive": "निष्क्रिय",
+    "draft": "ड्राफ़्ट",
+    "enabled": "सक्षम",
+    "disabled": "अक्षम"
+  },
+  "labels": {
+    "productVariant": "उत्पाद वेरिएंट",
+    "prices": "कीमतें",
+    "available": "उपलब्ध",
+    "inStock": "स्टॉक में",
+    "added": "जोड़ा गया",
+    "removed": "हटाया गया",
+    "from": "से",
+    "to": "तक",
+    "beaware": "सावधान रहें",
+    "loading": "लोड हो रहा है",
+    "selectValue": "मान चुनें",
+    "selectValues": "मान चुनें"
+  },
+  "fields": {
+    "amount": "राशि",
+    "reference": "संदर्भ",
+    "reference_id": "संदर्भ ID",
+    "refundAmount": "रिफ़ंड राशि",
+    "name": "नाम",
+    "default": "डिफ़ॉल्ट",
+    "lastName": "अंतिम नाम",
+    "firstName": "पहला नाम",
+    "title": "शीर्षक",
+    "customTitle": "कस्टम शीर्षक",
+    "manageInventory": "इन्वेंट्री प्रबंधित करें",
+    "inventoryKit": "इन्वेंट्री किट है",
+    "inventoryItems": "इन्वेंट्री आइटम",
+    "inventoryItem": "इन्वेंट्री आइटम",
+    "requiredQuantity": "आवश्यक मात्रा",
+    "description": "विवरण",
+    "email": "ईमेल",
+    "password": "पासवर्ड",
+    "repeatPassword": "पासवर्ड दोहराएँ",
+    "confirmPassword": "पासवर्ड की पुष्टि करें",
+    "newPassword": "नया पासवर्ड",
+    "repeatNewPassword": "नया पासवर्ड दोहराएँ",
+    "categories": "श्रेणियाँ",
+    "shippingMethod": "शिपिंग विधि",
+    "configurations": "कॉन्फ़िगरेशन",
+    "enabledInStore": "स्टोर में सक्षम",
+    "isReturn": "वापसी है",
+    "conditions": "शर्तें",
+    "category": "श्रेणी",
+    "collection": "संग्रह",
+    "discountable": "छूट योग्य",
+    "promotionCode": "प्रमोशन कोड",
+    "handle": "हैंडल",
+    "subtitle": "उपशीर्षक",
+    "by": "द्वारा",
+    "item": "आइटम",
+    "qty": "मात्रा",
+    "limit": "सीमा",
+    "tags": "टैग",
+    "type": "प्रकार",
+    "reason": "कारण",
+    "none": "कोई नहीं",
+    "all": "सभी",
+    "search": "खोजें",
+    "percentage": "प्रतिशत",
+    "sales_channels": "बिक्री चैनल",
+    "customer_groups": "ग्राहक समूह",
+    "product_tags": "उत्पाद टैग",
+    "product_types": "उत्पाद प्रकार",
+    "product_collections": "उत्पाद संग्रह",
+    "status": "स्थिति",
+    "code": "कोड",
+    "value": "मान",
+    "disabled": "अक्षम",
+    "dynamic": "डायनामिक",
+    "normal": "सामान्य",
+    "years": "वर्ष",
+    "months": "महीने",
+    "days": "दिन",
+    "hours": "घंटे",
+    "minutes": "मिनट",
+    "totalRedemptions": "कुल रिडेम्प्शन",
+    "countries": "देश",
+    "serviceZone": "सेवा क्षेत्र",
+    "paymentProviders": "भुगतान प्रदाता",
+    "refundReason": "रिफ़ंड कारण",
+    "fulfillmentProviders": "पूर्ति प्रदाता",
+    "fulfillmentProvider": "पूर्ति प्रदाता",
+    "providers": "प्रदाता",
+    "availability": "उपलब्धता",
+    "inventory": "इन्वेंट्री",
+    "optional": "वैकल्पिक",
+    "note": "नोट",
+    "automaticTaxes": "स्वचालित कर",
+    "taxInclusivePricing": "कर सहित मूल्य निर्धारण",
+    "currency": "मुद्रा",
+    "address": "पता",
+    "address2": "अपार्टमेंट, सूट, आदि",
+    "city": "शहर",
+    "postalCode": "पिन कोड",
+    "country": "देश",
+    "state": "राज्य",
+    "province": "प्रांत",
+    "company": "कंपनी",
+    "phone": "फ़ोन",
+    "metadata": "मेटाडेटा",
+    "selectCountry": "देश चुनें",
+    "products": "उत्पाद",
+    "variants": "वेरिएंट",
+    "orders": "ऑर्डर",
+    "account": "खाता",
+    "total": "ऑर्डर कुल",
+    "paidTotal": "भुगतान कुल",
+    "creditTotal": "क्रेडिट लाइन कुल",
+    "totalExclTax": "कुल (कर रहित)",
+    "subtotal": "उप-कुल",
+    "shipping": "शिपिंग",
+    "outboundShipping": "बाहरी शिपिंग",
+    "returnShipping": "वापसी शिपिंग",
+    "tax": "कर",
+    "created": "बनाया गया",
+    "key": "कुंजी",
+    "customer": "ग्राहक",
+    "date": "दिनांक",
+    "order": "ऑर्डर",
+    "fulfillment": "पूर्ति",
+    "provider": "प्रदाता",
+    "payment": "भुगतान",
+    "items": "आइटम",
+    "salesChannel": "बिक्री चैनल",
+    "region": "क्षेत्र",
+    "discount": "छूट",
+    "role": "भूमिका",
+    "sent": "भेजा गया",
+    "salesChannels": "बिक्री चैनल",
+    "product": "उत्पाद",
+    "createdAt": "बनाया गया",
+    "updatedAt": "अपडेट किया गया",
+    "revokedAt": "पर रद्द",
+    "true": "सही",
+    "false": "गलत",
+    "giftCard": "गिफ़्ट कार्ड",
+    "tag": "टैग",
+    "dateIssued": "जारी तिथि",
+    "issuedDate": "जारी तिथि",
+    "expiryDate": "समाप्ति तिथि",
+    "price": "कीमत",
+    "priceTemplate": "कीमत {{regionOrCurrency}}",
+    "height": "ऊँचाई",
+    "width": "चौड़ाई",
+    "length": "लंबाई",
+    "weight": "वज़न",
+    "midCode": "MID कोड",
+    "hsCode": "HS कोड",
+    "ean": "EAN",
+    "upc": "UPC",
+    "inventoryQuantity": "इन्वेंट्री मात्रा",
+    "barcode": "बारकोड",
+    "countryOfOrigin": "मूल देश",
+    "material": "सामग्री",
+    "thumbnail": "थंबनेल",
+    "sku": "SKU",
+    "managedInventory": "प्रबंधित इन्वेंट्री",
+    "allowBackorder": "बैकऑर्डर की अनुमति",
+    "inStock": "स्टॉक में",
+    "location": "स्थान",
+    "quantity": "मात्रा",
+    "variant": "वेरिएंट",
+    "id": "ID",
+    "parent": "मूल",
+    "minSubtotal": "न्यूनतम उप-कुल",
+    "maxSubtotal": "अधिकतम उप-कुल",
+    "shippingProfile": "शिपिंग प्रोफ़ाइल",
+    "summary": "सारांश",
+    "details": "विवरण",
+    "label": "लेबल",
+    "rate": "दर",
+    "requiresShipping": "शिपिंग आवश्यक",
+    "unitPrice": "इकाई कीमत",
+    "startDate": "प्रारंभ तिथि",
+    "endDate": "समाप्ति तिथि",
+    "draft": "ड्राफ़्ट",
+    "values": "मान"
+  },
+  "dateTime": {
+    "years_one": "वर्ष",
+    "years_other": "वर्ष",
+    "months_one": "महीना",
+    "months_other": "महीने",
+    "weeks_one": "सप्ताह",
+    "weeks_other": "सप्ताह",
+    "days_one": "दिन",
+    "days_other": "दिन",
+    "hours_one": "घंटा",
+    "hours_other": "घंटे",
+    "minutes_one": "मिनट",
+    "minutes_other": "मिनट",
+    "seconds_one": "सेकंड",
+    "seconds_other": "सेकंड"
+  },
+  "views": {
+    "save": "सहेजें",
+    "saveAsNew": "नए व्यू के रूप में सहेजें",
+    "updateDefaultForEveryone": "सभी के लिए डिफ़ॉल्ट अपडेट करें",
+    "updateViewName": "व्यू अपडेट करें",
+    "prompts": {
+      "updateDefault": {
+        "title": "डिफ़ॉल्ट व्यू अपडेट करें",
+        "description": "यह सभी उपयोगकर्ताओं के लिए डिफ़ॉल्ट व्यू अपडेट कर देगा। क्या आप सुनिश्चित हैं?",
+        "confirmText": "सभी के लिए अपडेट करें",
+        "cancelText": "रद्द करें"
+      },
+      "updateView": {
+        "title": "व्यू अपडेट करें",
+        "description": "क्या आप वाकई \"{{name}}\" को अपडेट करना चाहते हैं?",
+        "confirmText": "अपडेट करें",
+        "cancelText": "रद्द करें"
+      }
+    }
+  },
+  "partner": {
+    "settingsSidebar": {
+      "store": "स्टोर",
+      "regions": "क्षेत्र",
+      "locationsShipping": "स्थान और शिपिंग",
+      "salesChannels": "सेल्स चैनल",
+      "taxRegions": "कर क्षेत्र",
+      "returnReasons": "वापसी के कारण",
+      "refundReasons": "रिफ़ंड के कारण",
+      "onboarding": "ऑनबोर्डिंग",
+      "people": "टीम सदस्य",
+      "payments": "भुगतान",
+      "paymentConfig": "भुगतान कॉन्फ़िगरेशन",
+      "planBilling": "प्लान और बिलिंग"
+    },
+    "home": {
+      "dashboard": "डैशबोर्ड",
+      "welcome": "स्वागत है",
+      "gettingStarted": {
+        "heading": "शुरुआत",
+        "description": "अपने कार्यस्थल को सेट करने के लिए इन चरणों को पूरा करें।",
+        "onboardingLabel": "ऑनबोर्डिंग पूरी करें",
+        "onboardingDescription": "अपने विवरण और टीम जोड़ें।",
+        "open": "खोलें",
+        "workspaceLabel": "कार्यस्थल का प्रकार चुनें",
+        "change": "बदलें",
+        "seller": "विक्रेता",
+        "manufacturer": "निर्माता",
+        "individual": "व्यक्तिगत",
+        "verifyLabel": "सत्यापित हो जाएँ",
+        "verifyDescription": "सत्यापन दस्तावेज़ अपलोड करें।",
+        "upload": "अपलोड करें",
+        "storeLabel": "एक स्टोर बनाएँ",
+        "storeDescription": "उत्पादों, आदेशों और बिक्री चैनलों को सक्षम करें।",
+        "create": "बनाएँ",
+        "taskSummary_one": "{{total}} कार्य · {{pending}} लंबित",
+        "taskSummary_other": "{{total}} कार्य · {{pending}} लंबित",
+        "viewTasks": "कार्य देखें"
+      },
+      "quickSettings": {
+        "heading": "त्वरित सेटिंग्स",
+        "description": "अपने स्टोर कॉन्फ़िगरेशन को प्रबंधित करें।",
+        "paymentProviders": "भुगतान प्रदाता",
+        "paymentProvidersDescription": "आपको कैसे भुगतान किया जाएगा, यह कॉन्फ़िगर करें।",
+        "shippingSetup": "शिपिंग सेटअप",
+        "shippingSetupDescription": "स्थान, क्षेत्र और दरें।",
+        "taxRegions": "कर क्षेत्र",
+        "taxRegionsDescription": "क्षेत्र के आधार पर कर दरों को कॉन्फ़िगर करें।",
+        "storeSettings": "स्टोर सेटिंग्स",
+        "storeSettingsDescription": "स्टोर के विवरण और स्टोरफ्रंट।"
+      },
+      "discover": {
+        "title": "उत्पादों की खोज करें",
+        "preview": "अन्य साझेदारों से क्रॉस-सेल उत्पाद देखें या उन्हें अपने स्वयं के उत्पादन के लिए कॉपी करें।",
+        "modalDescription": "अन्य साझेदारों के उत्पादों को ब्राउज़ करें। उन्हें सीधे क्रॉस-सेल के लिए जोड़ें, या उन्हें अपने स्वयं के उत्पादन के लिए ड्राफ्ट के रूप में कॉपी करें।",
+        "shuffle": "शफल करें",
+        "emptyTitle": "अभी के लिए खोज के लिए कोई उत्पाद उपलब्ध नहीं है।",
+        "emptyDescription": "जब अन्य साझेदार उत्पाद प्रकाशित करेंगे, तो वे यहाँ दिखाई देंगे।",
+        "showing": "{{total}} उत्पादों में से 8 दिखाए जा रहे हैं — अधिक देखने के लिए शफल करें",
+        "copying": "कॉपी किया जा रहा है...",
+        "addToStore": "मेरे स्टोर में जोड़ें",
+        "variant_one": "{{count}} वेरिएंट",
+        "variant_other": "{{count}} वेरिएंट्स",
+        "copySuccess": "उत्पाद आपके स्टोर में जोड़ा गया",
+        "copySuccessDescription": "\"{{title}}\" ड्राफ्ट के रूप में कॉपी किया गया।",
+        "copyFailed": "उत्पाद कॉपी करने में विफल",
+        "somethingWrong": "कुछ गलत हो गया"
+      },
+      "whatsNew": {
+        "heading": "नया क्या है",
+        "dismiss": "अस्वीकार करें",
+        "defaultCta": "देखें",
+        "previous": "पिछला अपडेट",
+        "next": "अगला अपडेट",
+        "goToUpdate": "अपडेट {{index}} पर जाएँ"
+      }
+    },
+    "sharedFolders": {
+      "heading": "साझा फ़ोल्डर",
+      "description": "फ़ोटो और दस्तावेज़ अपलोड करने के लिए आपके साथ साझा किए गए फ़ोल्डर",
+      "breadcrumb": "साझा फ़ोल्डर",
+      "columns": {
+        "folder": "फ़ोल्डर",
+        "path": "पथ",
+        "files": "फ़ाइलें",
+        "assignedTo": "असाइन किया गया"
+      },
+      "empty": {
+        "title": "कोई साझा फ़ोल्डर नहीं",
+        "message": "आपके पास अभी कोई साझा फ़ोल्डर नहीं है। एक प्रशासक आपको फ़ोल्डर असाइन करेगा।"
+      }
+    },
+    "content": {
+      "heading": "सामग्री",
+      "columns": {
+        "title": "शीर्षक",
+        "slug": "स्लग",
+        "type": "प्रकार",
+        "status": "स्थिति"
+      },
+      "filters": {
+        "status": "स्थिति",
+        "type": "प्रकार"
+      },
+      "statusOptions": {
+        "published": "प्रकाशित",
+        "draft": "ड्राफ्ट",
+        "archived": "अभिलेखित"
+      },
+      "typeOptions": {
+        "home": "होम",
+        "about": "हमारे बारे में",
+        "contact": "संपर्क",
+        "custom": "कस्टम",
+        "service": "सेवा",
+        "portfolio": "पोर्टफोलियो",
+        "landing": "लैंडिंग"
+      },
+      "actions": {
+        "creatingPages": "पृष्ठ बनाए जा रहे हैं...",
+        "createPages": "पृष्ठ बनाएँ",
+        "createStore": "स्टोर बनाएँ",
+        "enableStorefront": "स्टोरफ्रंट सक्षम करें"
+      },
+      "toast": {
+        "pagesCreated": "पृष्ठ सफलतापूर्वक बनाए गए",
+        "createFailed": "पृष्ठ बनाने में विफल"
+      },
+      "empty": {
+        "noStoreTitle": "कोई स्टोर नहीं बनाया गया",
+        "noStoreMessage": "स्टोरफ्रंट सामग्री प्रबंधित करने के लिए पहले एक स्टोर बनाएँ।",
+        "notProvisionedTitle": "स्टोरफ्रंट सक्षम नहीं है",
+        "notProvisionedMessage": "पृष्ठों का प्रबंधन शुरू करने के लिए स्टोर सेटिंग्स में अपना स्टोरफ्रंट सक्षम करें।",
+        "noPagesTitle": "अभी तक कोई पृष्ठ नहीं",
+        "noPagesMessage": "अपनी स्टोरफ्रंट सामग्री के साथ शुरुआत करने के लिए अपने डिफ़ॉल्ट पृष्ठ बनाएँ।",
+        "noMatches": "कोई पृष्ठ नहीं मिला"
+      }
+    },
+    "paymentSubmissions": {
+      "heading": "भुगतान प्रस्तुतियाँ",
+      "description": "पूर्ण हुए डिज़ाइन या कार्यों को भुगतान के लिए प्रस्तुत करें",
+      "newSubmission": "नई प्रस्तुति",
+      "breadcrumb": "भुगतान प्रस्तुतियाँ",
+      "columns": {
+        "submission": "प्रस्तुति",
+        "status": "स्थिति",
+        "amount": "राशि",
+        "items": "आइटम",
+        "submitted": "प्रस्तुत किया गया",
+        "reviewed": "समीक्षित",
+        "design_one": "{{count}} डिज़ाइन",
+        "design_other": "{{count}} डिज़ाइन",
+        "task_one": "{{count}} कार्य",
+        "task_other": "{{count}} कार्य"
+      },
+      "empty": {
+        "title": "अभी तक कोई भुगतान प्रस्तुति नहीं",
+        "message": "नई प्रस्तुति पर क्लिक करके अपने पूर्ण डिज़ाइन को भुगतान के लिए प्रस्तुत करें।"
+      }
+    },
+    "inventoryOrders": {
+      "heading": "इन्वेंट्री ऑर्डर",
+      "empty": "कोई इन्वेंट्री ऑर्डर नहीं",
+      "filters": {
+        "status": "स्थिति",
+        "partnerStatus": "पार्टनर स्थिति"
+      },
+      "statusOptions": {
+        "pending": "पंडिंग",
+        "processing": "प्रोसेसिंग",
+        "shipped": "शिप किया गया",
+        "delivered": "डिलीवर किया गया",
+        "cancelled": "रद्द किया गया",
+        "partial": "आंशिक"
+      },
+      "columns": {
+        "id": "आईडी",
+        "partnerStatus": "पार्टनर स्थिति",
+        "status": "स्थिति",
+        "updated": "अपडेट किया गया",
+        "created": "बनाया गया"
+      },
+      "detail": {
+        "heading": "इन्वेंट्री ऑर्डर",
+        "missingId": "ऑर्डर आईडी अनुपलब्ध",
+        "orderId": "ऑर्डर आईडी",
+        "status": "स्थिति",
+        "partnerStatus": "पार्टनर स्थिति",
+        "linesHeading": "लाइनें",
+        "linesDescription": "अनुरोधित बनाम पूर्ण की गई मात्राएँ",
+        "noLines": "कोई लाइन नहीं",
+        "linePrefix": "लाइन",
+        "columns": {
+          "item": "आइटम",
+          "requested": "अनुरोधित",
+          "fulfilled": "पूर्ण किया गया",
+          "remaining": "शेष"
+        },
+        "activities": {
+          "title": "गतिविधियाँ",
+          "completed": "पूर्ण",
+          "pending": "पंडिंग"
+        }
+      }
+    },
+    "onboardingModal": {
+      "title": "स्वागत है! अपना कार्यस्थल सेट करें",
+      "steps": {
+        "about": "आपके बारे में",
+        "logo": "लोगो और ब्रांड",
+        "people": "टीम"
+      },
+      "businessTypes": {
+        "manufacturer": "निर्माता / उत्पादक",
+        "seller": "विक्रेता / खुदरा विक्रेता",
+        "designer": "डिज़ाइनर / निर्माता",
+        "wholesaler": "थोक विक्रेता / वितरक",
+        "artisan": "कारीगर / शिल्पकार",
+        "individual": "व्यक्तिगत (मॉडल, फ्रीलांसर, आदि)",
+        "other": "अन्य"
+      },
+      "about": {
+        "heading": "अपने व्यवसाय के बारे में बताएँ",
+        "description": "यह हमें आपके अनुभव को अनुकूलित करने और आपको सही उपकरणों से जोड़ने में मदद करता है।",
+        "businessName": "व्यवसाय का नाम",
+        "businessNamePlaceholder": "एक्मे टेक्सटाइल्स",
+        "businessTypeLabel": "आपके व्यवसाय का वर्णन क्या है?",
+        "businessTypePlaceholder": "व्यवसाय का प्रकार चुनें",
+        "descriptionLabel": "संक्षिप्त विवरण",
+        "descriptionPlaceholder": "आप क्या बनाते या बेचते हैं? आपके ग्राहक कौन हैं?",
+        "website": "वेबसाइट",
+        "phone": "फ़ोन",
+        "optional": "(वैकल्पिक)",
+        "websitePlaceholder": "https://acmetextiles.com",
+        "phonePlaceholder": "+91 98765 43210"
+      },
+      "logo": {
+        "heading": "अपना कंपनी लोगो अपलोड करें",
+        "description": "यह आपके पार्टनर प्रोफ़ाइल और स्टोरफ्रंट पर दिखाई देगा। आप इसे बाद में कभी भी बदल सकते हैं।",
+        "clickToChange": "बदलने के लिए क्लिक करें",
+        "clickToUpload": "अपलोड करने के लिए क्लिक करें या ड्रैग और ड्रॉप करें",
+        "fileTypes": "SVG, PNG, JPG (अधिकतम 5MB)",
+        "currentLogo": "वर्तमान लोगो"
+      },
+      "team": {
+        "heading": "अपने टीम सदस्यों को जोड़ें",
+        "description": "उन लोगों को आमंत्रित करें जो आपके स्टोर और उत्पादों का प्रबंधन करने में मदद करेंगे। यह चरण वैकल्पिक है — आप बाद में टीम सदस्यों को जोड़ सकते हैं।",
+        "success": "ऑनबोर्डिंग सफलतापूर्वक पूर्ण!",
+        "firstName": "पहला नाम",
+        "firstNamePlaceholder": "जॉन",
+        "lastName": "अंतिम नाम",
+        "lastNamePlaceholder": "डो",
+        "email": "ईमेल",
+        "emailPlaceholder": "john@company.com",
+        "remove": "हटाएँ",
+        "addAnother": "+ एक और व्यक्ति जोड़ें"
+      },
+      "footer": {
+        "skip": "अभी के लिए छोड़ें",
+        "skipShort": "छोड़ें",
+        "stepCount": "चरण {{current}} कुल {{total}} में से",
+        "back": "पीछे",
+        "continue": "जारी रखें",
+        "complete": "सेटअप पूर्ण करें"
+      },
+      "toast": {
+        "completed": "ऑनबोर्डिंग पूर्ण हुई"
+      },
+      "errors": {
+        "unknown": "एक अज्ञात त्रुटि हुई"
+      }
+    },
+    "plan": {
+      "heading": "प्लान और बिलिंग",
+      "description": "अपने व्यवसाय के लिए उपयुक्त प्लान चुनें",
+      "labels": {
+        "plan": "प्लान",
+        "price": "मूल्य",
+        "period": "अवधि",
+        "payment": "भुगतान"
+      },
+      "providerPayu": "PayU (भारत)",
+      "providerStripe": "Stripe (अंतर्राष्ट्रीय)",
+      "cancelSubscription": "सदस्यता रद्द करें",
+      "noSubscription": "कोई सक्रिय सदस्यता नहीं। शुरुआत करने के लिए नीचे से एक प्लान चुनें।",
+      "chooseHeading": "अपना प्लान चुनें",
+      "chooseDescription": "सभी प्लानों में असीमित उत्पाद, कर्मचारी खाते और लाइव शिपिंग शामिल हैं। बिक्री पर कोई सीमा नहीं।",
+      "badges": {
+        "current": "वर्तमान",
+        "popular": "लोकप्रिय"
+      },
+      "currentPlan": "वर्तमान प्लान",
+      "cta": {
+        "getStarted": "शुरू करें",
+        "downgrade": "डाउनग्रेड करें",
+        "upgrade": "अपग्रेड करें"
+      },
+      "whatsIncluded": "शामिल है",
+      "features": {
+        "unlimitedProducts": "असीमित उत्पाद",
+        "unlimitedSelling": "असीमित बिक्री",
+        "unlimitedStaff": "असीमित कर्मचारी खाते",
+        "storefrontSource": "स्टोरफ्रंट स्रोत कोड",
+        "customDomain": "कस्टम डोमेन",
+        "jytEmails": "JYT ईमेल",
+        "liveShipping": "लाइव शिपिंग (डेलिवरी, DHL, UPS, FedEx)",
+        "paymentFeeSuffix": "भुगतान प्रोसेसिंग शुल्क",
+        "analyticsAdvanced": "उन्नत विश्लेषण",
+        "analyticsBasic": "मूल विश्लेषण",
+        "aiChatSupport": "AI चैट समर्थन",
+        "customModules": "कस्टम मॉड्यूल",
+        "customApis": "कस्टम API",
+        "prioritySupport": "प्राथमिकता समर्थन",
+        "whiteLabel": "व्हाइट लेबल"
+      },
+      "comparison": {
+        "heading": "फ़ीचर तुलना",
+        "featureColumn": "फ़ीचर",
+        "priceRow": "मूल्य",
+        "rows": {
+          "unlimitedProducts": "उत्पाद",
+          "unlimitedSelling": "बिक्री",
+          "unlimitedStaff": "कर्मचारी खाते",
+          "storefrontSource": "स्टोरफ्रंट स्रोत कोड",
+          "customDomain": "कस्टम डोमेन",
+          "themeCustomization": "थीम संपादक",
+          "jytEmails": "JYT ईमेल",
+          "liveShipping": "लाइव शिपिंग",
+          "paymentFee": "भुगतान शुल्क",
+          "analytics": "विश्लेषण",
+          "aiChatSupport": "AI चैट समर्थन",
+          "customModules": "कस्टम मॉड्यूल",
+          "customApis": "कस्टम API",
+          "prioritySupport": "प्राथमिकता समर्थन",
+          "whiteLabel": "व्हाइट लेबल"
+        },
+        "values": {
+          "unlimited": "असीमित",
+          "yes": "हाँ",
+          "no": "नहीं",
+          "analyticsAdvanced": "उन्नत",
+          "analyticsBasic": "मूल",
+          "free": "मुफ्त"
+        }
+      },
+      "paymentInfo": "भुगतान {{provider}} के माध्यम से संसाधित किए जाते हैं। भुगतान संसाधन शुल्क केवल तभी लागू होता है जब ग्राहक JYT भुगतान गेटवे के माध्यम से भुगतान करते हैं। आप प्लेटफ़ॉर्म शुल्क से बचने के लिए अपने स्वयं के भुगतान प्रदाता क्रेडेंशियल्स ला सकते हैं।",
+      "prompts": {
+        "switchTitle": "{{plan}} पर स्विच करें",
+        "switchPaidDescription": "आपको {{provider}} के माध्यम से {{price}}/{{interval}} का भुगतान किया जाएगा। आपका वर्तमान प्लान प्रतिस्थापित हो जाएगा।",
+        "switchFreeDescription": "आप मुफ्त प्लान पर स्विच कर जाएँगे। आपका वर्तमान प्लान रद्द कर दिया जाएगा।",
+        "payWith": "{{provider}} के साथ भुगतान करें",
+        "switch": "स्विच करें",
+        "cancel": "रद्द करें",
+        "cancelTitle": "सदस्यता रद्द करें",
+        "cancelDescription": "क्या आप सुनिश्चित हैं? आपको अपनी बिलिंग अवधि के अंत तक पहुँच बनी रहेगी। आप किसी भी समय पुनः सदस्यता ले सकते हैं।",
+        "cancelConfirm": "सदस्यता रद्द करें",
+        "keepPlan": "प्लान बनाए रखें"
+      },
+      "toast": {
+        "paymentSuccess": "भुगतान सफल! आपका प्लान सक्रिय कर दिया गया है।",
+        "paymentFailed": "भुगतान विफल। कृपया पुनः प्रयास करें।",
+        "paymentCanceled": "भुगतान रद्द कर दिया गया।",
+        "paymentError": "भुगतान त्रुटि: {{message}}",
+        "paymentUnknown": "अज्ञात त्रुटि",
+        "switchedTo": "{{plan}} पर स्विच किया गया",
+        "switchFailed": "प्लान स्विच नहीं किया जा सका",
+        "canceled": "सदस्यता रद्द कर दी गई",
+        "cancelFailed": "रद्द करने में विफल",
+        "somethingWrong": "कुछ गलत हो गया"
+      }
+    },
+    "people": {
+      "heading": "टीम सदस्य",
+      "description": "अपने संगठन में लोगों का प्रबंधन करें। प्रशासक डैशबोर्ड में लॉग इन कर सकते हैं।",
+      "addPerson": "व्यक्ति जोड़ें",
+      "empty": "अभी तक कोई टीम सदस्य नहीं। ऊपर से अपना पहला व्यक्ति जोड़ें।",
+      "columns": {
+        "name": "नाम",
+        "email": "ईमेल",
+        "access": "पहुँच",
+        "accessDashboard": "डैशबोर्ड",
+        "accessTeamOnly": "केवल टीम",
+        "role": "भूमिका",
+        "added": "जोड़ा गया"
+      },
+      "drawer": {
+        "title": "व्यक्ति जोड़ें",
+        "description": "अपने संगठन में एक टीम सदस्य जोड़ें।",
+        "emailLabel": "ईमेल *",
+        "emailPlaceholder": "person@example.com",
+        "firstName": "पहला नाम",
+        "firstNamePlaceholder": "जॉन",
+        "lastName": "अंतिम नाम",
+        "lastNamePlaceholder": "डो",
+        "phone": "फ़ोन",
+        "phonePlaceholder": "+91 98765 43210",
+        "createAsAdmin": "डैशबोर्ड प्रशासक के रूप में बनाएँ",
+        "adminHint": "इस व्यक्ति को लॉगिन क्रेडेंशियल्स प्राप्त होंगे और वह पार्टनर डैशबोर्ड तक पहुँच सकता है।",
+        "teamHint": "यह व्यक्ति टीम सदस्य के रूप में सूचीबद्ध होगा लेकिन डैशबोर्ड तक पहुँच नहीं होगी।",
+        "role": "भूमिका",
+        "roleAdmin": "प्रशासक — पूर्ण पहुँच",
+        "roleManager": "प्रबंधक — उत्पाद और ऑर्डर",
+        "roleOwner": "मालिक — पूर्ण पहुँच + बिलिंग",
+        "password": "पासवर्ड",
+        "passwordPlaceholder": "स्वतः उत्पन्न करने के लिए खाली छोड़ें",
+        "passwordHint": "यदि खाली छोड़ा गया है तो स्वतः उत्पन्न किया जाएगा। स्वागत ईमेल में शामिल किया गया है।",
+        "freeTextRole": "भूमिका",
+        "freeTextRolePlaceholder": "उदा. डिज़ाइनर, वीवर, QA",
+        "freeTextRoleHint": "संगठनात्मक उद्देश्यों के लिए मुक्त-पाठ भूमिका।",
+        "cancel": "रद्द करें",
+        "addAdmin": "प्रशासक जोड़ें"
+      },
+      "toast": {
+        "emailRequired": "ईमेल आवश्यक है",
+        "adminAdded": "प्रशासक सफलतापूर्वक जोड़ा गया",
+        "adminAddedDescription": "स्वागत ईमेल {{email}} को भेजा गया। अस्थायी पासवर्ड: {{password}}",
+        "addAdminFailed": "प्रशासक जोड़ने में विफल",
+        "personAdded": "व्यक्ति जोड़ा गया",
+        "personAddedDescription": "{{email}} को {{role}} के रूप में जोड़ा गया। उन्हें डैशबोर्ड लॉगिन पहुँच नहीं होगी।",
+        "addPersonFailed": "व्यक्ति जोड़ने में विफल"
+      }
+    },
+    "payments": {
+      "heading": "भुगतान",
+      "subheading": "भुगतान विधियाँ",
+      "create": "बनाएँ",
+      "recentHeading": "हाल के भुगतान",
+      "recentDescription": "हाल के भुगतान देखें।",
+      "emptyMethods": "कोई भुगतान विधि नहीं",
+      "emptyPayments": "कोई भुगतान नहीं",
+      "columns": {
+        "type": "प्रकार",
+        "accountName": "खाता नाम",
+        "details": "विवरण",
+        "bank": "बैंक",
+        "walletPrefix": "वॉलेट",
+        "added": "जोड़ा गया",
+        "paymentId": "भुगतान आईडी",
+        "amount": "राशि",
+        "currency": "मुद्रा"
+      },
+      "typeLabels": {
+        "bankAccount": "बैंक खाता",
+        "cashAccount": "नकद खाता",
+        "digitalWallet": "डिजिटल वॉलेट"
+      },
+      "form": {
+        "heading": "भुगतान विधि जोड़ें",
+        "description": "एक भुगतान विधि संदर्भ जोड़ें।",
+        "missingPartner": "पार्टनर संदर्भ अनुपलब्ध।",
+        "type": "प्रकार",
+        "typePlaceholder": "प्रकार चुनें",
+        "accountName": "खाता नाम",
+        "accountNumber": "खाता संख्या",
+        "bankName": "बैंक का नाम",
+        "ifsc": "IFSC",
+        "walletId": "वॉलेट आईडी",
+        "cancel": "रद्द करें",
+        "create": "बनाएँ"
+      },
+      "toast": {
+        "created": "भुगतान विधि बनाई गई"
+      }
+    },
+    "paymentProviders": {
+      "heading": "भुगतान प्रदाता क्रेडेंशियल्स",
+      "subHeading": "आपके भुगतान प्रदाता क्रेडेंशियल्स। ये आपके स्टोर के लिए प्लेटफ़ॉर्म के डिफ़ॉल्ट को ओवरराइड करते हैं।",
+      "empty": {
+        "heading": "कोई भुगतान क्रेडेंशियल्स कॉन्फ़िगर नहीं किए गए",
+        "description": "आप प्लेटफ़ॉर्म के साझा क्रेडेंशियल्स का उपयोग कर रहे हैं। अपने स्वयं के व्यापारी खातों का उपयोग करने के लिए अपने स्वयं के क्रेडेंशियल्स जोड़ें।"
+      },
+      "columns": {
+        "provider": "प्रदाता",
+        "status": "स्थिति",
+        "statusActive": "सक्रिय",
+        "statusInactive": "निष्क्रिय",
+        "credentials": "क्रेडेंशियल्स",
+        "added": "जोड़ा गया"
+      },
+      "removePrompt": {
+        "description": "क्या आप अपने {{provider}} क्रेडेंशियल्स हटाना चाहते हैं? आपका स्टोर प्लेटफ़ॉर्म के साझा क्रेडेंशियल्स पर वापस चला जाएगा।"
+      },
+      "toast": {
+        "removed": "क्रेडेंशियल्स हटा दिए गए",
+        "removeFailed": "हटाने में विफल",
+        "saved": "भुगतान क्रेडेंशियल्स सहेजे गए",
+        "saveFailed": "क्रेडेंशियल्स सहेजने में विफल"
+      },
+      "form": {
+        "heading": "भुगतान क्रेडेंशियल्स जोड़ें",
+        "description": "अपने स्वयं के भुगतान प्रदाता क्रेडेंशियल्स कॉन्फ़िगर करें। यह आपके स्टोर के लिए प्लेटफ़ॉर्म के डिफ़ॉल्ट को ओवरराइड करता है।",
+        "provider": "प्रदाता",
+        "merchantKey": "व्यापारी कुंजी",
+        "merchantKeyPlaceholder": "आपकी PayU व्यापारी कुंजी",
+        "merchantSalt": "व्यापारी नमक",
+        "merchantSaltPlaceholder": "आपकी PayU व्यापारी नमक",
+        "mode": "मोड",
+        "modeTest": "परीक्षण",
+        "modeLive": "लाइव",
+        "stripeApiKey": "Stripe API कुंजी",
+        "stripeApiKeyPlaceholder": "sk_live_... या sk_test_...",
+        "stripeApiKeyHint": "Stripe डैशबोर्ड से आपकी Stripe गुप्त कुंजी।"
+      }
+    },
+    "onboardingSettings": {
+      "businessType": {
+        "heading": "व्यवसाय का प्रकार",
+        "description": "JYT का उपयोग कैसे करते हैं, यह चुनें। यह आपके साइडबार में कौन से नेविगेशन आइटम दिखाए जाएँगे, यह नियंत्रित करता है।",
+        "active": "सक्रिय",
+        "seller": {
+          "title": "विक्रेता",
+          "description": "ऑनलाइन उत्पाद बेचें। उत्पाद, ऑर्डर, ग्राहक, श्रेणियाँ और संग्रह देखें।"
+        },
+        "manufacturer": {
+          "title": "निर्माता",
+          "description": "वस्त्रों का डिज़ाइन और निर्माण करें। डिज़ाइन, इन्वेंट्री ऑर्डर, उत्पादन रन, कार्य और अधिक देखें।"
+        },
+        "individual": {
+          "title": "व्यक्तिगत",
+          "description": "निर्धारित कार्यों पर काम करें। कार्य, साझा फ़ोल्डर और भुगतान प्रस्तुतियाँ देखें।"
+        }
+      },
+      "status": {
+        "heading": "ऑनबोर्डिंग",
+        "description": "ऑनबोर्डिंग पूर्णता को ट्रैक करें और ऑनबोर्डिंग प्रवाह को पुनः खोलें।",
+        "label": "स्थिति",
+        "completed": "पूर्ण",
+        "notCompleted": "अपूर्ण",
+        "open": "ऑनबोर्डिंग खोलें"
+      }
+    },
+    "workOrders": {
+      "designOrder": "डिज़ाइन ऑर्डर",
+      "inventoryOrder": "इन्वेंट्री ऑर्डर",
+      "manageDesign": "डिज़ाइन प्रबंधित करें",
+      "amount": "राशि",
+      "totalQuantity": "कुल मात्रा",
+      "total": "कुल",
+      "producing": "उत्पादन चल रहा है",
+      "start": "शुरू करें",
+      "complete": "पूर्ण करें",
+      "readyForDelivery": "डिलीवरी के लिए तैयार चिह्नित करें",
+      "createShipment": "शिपमेंट बनाएँ",
+      "submitPayment": "भुगतान सबमिट करें",
+      "fulfillments": "पूर्ति",
+      "noFulfillments": "अभी तक कोई डिलीवरी दर्ज नहीं की गई है।",
+      "payments": "भुगतान",
+      "noPayments": "अभी तक कोई भुगतान सबमिट नहीं किया गया है।",
+      "delivered": "डिलीवर किया गया",
+      "paymentSubmitted": "भुगतान सबमिट किया गया",
+      "summary": "सारांश",
+      "type": "प्रकार",
+      "designStatus": "डिज़ाइन स्थिति",
+      "priority": "प्राथमिकता",
+      "targetDate": "लक्ष्य तिथि",
+      "estimatedCost": "अनुमानित लागत",
+      "materials": "सामग्री",
+      "moodboard": "मूडबोर्ड",
+      "media": "मीडिया",
+      "orderStatus": "स्थिति",
+      "sample": "नमूना",
+      "yes": "हाँ",
+      "no": "नहीं",
+      "orderDate": "ऑर्डर तिथि",
+      "expectedDelivery": "अपेक्षित डिलीवरी",
+      "stockLocation": "स्टॉक स्थान",
+      "designDetails": "डिज़ाइन विवरण",
+      "openDesignManager": "डिज़ाइन प्रबंधक खोलें",
+      "noDesign": "इस ऑर्डर से कोई डिज़ाइन जुड़ी नहीं है।",
+      "activity": {
+        "title": "गतिविधि",
+        "placed": "ऑर्डर दर्ज किया गया",
+        "accepted": "रन स्वीकार किया गया",
+        "started": "उत्पादन शुरू हुआ",
+        "finished": "पूर्ण के रूप में चिह्नित किया गया",
+        "completed": "रन पूर्ण हुआ"
+      }
+    },
+    "stripeConnect": {
+      "heading": "JYT स्ट्राइप कनेक्ट",
+      "payoutsPending": "भुगतान लंबित हैं",
+      "badge": {
+        "active": "सक्रिय",
+        "pending": "सेटअप अधूरा"
+      },
+      "description": {
+        "default": "API कुंजियाँ दर्ज करने से बचें। JYT के माध्यम से एक स्ट्राइप खाते को कनेक्ट करें ताकि आप तेज़ी से भुगतान प्राप्त कर सकें, और भुगतान तथा धनवापसी का प्रबंधन आपके लिए किया जाए।",
+        "active": "भुगतान JYT के स्ट्राइप कनेक्ट के माध्यम से चलते हैं। यह आपका लाइव स्ट्राइप स्रोत है — नीचे दर्ज कोई भी मैनुअल कुंजियाँ केवल बैकअप के रूप में उपयोग की जाती हैं।"
+      },
+      "actions": {
+        "connect": "स्ट्राइप के साथ कनेक्ट करें",
+        "resume": "सेटअप पूरा करें",
+        "manage": "विवरण अद्यतन करें"
+      },
+      "toast": {
+        "startFailed": "स्ट्राइप ओनबोर्डिंग शुरू नहीं की जा सकी"
+      }
+    },
+    "designs": {
+      "heading": "डिजाइन",
+      "design": "डिजाइन",
+      "notFound": "डिजाइन नहीं मिला।",
+      "missingId": "डिजाइन ID गायब है।",
+      "sizes": "साइज़",
+      "overdue": "विलंबित",
+      "statusOptions": {
+        "conceptual": "संकल्पनात्मक",
+        "inDevelopment": "विकास में",
+        "technicalReview": "तकनीकी समीक्षा",
+        "sampleProduction": "सैंपल उत्पादन",
+        "revision": "संशोधन",
+        "approved": "स्वीकृत",
+        "rejected": "अस्वीकृत",
+        "onHold": "रोका गया",
+        "commerceReady": "बिक्री के लिए तैयार",
+        "superseded": "प्रतिस्थापित"
+      },
+      "priorityOptions": {
+        "low": "कम",
+        "medium": "मध्यम",
+        "high": "उच्च",
+        "urgent": "अति आवश्यक"
+      },
+      "typeOptions": {
+        "original": "मूल",
+        "derivative": "व्युत्पन्न",
+        "custom": "कस्टम",
+        "collaboration": "सहयोग"
+      },
+      "workStatusOptions": {
+        "incoming": "आगामी",
+        "assigned": "आवंटित",
+        "inProgress": "प्रगति पर",
+        "awaitingReview": "समीक्षा की प्रतीक्षा में",
+        "finished": "समाप्त",
+        "completed": "पूर्ण",
+        "cancelled": "रद्द"
+      },
+      "runStatusOptions": {
+        "draft": "ड्राफ्ट",
+        "pendingReview": "समीक्षा लंबित",
+        "approved": "स्वीकृत",
+        "sentToPartner": "पार्टनर को भेजा गया",
+        "inProgress": "प्रगति पर",
+        "completed": "पूर्ण",
+        "cancelled": "रद्द",
+        "awaitingReassignment": "पुनः आवंटन की प्रतीक्षा में"
+      },
+      "bucketOptions": {
+        "incoming": "आगामी",
+        "inProgress": "प्रगति पर",
+        "yours": "आपके",
+        "completed": "पूर्ण",
+        "all": "सभी"
+      },
+      "engagementOptions": {
+        "owned": {
+          "label": "आपके",
+          "hint": "आपने यह डिजाइन बनाया है।"
+        },
+        "assigned": {
+          "label": "आवंटित",
+          "hint": "इस डिजाइन पर आपका एक प्रोडक्शन रन है — यह आपके लिए काम है।"
+        },
+        "shared": {
+          "label": "साझा किया गया",
+          "hint": "संदर्भ के लिए आपके साथ साझा किया गया। आपको कोई प्रोडक्शन रन आवंटित नहीं किया गया है (काम इन-हाउस या किसी अन्य पार्टनर के पास हो सकता है)।"
+        }
+      },
+      "actionOptions": {
+        "accept": "स्वीकार करें",
+        "working": "कार्य जारी",
+        "complete": "पूरा करें",
+        "underReview": "समीक्षाधीन",
+        "done": "संपन्न",
+        "cancelled": "रद्द"
+      },
+      "confidenceOptions": {
+        "exact": "सटीक",
+        "estimated": "अनुमानित"
+      },
+      "runTypeOptions": {
+        "production": "उत्पादन",
+        "sample": "सैंपल"
+      },
+      "unitOptions": {
+        "meter": "मीटर",
+        "yard": "गज (यार्ड)",
+        "kilogram": "किलोग्राम",
+        "gram": "ग्राम",
+        "piece": "पीस",
+        "roll": "रोल",
+        "other": "अन्य"
+      },
+      "consumptionTypeOptions": {
+        "sample": "सैंपल",
+        "production": "उत्पादन",
+        "wastage": "अपव्यय"
+      },
+      "fields": {
+        "priority": "प्राथमिकता",
+        "designerNotes": "डिजाइनर नोट्स",
+        "unit": "इकाई",
+        "color": "रंग",
+        "composition": "संरचना"
+      },
+      "list": {
+        "subtitle": "आगामी, प्रगति पर, अपने स्वयं के, या पूर्ण कार्यों को देखने के लिए एक टैब चुनें।",
+        "loadFailed": "डिजाइन लोड करने में विफल। कृपया पृष्ठ को रिफ्रेश करने का प्रयास करें।",
+        "noRecords": "इस टैब में कोई डिजाइन नहीं है। कोई अन्य टैब आज़माएं या खोज साफ़ करें।",
+        "columns": {
+          "name": "नाम",
+          "source": "स्रोत",
+          "nextAction": "अगली कार्रवाई",
+          "workStatus": "कार्य स्थिति",
+          "priority": "प्राथमिकता",
+          "due": "नियत तिथि",
+          "status": "डिजाइन स्थिति",
+          "lastUpdated": "अंतिम अद्यतन"
+        }
+      },
+      "detail": {
+        "general": "सामान्य",
+        "garmentType": "परिधान का प्रकार",
+        "inferred": "अनुमानित",
+        "partnerStatus": "पार्टनर स्थिति",
+        "priority": "प्राथमिकता",
+        "targetDate": "लक्ष्य तिथि",
+        "estimatedCost": "अनुमानित लागत",
+        "description": "विवरण",
+        "specifications": "विनिर्देश",
+        "specs": "स्पेक्स",
+        "tags": "टैग",
+        "colorPalette": "कलर पैलेट",
+        "inventoryItems": "इन्वेंट्री आइटम",
+        "noInventoryItems": "इस डिजाइन से कोई इन्वेंट्री आइटम लिंक नहीं है।",
+        "designerNotes": "डिजाइनर नोट्स",
+        "noNotes": "कोई नोट नहीं",
+        "resizeHint": "आकार बदलने के लिए निचले किनारे को खींचें"
+      },
+      "media": {
+        "heading": "मीडिया",
+        "manage": "प्रबंधित करें",
+        "empty": "अभी तक कोई मीडिया फाइल नहीं है",
+        "emptyHint": "अपने डिजाइन को प्रदर्शित करने के लिए छवियां जोड़ें",
+        "addMedia": "मीडिया जोड़ें",
+        "alt": "डिजाइन मीडिया",
+        "preview": "डिजाइन मीडिया का पूर्वावलोकन करें",
+        "download": "डाउनलोड करें",
+        "manageMedia": "मीडिया प्रबंधित करें",
+        "uploadDescription": "इस डिजाइन में मीडिया अपलोड करें और संलग्न करें",
+        "uploadImages": "छवियां अपलोड करें",
+        "dropHint": "फ़ाइलें यहां छोड़ें या ब्राउज़ करने के लिए क्लिक करें",
+        "existing": "मौजूदा",
+        "selected": "चयनित",
+        "loadingDesign": "डिजाइन लोड हो रहा है...",
+        "addAtLeastOne": "कम से कम एक फ़ाइल जोड़ें",
+        "uploadFailed": "फ़ाइलें अपलोड करने में विफल",
+        "attached": "मीडिया संलग्न किया गया",
+        "someRejected": "कुछ फ़ाइलें अस्वीकृत कर दी गईं",
+        "uploadIntro": "इस डिजाइन में संलग्न करने के लिए छवियां अपलोड करें।"
+      },
+      "moodboard": {
+        "heading": "मूडबोर्ड",
+        "description": "संदर्भ और प्रेरणा एकत्र करें।",
+        "open": "मूडबोर्ड खोलें",
+        "generateConfirm": "क्या इस डिजाइन के संक्षिप्त विवरण (brief) से मूडबोर्ड तैयार करें? आपके मौजूदा कार्ड मर्ज किए जाएंगे, बदले नहीं जाएंगे।",
+        "generating": "मूडबोर्ड तैयार किया जा रहा है…",
+        "generated": "मूडबोर्ड तैयार हो गया",
+        "generateFailed": "मूडबोर्ड तैयार करने में विफल",
+        "inserted": "\"{{label}}\" डाला गया",
+        "insertFailed": "ब्लॉक डालने में विफल",
+        "nothingToInsert": "अभी \"{{label}}\" के लिए डालने हेतु कुछ नहीं है।",
+        "saving": "मूडबोर्ड सहेजा जा रहा है…",
+        "saved": "मूडबोर्ड सहेजा गया",
+        "saveFailed": "मूडबोर्ड सहेजने में विफल",
+        "briefSyncFailed": "मूडबोर्ड सहेज लिया गया, लेकिन ब्रीफ संपादन को सिंक नहीं किया जा सका।",
+        "insertBlock": "ब्लॉक डालें",
+        "noBlocks": "कोई ब्लॉक उपलब्ध नहीं है",
+        "emptySuffix": "· खाली",
+        "addConstruction": "कंस्ट्रक्शन जोड़ें",
+        "generate": "जनरेट करें",
+        "layers": "लेयर्स",
+        "save": "सहेजें",
+        "savedLabel": "सहेजा गया",
+        "footerHint": "इंसर्ट, कंस्ट्रक्शन, जनरेट, लेयर्स और सेव कैनवास के नीचे स्थित डॉक में हैं।"
+      },
+      "layers": {
+        "heading": "लेयर्स",
+        "refresh": "रिफ्रेश करें",
+        "close": "बंद करें",
+        "noFrames": "अभी तक कोई फ्रेम नहीं है।",
+        "untitled": "बिना शीर्षक वाला फ्रेम",
+        "hasContent": "सामग्री मौजूद है",
+        "empty": "खाली",
+        "jump": "फ्रेम पर जाएं",
+        "show": "दिखाएं",
+        "hide": "छिपाएं",
+        "lockedWhileHidden": "छिपे होने के दौरान लॉक किया गया",
+        "unlock": "अनलॉक करें",
+        "lock": "लॉक करें"
+      },
+      "construction": {
+        "heading": "कंस्ट्रक्शन विवरण जोड़ें",
+        "details": "कंस्ट्रक्शन विवरण",
+        "loading": "तकनीकें लोड हो रही हैं…",
+        "hint": "बाईं ओर एक तकनीक या प्रीसेट चुनें — इसके पैरामीटर और फ़ैब्रिक नियम यहां स्वचालित रूप से भर जाएंगे।",
+        "label": "लेबल",
+        "parameters": "पैरामीटर्स",
+        "fixedGeometry": "इस तकनीक की ज्यामिति निश्चित है — सेट करने के लिए कोई पैरामीटर नहीं हैं।",
+        "fabricRules": "फैब्रिक / सिलाई नियम",
+        "oneRulePerLine": "प्रति पंक्ति एक नियम",
+        "note": "नोट",
+        "optional": "वैकल्पिक",
+        "addDetail": "विवरण जोड़ें",
+        "added": "\"{{label}}\" जोड़ा गया",
+        "addFailed": "कंस्ट्रक्शन विवरण जोड़ने में विफल"
+      },
+      "ownerActions": {
+        "yourDesign": "आपका डिजाइन",
+        "activeOrders_one": "{{count}} डिजाइन ऑर्डर प्रगति पर है। दूसरा बनाएं या किसी सब-पार्टनर को सौंपें।",
+        "activeOrders_other": "{{count}} डिजाइन ऑर्डर प्रगति पर हैं। दूसरा बनाएं या किसी सब-पार्टनर को सौंपें।",
+        "noOrders": "आपने यह डिजाइन बनाया है। उत्पादन शुरू करने के लिए एक डिजाइन ऑर्डर बनाएं, या इसे किसी सब-पार्टनर को सौंपें।",
+        "newOrder": "नया ऑर्डर",
+        "createOrder": "ऑर्डर बनाएं",
+        "deleteTitle": "डिजाइन हटाएं",
+        "deleteDescription": "क्या \"{{name}}\" को हटाएं? इसे पूर्ववत नहीं किया जा सकता।",
+        "deleted": "डिजाइन हटा दिया गया"
+      },
+      "production": {
+        "heading": "डिजाइन ऑर्डर",
+        "empty": "अभी तक कोई डिजाइन ऑर्डर नहीं है। उत्पादन शुरू करने के लिए एक डिजाइन ऑर्डर बनाएं, या एडमिन द्वारा काम भेजे जाने पर आप उन्हें यहां देखेंगे।",
+        "subtitle": "कार्य स्वीकार करने, सामग्री दर्ज करने और इसकी स्थिति अपडेट करने के लिए एक डिजाइन ऑर्डर खोलें।",
+        "previous": "पिछले डिजाइन ऑर्डर ({{count}})",
+        "viewOrder": "ऑर्डर देखें",
+        "orderType": "{{type}} ऑर्डर",
+        "qty": "मात्रा {{qty}}"
+      },
+      "cost": {
+        "heading": "लागत अनुमान",
+        "subtitle": "लिंक किए गए BOM से सामग्री + उत्पादन लागत, साथ ही JYT प्लेटफॉर्म शुल्क।",
+        "recalculate": "पुनः गणना करें",
+        "estimatedTotal": "अनुमानित कुल",
+        "materialCost": "सामग्री की लागत",
+        "productionCost": "उत्पादन की लागत",
+        "platformFee": "प्लेटफॉर्म शुल्क ({{percent}}%)",
+        "lastCalculated": "अंतिम बार गणना की गई",
+        "yourInput": "आपका इनपुट",
+        "estimatedLabel": "अनुमानित",
+        "yourProductionCost": "आपकी उत्पादन लागत (प्रति इकाई)",
+        "autoEstimate": "स्वचालित अनुमान",
+        "helper": "स्वचालित अनुमान को ओवरराइड करता है — इतिहास से अनुमान लगाने के लिए खाली छोड़ दें। सामग्री लागत पर {{percent}}% प्लेटफॉर्म शुल्क लागू होता है। लागू करने के लिए 'पुनः गणना करें' दबाएं।",
+        "noEstimate": "अभी तक कोई अनुमान नहीं — BOM में सामग्री जोड़ें, फिर पुनः गणना करें।",
+        "enterValid": "मान्य उत्पादन लागत दर्ज करें (0 या अधिक)",
+        "recalculated": "लागत की पुनः गणना की गई: {{amount}} ({{confidence}})"
+      },
+      "bom": {
+        "heading": "सामग्री (BOM)",
+        "subtitle": "इस डिजाइन को बनाने के लिए उपयोग की जाने वाली इन्वेंट्री + कच्चा माल।",
+        "addMaterial": "सामग्री जोड़ें",
+        "empty": "अभी तक कोई सामग्री लिंक नहीं की गई है।",
+        "emptyOwnerHint": " वे इन्वेंट्री आइटम जोड़ें जो यह डिजाइन खपत करता है।",
+        "noImg": "कोई छवि नहीं",
+        "sku": "SKU",
+        "planned": "नियोजित",
+        "consumed": "खपत की गई",
+        "removeTitle": "सामग्री हटाएं",
+        "removeDescription": "क्या इस डिजाइन की सामग्री सूची (BOM) से \"{{name}}\" को हटाएं?",
+        "removed": "सामग्री हटा दी गई",
+        "materialAlt": "सामग्री"
+      },
+      "consumption": {
+        "heading": "सामग्री का उपयोग",
+        "subtitle": "उत्पादन के दौरान खपत किए गए कच्चे माल का लॉग दर्ज करें",
+        "log": "लॉग दर्ज करें",
+        "closedReview": "लॉगिंग बंद — रन समीक्षा की प्रतीक्षा में है",
+        "closedComplete": "लॉगिंग बंद — रन पूर्ण हो गया है",
+        "closedNone": "लॉगिंग उपलब्ध नहीं है",
+        "drawerTitle": "सामग्री उपयोग दर्ज करें",
+        "drawerDescription": "उत्पादन के दौरान खपत किए गए कच्चे माल को रिकॉर्ड करें।",
+        "noInventory": "अभी तक कोई इन्वेंट्री लिंक नहीं है",
+        "noInventoryHint": "पहले इस डिजाइन से कच्चा माल लिंक करें, फिर आप यहां सामग्री उपयोग दर्ज कर सकते हैं।",
+        "inventoryItem": "इन्वेंट्री आइटम",
+        "selectItem": "आइटम चुनें",
+        "quantity": "मात्रा",
+        "measuredAs": "मापन की इकाई",
+        "perPiece": "प्रति पीस",
+        "totalRun": "पूरे रन के लिए कुल",
+        "perPieceHint": "एक तैयार पीस के लिए सामग्री — हम आपके द्वारा बनाए जाने वाले पीस की संख्या से गुणा करते हैं।",
+        "totalRunHint": "पूरे रन के लिए सामग्री — दर्ज की गई संख्या के अनुसार रिकॉर्ड की जाएगी।",
+        "costPerUnit": "प्रति इकाई लागत",
+        "optional": "वैकल्पिक",
+        "unit": "इकाई",
+        "type": "प्रकार",
+        "notes": "नोट्स",
+        "notesPlaceholder": "यह सामग्री किस लिए इस्तेमाल की गई थी?",
+        "logUsage": "उपयोग दर्ज करें",
+        "empty": "अभी तक कोई सामग्री उपयोग दर्ज नहीं किया गया है",
+        "required": "इन्वेंट्री आइटम और मात्रा आवश्यक हैं",
+        "logged": "खपत दर्ज की गई",
+        "failed": "खपत दर्ज करने में विफल",
+        "accessory": "एक्सेसरी",
+        "committed": "प्रतिबद्ध",
+        "pending": "लंबित",
+        "totalMaterialCost": "कुल सामग्री लागत"
+      },
+      "create": {
+        "heading": "डिजाइन बनाएं",
+        "namePlaceholder": "जैसे- स्प्रिंग जैकेट",
+        "descriptionPlaceholder": "यह डिजाइन क्या है?",
+        "designerNotesPlaceholder": "आंतरिक नोट्स",
+        "created": "डिजाइन बनाया गया"
+      },
+      "edit": {
+        "heading": "डिजाइन संपादित करें",
+        "updated": "डिजाइन अपडेट किया गया"
+      },
+      "addInventory": {
+        "selectedCount": "{{count}} चयनित",
+        "selectPrompt": "जोड़ने के लिए सामग्री चुनें",
+        "addToDesign": "डिजाइन में जोड़ें",
+        "noRawMaterialsTitle": "कोई कच्चा माल नहीं",
+        "noRawMaterialsMessage": "कोई कच्चा माल नहीं मिला। एडमिन साझा कच्चा माल कैटलॉग बनाए रखता है।",
+        "selectAtLeastOne": "कम से कम एक सामग्री चुनें",
+        "added_one": "{{count}} सामग्री जोड़ी गई",
+        "added_other": "{{count}} सामग्री जोड़ी गईं",
+        "sku": "SKU",
+        "columns": {
+          "material": "सामग्री",
+          "composition": "संरचना",
+          "color": "रंग",
+          "unit": "इकाई"
+        }
+      },
+      "runCreate": {
+        "heading": "डिजाइन ऑर्डर बनाएं",
+        "subtitle": "इस डिजाइन के लिए उत्पादन शुरू करें। डिजाइन ऑर्डर स्वीकृत है और तुरंत काम शुरू करने के लिए तैयार है।",
+        "quantity": "मात्रा",
+        "runType": "रन का प्रकार",
+        "production": "उत्पादन",
+        "sample": "सैंपल",
+        "howMade": "यह कैसे बनाया जाता है?",
+        "inHouse": "इन-हाउस (आप खुद बनाते हैं)",
+        "outsourced": "आउटसोर्स (किसी सब-पार्टनर को सौंपें)",
+        "executionHint": "इन-हाउस काम को आपके पास रखता है; आउटसोर्स लागत ट्रैकिंग के लिए विक्रेता को रिकॉर्ड करता है।",
+        "subPartnerId": "सब-पार्टनर ID",
+        "subPartnerPlaceholder": "partner_…",
+        "subPartnerHint": "वह पार्टनर जिसे आप यह उत्पादन सौंप रहे हैं।",
+        "createOrder": "डिजाइन ऑर्डर बनाएं",
+        "started": "उत्पादन शुरू हुआ"
+      }
+    }
+  }
+}

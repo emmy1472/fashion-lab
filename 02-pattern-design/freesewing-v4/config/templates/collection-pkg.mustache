@@ -1,0 +1,74 @@
+// Designs
+{{{ designImports }}}
+// Translations
+import { i18n as translations } from './i18n.mjs'
+// Examples
+import { designExampleIds, designExampleHrefs } from './examples.mjs'
+
+/*
+ * Export the designs themselves
+ */
+export const designs = {
+  {{ collection }}
+}
+
+/*
+ * Export a list of names that make up the FreeSewing collection
+ */
+export const collection = Object.keys(designs)
+
+/*
+ * Create various helper exports to get info about the collection
+ */
+export const requiredMeasurements = {}
+export const optionalMeasurements = {}
+export const measurements = {}
+export const about = {}
+
+const _tags = new Set()
+const _techniques = new Set()
+const _devs = new Set()
+const _dess = new Set()
+
+for (const design in designs) {
+  requiredMeasurements[design] = designs[design].patternConfig.measurements
+  optionalMeasurements[design] = designs[design].patternConfig.optionalMeasurements
+  measurements[design] = [
+    ...designs[design].patternConfig.measurements,
+    ...designs[design].patternConfig.optionalMeasurements,
+  ]
+  about[design] = { ...designs[design].designConfig.data }
+  if (about[design].tags) about[design].tags.forEach((tag) => _tags.add(tag))
+  if (about[design].techniques)
+    about[design].techniques.forEach((technique) => _techniques.add(technique))
+  if (Array.isArray(about[design].code)) about[design].code.forEach((code) => _devs.add(code))
+  else _devs.add(about[design].code)
+  if (Array.isArray(about[design].design))
+    about[design].design.forEach((design) => _dess.add(design))
+  else _dess.add(about[design].design)
+}
+export const tags = Array.from(_tags)
+  .filter((t) => (t ? true : false))
+  .sort()
+export const techniques = Array.from(_techniques)
+  .filter((t) => (t ? true : false))
+  .sort()
+export const developers = Array.from(_devs)
+  .filter((t) => (t ? true : false))
+  .sort()
+export const designers = Array.from(_dess)
+  .filter((t) => (t ? true : false))
+  .sort()
+
+/*
+ * Export the translations
+ */
+export const i18n = translations
+
+/*
+ * These are examples
+ */
+export const examples = {
+  id: designExampleIds,
+  href: designExampleHrefs,
+}

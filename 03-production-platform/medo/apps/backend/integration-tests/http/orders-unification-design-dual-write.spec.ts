@@ -1,0 +1,809 @@
+/**
+ * #342 T3.2 — design-side dual-write shim.
+ *
+ * Creating/approving/transitioning a production run must additionally project
+ * and maintain a core `order` (kind=design, discriminated by the
+ * order↔production_run link since Chunk 6) per
+ * apps/docs/notes/ORDERS_UNIFICATION_342.md §4 + §5, without ever failing the
+ * legacy run path. Child runs (the partner-facing unit) get their own orders;
+ * a split parent's order is canceled as superseded.
+ */
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { createAdminUser, getAuthHeaders } from "../helpers/create-admin-user"
+import { ensureHouseStoreRegion } from "../helpers/ensure-house-store-region"
+import { getSharedTestEnv, setupSharedTestSuite } from "./shared-test-setup"
+import partnerOrderLink from "../../src/links/partner-order"
+import { PARTNER_MODULE } from "../../src/modules/partner"
+import designOrderLink from "../../src/links/design-order-link"
+import { fetchRunSupersessions } from "../../src/workflows/payment_submissions/lib/run-supersession"
+
+jest.setTimeout(120000)
+
+setupSharedTestSuite(() => {
+  const { api, getContainer } = getSharedTestEnv()
+
+  describe("Orders unification design dual-write (#342 T3.2)", () => {
+    let adminHeaders: any
+    let unique: number
+
+    const post = async (url: string, body: any, cfg?: any) => {
+      try {
+        return await api.post(url, body, cfg)
+      } catch (err: any) {
+        throw new Error(
+          `POST ${url} failed: ${err?.response?.status} ${JSON.stringify(
+            err?.response?.data
+          )}`
+        )
+      }
+    }
+
+    const createRegion = async () => {
+      const container = getContainer()
+      const regionService: any = container.resolve(Modules.REGION)
+      const region = await regionService.createRegions({
+        name: "India",
+        currency_code: "inr",
+        countries: ["in"],
+      })
+      // Currency follows region: the house store adopts the region this test
+      // just made. Done HERE rather than in beforeEach so that a test which
+      // creates no region really does run without one.
+      await ensureHouseStoreRegion(container)
+      return region.id
+    }
+
+    const createPartner = async (label = "p") => {
+      const email = `design-unification-${label}-${unique}@jyt.test`
+      const password = "supersecret"
+      await post("/auth/partner/emailpass/register", { email, password })
+      const firstLogin = await post("/auth/partner/emailpass", { email, password })
+      const res = await post(
+        "/partners",
+        {
+          name: `Design Unification Partner ${label} ${unique}`,
+          handle: `design-unification-${label}-${unique}`,
+          admin: { email, first_name: "Test", last_name: "Partner" },
+        },
+        { headers: { Authorization: `Bearer ${firstLogin.data.token}` } }
+      )
+      expect(res.status).toBe(200)
+      // Fresh token after partner creation (stale token misses the partner)
+      const freshLogin = await post("/auth/partner/emailpass", { email, password })
+      return {
+        partnerId: res.data.partner.id,
+        partnerHeaders: {
+          headers: { Authorization: `Bearer ${freshLogin.data.token}` },
+        },
+      }
+    }
+
+    const createTemplate = async (name: string) => {
+      const res = await post(
+        "/admin/task-templates",
+        {
+          name,
+          description: `${name} template`,
+          priority: "medium",
+          estimated_duration: 60,
+          required_fields: {},
+          eventable: false,
+          notifiable: false,
+          message_template: "",
+          metadata: { workflow_type: "production_run" },
+          category: "Design Unification Test",
+        },
+        adminHeaders
+      )
+      expect([200, 201]).toContain(res.status)
+      return name
+    }
+
+    const createDesign = async () => {
+      const res = await post(
+        "/admin/designs",
+        {
+          name: `Unification Design ${unique}`,
+          description: "Design for #342 dual-write test",
+          design_type: "Original",
+          status: "Approved",
+          priority: "Medium",
+        },
+        adminHeaders
+      )
+      expect(res.status).toBe(201)
+      return res.data.design.id
+    }
+
+    const fetchRun = async (id: string) => {
+      const container = getContainer()
+      const productionRunService: any = container.resolve("production_runs")
+      return productionRunService.retrieveProductionRun(id)
+    }
+
+    const fetchUnifiedOrder = async (unifiedOrderId: string) => {
+      const container = getContainer()
+      const query: any = container.resolve(ContainerRegistrationKeys.QUERY)
+      const { data } = await query.graph({
+        entity: "order",
+        filters: { id: unifiedOrderId },
+        fields: [
+          "id",
+          "status",
+          "currency_code",
+          "email",
+          "customer_id",
+          "metadata",
+          "unified_order_status.partner_status",
+          "total",
+          "sales_channel.name",
+          "items.*",
+        ],
+      })
+      return data?.[0]
+    }
+
+    // Chunk 6: resolve a run's unified order via the order↔production_run link
+    // (forward `.order`), not the retired run.metadata.unified_order_id backref.
+    const unifiedOrderIdOf = async (runId: string) => {
+      const container = getContainer()
+      const query: any = container.resolve(ContainerRegistrationKeys.QUERY)
+      const { data } = await query.graph({
+        entity: "production_runs",
+        filters: { id: runId },
+        fields: ["id", "order.id"],
+      })
+      return data?.[0]?.order?.id ?? null
+    }
+
+    beforeEach(async () => {
+      const container = getContainer()
+      unique = Date.now()
+      await createAdminUser(container)
+      adminHeaders = await getAuthHeaders(api)
+    })
+
+    it("dual-writes a kind=design core order on run create — once the run has a partner (#2306 S3)", async () => {
+      await createRegion()
+      const designId = await createDesign()
+      const { partnerId } = await createPartner("direct")
+
+      // #2306 S3 — a run created with NO partner is a plan and gets no work
+      // order; the design route with no assignments and no linked partners
+      // makes exactly that.
+      const planRes = await post(
+        `/admin/designs/${designId}/production-runs`,
+        { quantity: 5 },
+        adminHeaders
+      )
+      expect(planRes.status).toBe(201)
+      expect(await unifiedOrderIdOf(planRes.data.production_run.id)).toBeNull()
+
+      const createRes = await post(
+        `/admin/production-runs`,
+        { design_id: designId, quantity: 5, partner_id: partnerId },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.production_run.id
+
+      const unifiedOrderId = await unifiedOrderIdOf(runId)
+      expect(unifiedOrderId).toBeTruthy()
+      const unified = await fetchUnifiedOrder(unifiedOrderId)
+
+      // §2/§4 projection metadata (the kind=design discriminator is the
+      // order↔production_run link, asserted forward below).
+      expect(unified.metadata.legacy_id).toBe(runId)
+      // Chunk 6 regression: `kind` is no longer written onto the order (the
+      // link IS the discriminator now).
+      expect(unified.metadata.kind).toBeUndefined()
+      expect(unified.metadata.production_run_id).toBe(runId)
+      expect(unified.metadata.run_type).toBe("production")
+      expect(unified.metadata.currency_assumed).toBe(true)
+      // §5: pending_review → core draft, no partner_status yet
+      expect(unified.status).toBe("draft")
+      expect(unified.unified_order_status?.partner_status ?? null).toBeNull()
+
+      // GAP-3 recipe: customer-less
+      expect(unified.customer_id ?? null).toBeNull()
+      expect(unified.email ?? null).toBeNull()
+
+      // Internal channel, one line per design (no cost estimate yet → 0)
+      expect(unified.sales_channel?.name).toBe("Partner Work Orders")
+      expect(unified.items).toHaveLength(1)
+      expect(Number(unified.items[0].quantity)).toBe(5)
+      expect(Number(unified.items[0].unit_price)).toBe(0)
+      expect(unified.items[0].metadata.design_id).toBe(designId)
+
+      // §4 — design ↔ order link reused
+      const container = getContainer()
+      const query: any = container.resolve(ContainerRegistrationKeys.QUERY)
+      const { data: designLinks } = await query.graph({
+        entity: designOrderLink.entryPoint,
+        filters: { order_id: unifiedOrderId },
+        fields: ["design_id", "order_id"],
+      })
+      expect(designLinks).toHaveLength(1)
+      expect(designLinks[0].design_id).toBe(designId)
+
+      // D5-2: the order↔production_run link is the authoritative pointer +
+      // kind=design discriminator. Resolve it forward (run → unified order)
+      // via query.graph — the same join D5-3 reads switch to.
+      const { data: linkedRuns } = await query.graph({
+        entity: "production_runs",
+        filters: { id: runId },
+        fields: ["id", "order.id"],
+      })
+      expect(linkedRuns?.[0]?.order?.id).toBe(unifiedOrderId)
+
+      // Legacy run untouched — Chunk 6 stopped writing the projection backref;
+      // order_id still means "source retail order" (deviation note in the doc)
+      const run: any = await fetchRun(runId)
+      expect(run.status).toBe("pending_review")
+      expect(run.order_id ?? null).toBeNull()
+      expect(run.metadata?.unified_order_id ?? null).toBeNull()
+    })
+
+    it("projects child runs on approve, supersedes the parent order, links partner on send, and mirrors the partner lifecycle", async () => {
+      await createRegion()
+      const designId = await createDesign()
+      const { partnerId, partnerHeaders } = await createPartner()
+      const templateName = await createTemplate(`design-unification-cutting-${unique}`)
+
+      // create + approve + dispatch in one call
+      const createRes = await post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          assignments: [
+            {
+              partner_id: partnerId,
+              quantity: 4,
+              role: "manufacturing",
+              template_names: [templateName],
+            },
+          ],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const parentId = createRes.data.production_run.id
+      const childId = createRes.data.children[0].id
+
+      // #2306 S3 — the parent is a plan with no partner: it never gets a work
+      // order, so there is nothing to supersede (it used to be minted at
+      // create time and canceled 15 s later).
+      const parentOrderId = await unifiedOrderIdOf(parentId)
+      expect(parentOrderId).toBeNull()
+
+      // Child order: the partner-facing commercial artifact (§4)
+      const childOrderId = await unifiedOrderIdOf(childId)
+      expect(childOrderId).toBeTruthy()
+      expect(childOrderId).not.toBe(parentOrderId)
+      let childOrder = await fetchUnifiedOrder(childOrderId)
+      expect(Number(childOrder.items[0].quantity)).toBe(4)
+      // sent_to_partner → core pending + partner_status assigned
+      expect(childOrder.status).toBe("pending")
+      expect(childOrder.unified_order_status?.partner_status).toBe("assigned")
+
+      // D3: partner ↔ order link row exists on the child order
+      const container = getContainer()
+      const query: any = container.resolve(ContainerRegistrationKeys.QUERY)
+      const { data: linkRows } = await query.graph({
+        entity: partnerOrderLink.entryPoint,
+        filters: { order_id: childOrderId },
+        fields: ["partner_id", "order_id"],
+      })
+      expect(linkRows).toHaveLength(1)
+      expect(linkRows[0].partner_id).toBe(partnerId)
+
+      // D5-2: each child run owns its own order↔production_run link, and the
+      // parent (a plan, #2306 S3) points at none.
+      const { data: childLink } = await query.graph({
+        entity: "production_runs",
+        filters: { id: childId },
+        fields: ["id", "order.id"],
+      })
+      expect(childLink?.[0]?.order?.id).toBe(childOrderId)
+      const { data: parentLink } = await query.graph({
+        entity: "production_runs",
+        filters: { id: parentId },
+        fields: ["id", "order.id"],
+      })
+      expect(parentLink?.[0]?.order?.id ?? null).toBeNull()
+
+      // ——— partner lifecycle: accept → start → finish → complete ———
+      const accept = await post(
+        `/partners/production-runs/${childId}/accept`,
+        {},
+        partnerHeaders
+      )
+      expect(accept.status).toBe(200)
+      childOrder = await fetchUnifiedOrder(childOrderId)
+      expect(childOrder.status).toBe("pending")
+      expect(childOrder.unified_order_status?.partner_status).toBe("accepted")
+
+      const start = await post(
+        `/partners/production-runs/${childId}/start`,
+        {},
+        partnerHeaders
+      )
+      expect(start.status).toBe(200)
+      childOrder = await fetchUnifiedOrder(childOrderId)
+      expect(childOrder.unified_order_status?.partner_status).toBe("in_progress")
+
+      const finish = await post(
+        `/partners/production-runs/${childId}/finish`,
+        {},
+        partnerHeaders
+      )
+      expect(finish.status).toBe(200)
+      childOrder = await fetchUnifiedOrder(childOrderId)
+      expect(childOrder.status).toBe("pending")
+      expect(childOrder.unified_order_status?.partner_status).toBe("finished")
+
+      const complete = await post(
+        `/partners/production-runs/${childId}/complete`,
+        // Ordered as 4 — a completion must account for all of it.
+        { produced_quantity: 4 },
+        partnerHeaders
+      )
+      expect(complete.status).toBe(200)
+      childOrder = await fetchUnifiedOrder(childOrderId)
+      expect(childOrder.status).toBe("completed")
+      expect(childOrder.unified_order_status?.partner_status).toBe("completed")
+
+      // The completion cascade does not mint a work order for the plan either
+      expect(await unifiedOrderIdOf(parentId)).toBeNull()
+    })
+
+    it("reassigns a partner decline (run parked, order left active) [#1093]", async () => {
+      await createRegion()
+      const designId = await createDesign()
+      const { partnerId, partnerHeaders } = await createPartner("decline")
+      const templateName = await createTemplate(`design-unification-decline-${unique}`)
+
+      const createRes = await post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          assignments: [
+            {
+              partner_id: partnerId,
+              quantity: 2,
+              template_names: [templateName],
+            },
+          ],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const childId = createRes.data.children[0].id
+      const childOrderId = await unifiedOrderIdOf(childId)
+      expect(childOrderId).toBeTruthy()
+
+      const decline = await post(
+        `/partners/production-runs/${childId}/decline`,
+        { reason: "capacity", notes: "unification decline test" },
+        partnerHeaders
+      )
+      expect(decline.status).toBe(200)
+
+      // #1093: decline now reassigns — the run is parked + unassigned, and the
+      // customer's order is NOT canceled (a new partner will pick it up).
+      const declinedRun = (await fetchRun(childId)) as any
+      expect(declinedRun.status).toBe("awaiting_reassignment")
+      expect(declinedRun.partner_id).toBeFalsy()
+      expect(declinedRun.previous_partner_id).toBe(partnerId)
+
+      const childOrder = await fetchUnifiedOrder(childOrderId)
+      expect(childOrder.status).not.toBe("canceled")
+      expect(childOrder.unified_order_status?.partner_status).not.toBe("declined")
+    })
+
+    it("mirrors an admin cancel as canceled AND says so on the sidecar (#1574)", async () => {
+      await createRegion()
+      const designId = await createDesign()
+
+      // A partnered run: only those get a work order at create (#2306 S3).
+      const { partnerId } = await createPartner("q3")
+      const createRes = await post(
+        `/admin/production-runs`,
+        { design_id: designId, quantity: 3, partner_id: partnerId },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.production_run.id
+      const unifiedOrderId = await unifiedOrderIdOf(runId)
+      expect(unifiedOrderId).toBeTruthy()
+
+      const cancel = await post(
+        `/admin/production-runs/${runId}/cancel`,
+        { reason: "test cancel" },
+        adminHeaders
+      )
+      expect(cancel.status).toBe(200)
+
+      const unified = await fetchUnifiedOrder(unifiedOrderId)
+      expect(unified.status).toBe("canceled")
+
+      // 🔴 This asserted `toBeNull()` until #1577, under the comment "§5
+      // defines no partner_status for an admin cancel" — which is the exact
+      // misreading that WAS the bug, written down as the specification.
+      //
+      // The mirror writes only truthy values, so an `undefined` derivation
+      // meant "don't write" where it needed to mean "say it stopped". The
+      // sidecar kept whatever it last said — `assigned`, `accepted`,
+      // `in_progress`, `finished` — and the order went on rendering as live
+      // production forever. A partner then saw a Finish button on work that
+      // had been called off.
+      //
+      // `cancelled` is distinct from `declined` on purpose: declined is the
+      // PARTNER refusing. Showing "Declined" for an admin cancel accuses them
+      // of something they did not do.
+      expect(unified.unified_order_status?.partner_status).toBe("cancelled")
+    })
+
+    it("resolves the unified order via the link, not the metadata backref (D5-3)", async () => {
+      // Chunk 3/6 — the run status mirror (incl. the admin cancel route)
+      // resolves the unified order through the order↔production_run link
+      // (query.graph forward `.order`) with PRIORITY over the transitional
+      // run.metadata.unified_order_id fallback (Chunk 6 no longer writes it).
+      // POISON the backref with a bogus id, leave the link intact: the mirror
+      // must still cancel the REAL order, which is only possible via the link.
+      await createRegion()
+      const designId = await createDesign()
+
+      // A partnered run: only those get a work order at create (#2306 S3).
+      const { partnerId } = await createPartner("q4")
+      const createRes = await post(
+        `/admin/production-runs`,
+        { design_id: designId, quantity: 4, partner_id: partnerId },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.production_run.id
+      const unifiedOrderId = await unifiedOrderIdOf(runId)
+      expect(unifiedOrderId).toBeTruthy()
+
+      const container = getContainer()
+      const productionRunService: any = container.resolve("production_runs")
+      await productionRunService.updateProductionRuns({
+        id: runId,
+        metadata: { unified_order_id: "order_bogus_does_not_exist" },
+      })
+      expect((await fetchRun(runId)).metadata?.unified_order_id).toBe(
+        "order_bogus_does_not_exist"
+      )
+
+      const cancel = await post(
+        `/admin/production-runs/${runId}/cancel`,
+        { reason: "link-resolution test" },
+        adminHeaders
+      )
+      expect(cancel.status).toBe(200)
+
+      const unified = await fetchUnifiedOrder(unifiedOrderId)
+      expect(unified.status).toBe("canceled")
+    })
+
+    it("does not fail the legacy run path when the dual-write cannot run (no region)", async () => {
+      // No region created — the projection must skip, not throw
+      const designId = await createDesign()
+
+      const createRes = await post(
+        `/admin/designs/${designId}/production-runs`,
+        { quantity: 2 },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const runId = createRes.data.production_run.id
+
+      const run: any = await fetchRun(runId)
+      expect(run.status).toBe("pending_review")
+      // No projection → no order↔production_run link.
+      expect(await unifiedOrderIdOf(runId)).toBeFalsy()
+
+      // Later transitions stay non-fatal without a unified order
+      const cancel = await post(
+        `/admin/production-runs/${runId}/cancel`,
+        { reason: "no region cancel" },
+        adminHeaders
+      )
+      expect(cancel.status).toBe(200)
+      expect(((await fetchRun(runId)) as any).status).toBe("cancelled")
+    })
+
+    /**
+     * #2030 item 2.1 — one order per CHILD run is what minted orders 110 and
+     * 111 fifteen seconds apart for a single design. Three orders for one piece
+     * of work is what the partner saw, and reading them as three jobs is how
+     * ₹1,200 nearly got paid a third time (#2026).
+     *
+     * A partner's children are ONE batch and belong on ONE order.
+     */
+    it("collates a partner's child runs onto ONE order, not one each", async () => {
+      await createRegion()
+      const designId = await createDesign()
+      const { partnerId } = await createPartner("collate")
+
+      const createRes = await post(
+        `/admin/designs/${designId}/production-runs`,
+        {
+          assignments: [
+            { partner_id: partnerId, quantity: 3, role: "cutting" },
+            { partner_id: partnerId, quantity: 2, role: "stitching" },
+          ],
+        },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+
+      const children = createRes.data.children ?? []
+      expect(children).toHaveLength(2)
+
+      const orderIds = await Promise.all(
+        children.map((c: any) => unifiedOrderIdOf(c.id))
+      )
+      orderIds.forEach((id) => expect(id).toBeTruthy())
+
+      // 🔑 The whole point, in one assertion.
+      expect(new Set(orderIds).size).toBe(1)
+
+      const collated = await fetchUnifiedOrder(orderIds[0])
+      expect(collated.metadata.collated_design_order).toBe(true)
+      expect(collated.metadata.production_run_ids).toEqual(
+        expect.arrayContaining(children.map((c: any) => c.id))
+      )
+      // A line per child — the partner can see both jobs, not just a total.
+      expect(collated.items).toHaveLength(2)
+      expect(
+        collated.items.map((i: any) => Number(i.quantity)).sort()
+      ).toEqual([2, 3])
+
+      // The parent is a plan with no work order (#2306 S3), and billing still
+      // cannot double-count it (#2026): the payout guard sees its stages.
+      const parentId = createRes.data.production_run.id
+      expect(await unifiedOrderIdOf(parentId)).toBeNull()
+      const verdicts = await fetchRunSupersessions(getContainer() as any, [parentId])
+      expect(verdicts.get(parentId)?.reason).toBe("superseded_run")
+      expect(verdicts.get(parentId)?.superseded_by_run_ids).toEqual(
+        expect.arrayContaining(children.map((c: any) => c.id))
+      )
+    })
+
+    /**
+     * 2026-10-14 — a LATER split for the same partner is a new job and gets
+     * its OWN order. It used to join the earlier one (#2030 item 2.1), which
+     * is how Sharlho's customer jacket became line 3 of a 9-day-old stock
+     * order (#128), under that order's number and date.
+     */
+    it("gives a later split its own order rather than joining the partner's earlier one", async () => {
+      await createRegion()
+      const { partnerId } = await createPartner("join")
+      // Templates make the run DISPATCH, and dispatch is what writes the
+      // partner↔order link the open-order lookup reads. Without it the second
+      // split cannot see the first order and mints its own.
+      const templateName = await createTemplate(`design-unification-join-${unique}`)
+
+      const firstDesign = await createDesign()
+      const first = await post(
+        `/admin/designs/${firstDesign}/production-runs`,
+        {
+          assignments: [
+            {
+              partner_id: partnerId,
+              quantity: 1,
+              role: "cutting",
+              template_names: [templateName],
+            },
+          ],
+        },
+        adminHeaders
+      )
+      expect(first.status).toBe(201)
+      const firstChild = first.data.children[0]
+      const firstOrderId = await unifiedOrderIdOf(firstChild.id)
+      expect(firstOrderId).toBeTruthy()
+
+      // A lone child keeps the single-design mirror — NOT collated.
+      const mirror = await fetchUnifiedOrder(firstOrderId)
+      expect(mirror.metadata.collated_design_order ?? false).toBe(false)
+      expect(mirror.items).toHaveLength(1)
+
+      const secondDesign = await createDesign()
+      const second = await post(
+        `/admin/designs/${secondDesign}/production-runs`,
+        {
+          assignments: [
+            {
+              partner_id: partnerId,
+              quantity: 2,
+              role: "stitching",
+              template_names: [templateName],
+            },
+          ],
+        },
+        adminHeaders
+      )
+      expect(second.status).toBe(201)
+      const secondChild = second.data.children[0]
+
+      // 🔑 A second order — the first is left exactly as it was.
+      const secondOrderId = await unifiedOrderIdOf(secondChild.id)
+      expect(secondOrderId).toBeTruthy()
+      expect(secondOrderId).not.toBe(firstOrderId)
+
+      const untouched = await fetchUnifiedOrder(firstOrderId)
+      expect(untouched.metadata.collated_design_order ?? false).toBe(false)
+      expect(untouched.items).toHaveLength(1)
+    })
+    /**
+     * The DISPATCH path mints a new order by default (2026-10-14), and joins
+     * the partner's open one — a per-run mirror included (#2030 item 2.2) —
+     * only when the admin asks with `collate: "partner-open"`.
+     */
+    it("dispatch joins the partner's mirror only when asked, and mints a new order by default", async () => {
+      await createRegion()
+      const { partnerId } = await createPartner("dispatch-join")
+      const templateName = await createTemplate(
+        `design-unification-dispatch-${unique}`
+      )
+
+      // A first job, dispatched — leaves an UNCOLLATED per-run mirror.
+      const firstDesign = await createDesign()
+      const first = await post(
+        `/admin/designs/${firstDesign}/production-runs`,
+        {
+          assignments: [
+            {
+              partner_id: partnerId,
+              quantity: 1,
+              role: "cutting",
+              template_names: [templateName],
+            },
+          ],
+        },
+        adminHeaders
+      )
+      expect(first.status).toBe(201)
+      const mirrorOrderId = await unifiedOrderIdOf(first.data.children[0].id)
+      expect(mirrorOrderId).toBeTruthy()
+      const mirror = await fetchUnifiedOrder(mirrorOrderId)
+      expect(mirror.metadata.collated_design_order ?? false).toBe(false)
+
+      // Asked to join, through the door the drawer actually uses.
+      const secondDesign = await createDesign()
+      const joinedRes = await post(
+        "/admin/designs/produce",
+        {
+          design_ids: [secondDesign],
+          partner_id: partnerId,
+          template_names: [templateName],
+          collate: "partner-open",
+        },
+        adminHeaders
+      )
+      expect(joinedRes.status).toBe(200)
+
+      // 🔑 It landed on the order that already existed, and promoted it.
+      expect(joinedRes.data.design_production.work_order_id).toBe(mirrorOrderId)
+      expect(joinedRes.data.design_production.work_order_joined).toBe(true)
+
+      const joined = await fetchUnifiedOrder(mirrorOrderId)
+      expect(joined.metadata.collated_design_order).toBe(true)
+      expect(joined.items).toHaveLength(2)
+
+      /**
+       * 🔴 The promoted mirror's OWN run must survive into the run list. It was
+       * never in `production_run_ids` (a mirror carries `production_run_id`
+       * singular), so a union that trusted metadata alone would drop it — and
+       * the order's rolled-up status is computed from this list.
+       */
+      expect(joined.metadata.production_run_ids).toEqual(
+        expect.arrayContaining([first.data.children[0].id])
+      )
+
+      // The default, with that order still open: a NEW order, the open one untouched.
+      const thirdDesign = await createDesign()
+      const fresh = await post(
+        "/admin/designs/produce",
+        {
+          design_ids: [thirdDesign],
+          partner_id: partnerId,
+          template_names: [templateName],
+        },
+        adminHeaders
+      )
+      expect(fresh.status).toBe(200)
+      expect(fresh.data.design_production.work_order_id).toBeTruthy()
+      expect(fresh.data.design_production.work_order_id).not.toBe(mirrorOrderId)
+      expect(fresh.data.design_production.work_order_joined).toBe(false)
+      expect((await fetchUnifiedOrder(mirrorOrderId)).items).toHaveLength(2)
+    })
+    /**
+     * #2030 — the partner must not be shown the planning artifact.
+     *
+     * A split cancels the parent's order and marks it superseded. The run,
+     * though, is untouched, so the order's work-status sidecar keeps whatever
+     * it last said — in Sharlho's portal, order 110 sat there `canceled` while
+     * its badge read `assigned`, i.e. a job they still owed. Three rows for one
+     * jacket, one of them never real work.
+     */
+    it("hides a superseded parent order from the partner's list, but not the child's", async () => {
+      await createRegion()
+      const designId = await createDesign()
+      const { partnerId, partnerHeaders } = await createPartner("superseded-list")
+      const templateName = await createTemplate(
+        `design-unification-superseded-${unique}`
+      )
+
+      // Since #2306 S3 only a PARTNERED parent still has an order to
+      // supersede — the historical shape (Sharlho's order 110), and the one
+      // the filter below has to keep handling.
+      const createRes = await post(
+        `/admin/production-runs`,
+        { design_id: designId, quantity: 2, partner_id: partnerId },
+        adminHeaders
+      )
+      expect(createRes.status).toBe(201)
+      const parentId = createRes.data.production_run.id
+      const approve = await post(
+        `/admin/production-runs/${parentId}/approve`,
+        { assignments: [{ partner_id: partnerId, quantity: 2, role: "cutting" }] },
+        adminHeaders
+      )
+      const childId = (approve.data.result?.children || [])[0]?.id
+      expect(childId).toBeTruthy()
+      await post(
+        `/admin/production-runs/${childId}/send-to-production`,
+        { template_names: [templateName] },
+        adminHeaders
+      )
+
+      const parentOrderId = await unifiedOrderIdOf(parentId)
+      const childOrderId = await unifiedOrderIdOf(childId)
+
+      // Precondition: the parent order really is the canceled, superseded one.
+      const parentOrder = await fetchUnifiedOrder(parentOrderId)
+      expect(parentOrder.status).toBe("canceled")
+      expect(parentOrder.metadata.superseded_by_run_ids).toEqual([childId])
+
+      /**
+       * 🔴 The parent order must be PARTNER-LINKED or this test proves nothing.
+       *
+       * In this flow the parent run carries no partner (only the children do),
+       * so the parent order gets no D3 link and never reaches the partner's
+       * list in the first place — a filter test against it passes with the
+       * filter REMOVED. Sharlho's parent run did carry the partner, which is
+       * why order 110 was on their screen at all. Link it here so the row is
+       * genuinely reachable, and the exclusion is what removes it.
+       */
+      const remoteLink = getContainer().resolve(
+        ContainerRegistrationKeys.LINK
+      ) as any
+      await remoteLink.create([
+        {
+          [PARTNER_MODULE]: { partner_id: partnerId },
+          [Modules.ORDER]: { order_id: parentOrderId },
+        },
+      ])
+
+      const listRes = await api.get(
+        "/partners/orders?kind=design&limit=100",
+        partnerHeaders
+      )
+      expect(listRes.status).toBe(200)
+      const ids = (listRes.data.orders || []).map((o: any) => String(o.id))
+
+      // 🔑 The artifact is gone; the work the partner actually has is not.
+      expect(ids).not.toContain(String(parentOrderId))
+      expect(ids).toContain(String(childOrderId))
+
+      /**
+       * `count` must agree with the rows. The exclusion happens on the id set
+       * BEFORE the query, so a hidden order was never counted — filtering after
+       * pagination would leave a count that promises a row the page cannot show.
+       */
+      expect(listRes.data.count).toBe(ids.length)
+    })
+  })
+})

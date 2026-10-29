@@ -1,0 +1,66 @@
+import { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { MedusaError, Modules } from "@medusajs/framework/utils"
+import { deleteInventoryLevelsWorkflow } from "@medusajs/medusa/core-flows"
+import { getPartnerFromAuthContext } from "../../../../helpers"
+import { resolvePartnerHomeLocation } from "../../../../lib/partner-home-location"
+
+async function verifyLocationAccess(
+  req: AuthenticatedMedusaRequest,
+  locationId: string
+) {
+  // #2286 — the store location, else the linked warehouse (store-less partners).
+  const { location_id: homeLocationId } = await resolvePartnerHomeLocation(req.auth_context, req.scope)
+  if (homeLocationId !== locationId) {
+    throw new MedusaError(
+      MedusaError.Types.UNAUTHORIZED,
+      "You can only manage inventory at your own stock location"
+    )
+  }
+}
+
+export const POST = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const partner = await getPartnerFromAuthContext(req.auth_context, req.scope)
+  if (!partner) {
+    throw new MedusaError(MedusaError.Types.UNAUTHORIZED, "No partner associated")
+  }
+
+  const { id, locationId } = req.params
+  await verifyLocationAccess(req, locationId)
+
+  const body = req.body as Record<string, any>
+  const inventoryService = req.scope.resolve(Modules.INVENTORY) as any
+  // `updateInventoryLevels` takes a SINGLE data argument — the selector
+  // fields (`inventory_item_id`, `location_id`) and the new values must
+  // live on the same object. The previous call passed them split across
+  // two args; the second was interpreted as `Context` and silently
+  // dropped, so HTTP returned 200 but `stocked_quantity` never persisted.
+  const updated = await inventoryService.updateInventoryLevels({
+    inventory_item_id: id,
+    location_id: locationId,
+    ...body,
+  })
+
+  res.json({ inventory_item: updated })
+}
+
+export const DELETE = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const partner = await getPartnerFromAuthContext(req.auth_context, req.scope)
+  if (!partner) {
+    throw new MedusaError(MedusaError.Types.UNAUTHORIZED, "No partner associated")
+  }
+
+  const { id, locationId } = req.params
+  await verifyLocationAccess(req, locationId)
+
+  await deleteInventoryLevelsWorkflow(req.scope).run({
+    input: { inventory_item_id: id, location_id: locationId },
+  })
+
+  res.json({ id: `${id}-${locationId}`, object: "inventory_level", deleted: true })
+}

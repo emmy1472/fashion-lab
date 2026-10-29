@@ -1,0 +1,33 @@
+import { useTranslation } from "react-i18next"
+
+import { StatusCell } from "../../common/status-cell"
+import { HttpTypes } from "@medusajs/types"
+
+type ProductStatusCellProps = {
+  status: HttpTypes.AdminProductStatus
+}
+
+export const ProductStatusCell = ({ status }: ProductStatusCellProps) => {
+  const { t } = useTranslation()
+
+  const statusMap: Record<string, ["grey" | "orange" | "green" | "red", string]> = {
+    draft: ["grey", t("products.productStatus.draft")],
+    proposed: ["orange", t("products.productStatus.proposed")],
+    published: ["green", t("products.productStatus.published")],
+    rejected: ["red", t("products.productStatus.rejected")],
+  }
+
+  const [color, text] = statusMap[status] ?? ["grey", status]
+
+  return <StatusCell color={color}>{text}</StatusCell>
+}
+
+export const ProductStatusHeader = () => {
+  const { t } = useTranslation()
+
+  return (
+    <div className="flex h-full w-full items-center">
+      <span>{t("fields.status")}</span>
+    </div>
+  )
+}

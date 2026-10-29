@@ -1,0 +1,271 @@
+@import 'tailwindcss' prefix(tw);
+
+@plugin "daisyui" {
+  prefix: 'daisy-';
+}
+@layer theme, base, components, utilities, docusaurus, docusaurus.theme-classic, freesewing;
+
+@import './light.css';
+@import './dark.css';
+
+/* Add CSS for code */
+@import './code.css' layer(freesewing);
+
+/* Add styling for FreeSewing patterns */
+@import './patterns.css' layer(freesewing);
+
+/* Source definitions for tailwind */
+@source '../**/*.{js,mjs,mdx}';
+@source '../../docs/**/*.mdx';
+@source '../../tailwind-force.html';
+@source '../../../../node_modules/daisyui/**/*.{js,mjs,ts,tsx}';
+@source '../../../../packages/react/components/**/*.mjs';
+@source '../../../../packages/react/context/**/*.mjs';
+@source '../../../../packages/react/hooks/**/*.mjs';
+@source '../../../../packages/utils/src/*.mjs';
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  --aspect-9\/16: 9 / 16;
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@utility markdown {
+  & ul {
+    @apply tw:list-inside tw:list-disc tw:ml-4;
+  }
+}
+
+@layer freesewing {
+  div.footer__copyright {
+    font-size: 0.8rem;
+  }
+  div.footer__copyright a {
+    font-weight: bold;
+  }
+
+  .caption {
+    text-align: center;
+    font-style: italic;
+    margin-top: -1rem;
+  }
+
+  .tag,
+  .technique {
+    background: var(--ifm-color-primary);
+    padding: 0.2rem 0.5rem;
+    font-weight: bold;
+    color: var(--ifm-font-color-light);
+    border-radius: 0.5rem;
+  }
+
+  .technique {
+    background: var(--pink-500);
+  }
+
+  p > figure.mdx {
+    padding: 0;
+    margin: 0;
+  }
+  figure.mdx {
+    margin: 0;
+    padding: 1rem 0 0;
+  }
+  figure.mdx > img {
+    padding: 1rem;
+  }
+  figcaption.mdx {
+    font-style: italic;
+    margin-top: -0.25rem;
+    opacity: 0.8;
+    padding: 0 0.5rem;
+    font-size: 90%;
+  }
+  .mdx p {
+    margin: 0.75rem 0;
+  }
+  .avatar img {
+    width: var(--ifm-avatar-photo-size);
+    height: var(--ifm-avatar-photo-size);
+  }
+  .avatar > div {
+    aspect-ratio: auto;
+  }
+
+  .markdown a:not([class]) {
+    color: var(--ifm-link-color);
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+  }
+
+  .markdown a:not([class]):hover {
+    color: var(--ifm-link-hover-color);
+    text-decoration: underline;
+    text-decoration-thickness: 4px;
+  }
+
+  .markdown ul > li > p {
+    display: inline;
+  }
+  a.theme-edit-this-page {
+    display: flex;
+    flex-direction: row;
+    gap: 1rem;
+    border: 1px solid var(--ifm-color-emphasis-300);
+    border-radius: var(--ifm-pagination-nav-border-radius);
+    line-height: var(--ifm-heading-line-height);
+    padding: var(--ifm-global-spacing);
+    transition: border-color var(--ifm-transition-fast) var(--ifm-transition-timing-default);
+    color: var(--ifm-link-color);
+    text-decoration: var(--ifm-link-decoration);
+    transition: color var(--ifm-transition-fast) var(--ifm-transition-timing-default);
+    font-size: var(--ifm-h4-font-size);
+    font-weight: var(--ifm-heading-font-weight);
+    word-break: break-word;
+  }
+  a.theme-edit-this-page:hover {
+    border-color: var(--ifm-pagination-nav-color-hover);
+    -webkit-text-decoration: none;
+    text-decoration: none;
+  }
+
+  a.daisy-btn-neutral:hover {
+    color: #fff;
+    text-decoration: none;
+  }
+}
+
+/*
+ * fixes
+ */
+a.no-hover-decoration:hover {
+  text-decoration: none;
+}
+a.tw\:daisy-btn {
+  color: inherit;
+}
+a.tw\:daisy-btn-primary.tw\:daisy-btn-outline {
+  color: var(--color-primary);
+}
+a.tw\:daisy-btn-primary.tw\:daisy-btn-outline:hover {
+  color: var(--color-primary-content);
+  text-decoration: none;
+}
+.tw\:daisy-menu {
+  --daisy-menu-active-fg: currentColor;
+  --daisy-menu-active-bg: var(--bg-transparent);
+}
+
+/*
+ * Don't add whitespace after the last line of text.
+ */
+div.mini > p:last-child {
+  margin-bottom: 0;
+}
+
+/*
+ * Make the 'edit this page' link look consistent
+ */
+
+/*
+ * Add Tailwindcss
+ */
+
+@layer components {
+  /* Applied styles for common HTML tags */
+  h1 {
+    @apply tw:text-5xl tw:pt-5 tw:pb-4 tw:font-light tw:tracking-tight tw:lg:text-6xl;
+  }
+  h2 {
+    @apply tw:text-3xl tw:pt-4 tw:pb-3 tw:font-black tw:m-0 tw:tracking-tight tw:lg:text-4xl;
+  }
+  h3 {
+    @apply tw:text-2xl tw:pt-3 tw:pb-2 tw:font-extrabold tw:tracking-tight tw:m-0 tw:lg:text-3xl;
+  }
+  h4 {
+    @apply tw:text-xl tw:pt-2 tw:pb-1 tw:font-bold tw:m-0 tw:tracking-tight tw:lg:text-2xl;
+  }
+  h5 {
+    @apply tw:text-lg tw:py-1 tw:font-semibold tw:m-0 tw:tracking-tight tw:lg:text-xl;
+  }
+  h6 {
+    @apply tw:text-base tw:py-1 tw:font-medium tw:italic tw:m-0 tw:tracking-tight tw:lg:text-lg;
+  }
+}
+nav.navbar {
+  background-color: var(--ifm-background-surface-color);
+}
+.navbar__logo img {
+  height: 100%;
+}
+
+.navbar__logo img {
+  height: 100%;
+}
+
+/*
+ * People want the 'account' link in the navbar to show the username
+ * when people are logged in. I probably should have said No instead.
+ */
+@media only screen and (max-width: 996px) {
+  div.navbar__inner > div.navbar__items a.custom-navbar-item {
+    display: none;
+  }
+  div.navbar-sidebar ul.menu__list {
+    display: flex;
+    flex-direction: column;
+    align-items: start;
+    width: 100%;
+  }
+  div.navbar-sidebar ul.menu__list a.custom-navbar-item {
+    width: 100%;
+    justify-content: start;
+  }
+}
+
+/*
+ * Styles for embedding docs in iframes
+ */
+html[data-fs-embed='true'] .navbar,
+html[data-fs-embed='true'] nav,
+html[data-fs-embed='true'] aside,
+html[data-fs-embed='true'] footer {
+  display: none;
+}
+
+/*
+ * Add Example code highlight/strikeout
+ */
+.fs-code-block-highlight-line {
+  background-color: #00ff0020;
+  display: block;
+  margin: 0 calc(-1 * var(--ifm-pre-padding));
+  padding: 0 var(--ifm-pre-padding);
+  border-left: 3px solid #00ff0080;
+}
+.fs-code-block-strikeout-line {
+  background-color: #ff000020;
+  display: block;
+  margin: 0 calc(-1 * var(--ifm-pre-padding));
+  padding: 0 var(--ifm-pre-padding);
+  border-left: 3px solid #ff000080;
+  text-decoration: line-through;
+}

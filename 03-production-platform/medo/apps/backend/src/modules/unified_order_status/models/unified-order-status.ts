@@ -1,0 +1,47 @@
+import { model } from "@medusajs/framework/utils"
+
+/**
+ * #342 Chunk 9b (PR-F) — 1:1 sidecar row holding a unified order's
+ * partner-facing work-progress status, promoted OFF `order.metadata.partner_status`.
+ *
+ * Why a separate table (not the order's metadata)
+ *   `partner_status` is load-bearing, mutated state that the partner panels read.
+ *   Medusa's `updateOrders` REPLACES the whole metadata blob, so two concurrent
+ *   mirrors racing a read-then-merge could lose an update — a hazard the now-
+ *   retired PR-D `withUnifiedOrderMetadataLock` used to guard. A typed 1:1 column
+ *   is a single-column write — no read-modify-write — so once reads + writes
+ *   moved entirely onto it (PR-G/PR-H) the lock was deleted. See
+ *   feedback_no_critical_data_in_metadata.
+ *
+ * Row presence = "this order has reached a partner-tracked state". The order↔
+ * unified_order_status link (src/links/order-unified-status.ts) is the 1:1
+ * pointer; `partner_status` is the shared §5 vocabulary the T3 panels key on.
+ */
+const UnifiedOrderStatus = model.define("unified_order_status", {
+  id: model.id({ prefix: "uos" }).primaryKey(),
+  partner_status: model.enum([
+    "assigned",
+    "accepted",
+    "in_progress",
+    "finished",
+    "partial",
+    "completed",
+    "declined",
+    /**
+     * An admin cancelled every run behind this order.
+     *
+     * Distinct from `declined`, which is a PARTNER refusing the work. Both end
+     * the job; only one of them is the partner's doing, and a partner panel
+     * that showed "declined" for an admin cancel would be accusing them of
+     * something they did not do.
+     *
+     * 🔑 Added because its absence was read as "no value to write". The mirror
+     * only writes truthy values, so an admin cancel left `partner_status` at
+     * whatever it last was — `accepted`, `in_progress`, `finished` — and the
+     * order went on rendering as live work. #1574
+     */
+    "cancelled",
+  ]),
+})
+
+export default UnifiedOrderStatus

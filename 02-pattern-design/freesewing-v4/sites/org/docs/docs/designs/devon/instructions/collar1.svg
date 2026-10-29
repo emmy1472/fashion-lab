@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="128.78612mm"
+   height="25.221443mm"
+   viewBox="0 0 128.78612 25.221443"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4 (86a8ad7, 2024-10-11)"
+   sodipodi:docname="collar1.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     inkscape:zoom="0.73512619"
+     inkscape:cx="-64.614757"
+     inkscape:cy="200.64583"
+     inkscape:window-width="2560"
+     inkscape:window-height="1369"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs1">
+    <marker
+       style="overflow:visible"
+       id="marker5"
+       refX="0"
+       refY="0"
+       orient="auto-start-reverse"
+       inkscape:stockid="Legs"
+       markerWidth="1"
+       markerHeight="1"
+       viewBox="0 0 1 1"
+       inkscape:isstock="true"
+       inkscape:collect="always"
+       preserveAspectRatio="xMidYMid">
+      <g
+         transform="scale(-0.7)"
+         id="g5">
+        <g
+           transform="matrix(0,-1,-1,0,20.70862,21.31391)"
+           id="g3">
+          <path
+             style="fill:none;fill-opacity:0.75;fill-rule:evenodd;stroke:context-stroke;stroke-width:1pt"
+             d="m 21.22125,20.67536 c -6.910151,4.721157 -2.454525,6.606844 -5.841071,13.443235"
+             id="path2" />
+          <path
+             style="fill:none;fill-opacity:0.75;fill-rule:evenodd;stroke:context-stroke;stroke-width:1pt"
+             d="m 21.39811,20.54812 c -1.360509,8.347524 3.536072,8.76994 4.505041,13.824958"
+             id="path3" />
+        </g>
+        <path
+           style="fill:context-stroke;fill-rule:evenodd;stroke-width:1pt"
+           d="m -14.09007,-6.7318716 -0.922168,4.043383 3.962751,-1.22307 z"
+           id="path4" />
+        <path
+           style="fill:context-stroke;fill-rule:evenodd;stroke-width:1pt"
+           d="m -15.215679,4.5567534 1.874127,3.699613 2.266874,-3.472855 z"
+           id="path5" />
+      </g>
+    </marker>
+    <marker
+       style="overflow:visible"
+       id="Legs"
+       refX="0"
+       refY="0"
+       orient="auto-start-reverse"
+       inkscape:stockid="Legs"
+       markerWidth="1"
+       markerHeight="1"
+       viewBox="0 0 1 1"
+       inkscape:isstock="true"
+       inkscape:collect="always"
+       preserveAspectRatio="xMidYMid">
+      <g
+         transform="scale(-0.7)"
+         id="g41">
+        <g
+           transform="matrix(0,-1,-1,0,20.70862,21.31391)"
+           id="g39">
+          <path
+             style="fill:none;fill-opacity:0.75;fill-rule:evenodd;stroke:context-stroke;stroke-width:1pt"
+             d="m 21.22125,20.67536 c -6.910151,4.721157 -2.454525,6.606844 -5.841071,13.443235"
+             id="path38" />
+          <path
+             style="fill:none;fill-opacity:0.75;fill-rule:evenodd;stroke:context-stroke;stroke-width:1pt"
+             d="m 21.39811,20.54812 c -1.360509,8.347524 3.536072,8.76994 4.505041,13.824958"
+             id="path39" />
+        </g>
+        <path
+           style="fill:context-stroke;fill-rule:evenodd;stroke-width:1pt"
+           d="m -14.09007,-6.7318716 -0.922168,4.043383 3.962751,-1.22307 z"
+           id="path40" />
+        <path
+           style="fill:context-stroke;fill-rule:evenodd;stroke-width:1pt"
+           d="m -15.215679,4.5567534 1.874127,3.699613 2.266874,-3.472855 z"
+           id="path41" />
+      </g>
+    </marker>
+    <pattern
+       inkscape:collect="always"
+       xlink:href="#pattern24"
+       preserveAspectRatio="xMidYMid"
+       id="pattern1"
+       patternTransform="matrix(0.3,0,0,0.3,2449.6626,1438.5313)"
+       x="0"
+       y="0" />
+    <pattern
+       patternUnits="userSpaceOnUse"
+       width="410.18935"
+       height="382.93905"
+       patternTransform="translate(2449.6626,1438.5313)"
+       preserveAspectRatio="xMidYMid"
+       id="pattern24"
+       inkscape:label="pattern24">
+      <rect
+         style="fill:#09275d;fill-opacity:1;stroke:none;stroke-width:1e-08;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:0.0340157;filter:url(#filter24)"
+         id="rect19"
+         width="108.52927"
+         height="101.31929"
+         x="648.13989"
+         y="380.61142"
+         transform="matrix(3.7795276,0,0,3.7795276,-2449.6626,-1438.5313)" />
+    </pattern>
+    <filter
+       inkscape:label="Film Grain"
+       inkscape:menu="Image Effects"
+       inkscape:menu-tooltip="Adds a small scale graininess"
+       style="color-interpolation-filters:sRGB"
+       id="filter24"
+       x="0"
+       y="0"
+       width="1"
+       height="1">
+      <feTurbulence
+         type="fractalNoise"
+         numOctaves="3"
+         baseFrequency="1"
+         seed="0"
+         result="result0"
+         id="feTurbulence23" />
+      <feColorMatrix
+         result="result4"
+         values="0"
+         type="saturate"
+         id="feColorMatrix23" />
+      <feComposite
+         in="SourceGraphic"
+         in2="result4"
+         operator="arithmetic"
+         k1="1.25"
+         k2="0.5"
+         k3="0.5"
+         result="result2"
+         id="feComposite23"
+         k4="0" />
+      <feBlend
+         result="result5"
+         mode="normal"
+         in="result2"
+         in2="SourceGraphic"
+         id="feBlend23" />
+      <feComposite
+         in="result5"
+         in2="SourceGraphic"
+         operator="in"
+         result="result3"
+         id="feComposite24" />
+    </filter>
+  </defs>
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1"
+     transform="translate(-46.28525,-48.584428)">
+    <g
+       id="fs-stack-devon.upperCollar"
+       transform="matrix(0.24501215,0,0,0.24501215,110.89106,55.002412)"
+       style="fill:url(#pattern1);fill-opacity:1">
+      <!-- Start of group #fs-stack-devon.upperCollar-part-devon.upperCollar -->
+      <g
+         id="fs-stack-devon.upperCollar-part-devon.upperCollar"
+         style="fill:url(#pattern1);fill-opacity:1">
+        <path
+           class="fabric"
+           id="fs-18"
+           d="m 171.03018,76.445006 c 26.13,0 52.26,-7.49 52.26,-7.49 l 22.47,-65.1699999 c 0,0 -126.98,-3.75000003 -245.67845258,-3.76565714 C -118.61673,0.00369185 -245.59673,3.7536918 -245.59673,3.7536918 l 22.47,65.1700002 c 0,0 26.13,7.49 52.26,7.49 26.12,0 52.25,-3.74 170.94845742,-3.724343 C 118.78018,72.705006 144.91018,76.445006 171.03018,76.445006 Z"
+           style="fill:url(#pattern1);fill-opacity:1;stroke:#212121;stroke-width:0.6;stroke-linecap:round;stroke-linejoin:round;stroke-opacity:1"
+           sodipodi:nodetypes="scccccscs" />
+      </g>
+      <!-- end of group #fs-stack-devon.upperCollar-part-devon.upperCollar -->
+    </g>
+    <g
+       id="fs-stack-devon.upperCollar-5"
+       transform="matrix(-0.57017523,0,0,0.57017523,30.689408,82.597545)">
+      <!-- Start of group #fs-stack-devon.upperCollar-part-devon.upperCollar -->
+      <g
+         id="fs-stack-devon.upperCollar-part-devon.upperCollar-1" />
+      <!-- end of group #fs-stack-devon.upperCollar-part-devon.upperCollar -->
+    </g>
+    <g
+       id="g2"
+       transform="matrix(0.2123566,0,0,0.2123566,112.70372,56.743032)"
+       style="fill:none;fill-opacity:1;stroke:#d3ab1d;stroke-width:3.22554;stroke-dasharray:12.191, 8.12731;stroke-dashoffset:0.696716;stroke-opacity:1">
+      <!-- Start of group #fs-stack-devon.upperCollar-part-devon.upperCollar -->
+      <g
+         id="g1"
+         style="fill:none;fill-opacity:1;stroke:#d3ab1d;stroke-width:3.22554;stroke-dasharray:12.191, 8.12731;stroke-dashoffset:0.696716;stroke-opacity:1">
+        <path
+           class="fabric"
+           id="path1"
+           d="m -285.18662,-2.6836878 24.46559,69.5474188 c 0,0 40.26766,11.370727 89.8543,6.460019 25.99285,-2.574147 50.70503,-3.22501 169.4034863,-3.209353 118.6984537,0.01566 142.9728637,2.056367 173.3100837,4.546442 40.11187,3.292377 73.07294,-7.765794 73.07294,-7.765794 l 24.01497,-69.4830448"
+           style="fill:none;fill-opacity:1;stroke:#d3ab1d;stroke-width:3.22554;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:12.191, 8.12731;stroke-dashoffset:0.696716;stroke-opacity:1;marker-start:url(#Legs);marker-end:url(#marker5)"
+           sodipodi:nodetypes="ccscscc" />
+      </g>
+      <!-- end of group #fs-stack-devon.upperCollar-part-devon.upperCollar -->
+    </g>
+  </g>
+</svg>

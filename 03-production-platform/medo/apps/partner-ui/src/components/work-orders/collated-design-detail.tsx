@@ -1,0 +1,278 @@
+import { ArrowUpRightOnBox } from "@medusajs/icons"
+import { Badge, Button, Container, Heading, StatusBadge, Text } from "@medusajs/ui"
+import { Link } from "react-router-dom"
+import { useTranslation } from "react-i18next"
+
+import { SectionRow } from "../common/section"
+import { useDate } from "../../hooks/use-date"
+import { getStatusBadgeColor } from "../../lib/status-badge"
+import { usePartnerConsumptionLogs } from "../../hooks/api/partner-consumption-logs"
+import { usePartnerDesign } from "../../hooks/api/partner-designs"
+import { usePartnerProductionRun } from "../../hooks/api/partner-production-runs"
+import { DesignCostSection } from "../../routes/designs/design-detail/components/design-cost-section"
+import { DesignInventoryBomSection } from "../../routes/designs/design-detail/components/design-inventory-bom-section"
+import { DesignMediaSection } from "../../routes/designs/design-detail/components/design-media-section"
+import { DesignSizeSetsSection } from "../../routes/designs/design-detail/components/design-size-sets-section"
+import { DesignSectionsSkeleton } from "./design-sections-skeleton"
+import { ProductionRunCard } from "./production-run-card"
+
+/**
+ * #826 — the per-design pieces of a COLLATED design work-order, shared by the
+ * three collated-order layouts (expandable / stacked / focus). Each design line
+ * carries its own run + design ids on `line.metadata`; the specs + full
+ * production lifecycle (runs, tasks) render INLINE in the order span so the
+ * partner never leaves the order to drive a design.
+ */
+
+export type CollatedLine = Record<string, any>
+
+/** Resolve a line's run + design (light — for headers/rows that show status). */
+export const useDesignLineRun = (line: CollatedLine) => {
+  const runId = line?.metadata?.production_run_id as string | undefined
+  const designId = line?.metadata?.design_id as string | undefined
+  const { production_run, isLoading } = usePartnerProductionRun(runId ?? "", {
+    enabled: !!runId,
+  })
+  return { runId, designId, production_run, isLoading }
+}
+
+/** The partner-facing status of a run, from its status + lifecycle timestamps. */
+export const runPartnerBadge = (
+  run: any
+): { label: string; color: "green" | "orange" | "red" | "blue" | "grey" } => {
+  const s = String(run?.status || "")
+  if (s === "completed") return { label: "Completed", color: "green" }
+  if (s === "cancelled") return { label: "Cancelled", color: "red" }
+  if (s === "in_progress") {
+    if (run?.finished_at) return { label: "Finished", color: "orange" }
+    if (run?.started_at) return { label: "In progress", color: "orange" }
+    if (run?.accepted_at) return { label: "Accepted", color: "blue" }
+    return { label: "In progress", color: "orange" }
+  }
+  if (s === "sent_to_partner") return { label: "Assigned", color: "blue" }
+  return { label: s ? s.replace(/_/g, " ") : "Pending", color: "grey" }
+}
+
+/** Compact header bits (title + qty) shared by the layouts. */
+export const designLineTitle = (line: CollatedLine, design?: any): string =>
+  String(design?.name || line?.title || line?.metadata?.design_id || line?.id)
+
+/**
+ * The design's specs, rendered as stacked Medusa Containers (general → BOM →
+ * cost), mirroring how the standalone design page and the single-design order
+ * surface a design — so "the design specs live under the order form".
+ */
+export const DesignSpecs = ({ design }: { design: any }) => {
+  const { t } = useTranslation()
+  const { getFullDate } = useDate()
+
+  const materials = Array.isArray(design?.inventory_items)
+    ? design.inventory_items.length
+    : 0
+  const cost = design?.estimated_cost
+  const costCurrency = design?.cost_currency
+
+  return (
+    <>
+      <Container className="divide-y p-0">
+        <div className="flex flex-col gap-y-3 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <Heading level="h2">{t("partner.workOrders.summary")}</Heading>
+          {/* Open the FULL design manager nested in this order (relative →
+              /orders/:id/design-details/:designId), keeping the partner in the
+              Orders context instead of jumping to /designs/:id. */}
+          <Button size="small" variant="secondary" asChild>
+            <Link to={`design-details/${design.id}`}>
+              {t("partner.workOrders.openDesignManager")}
+              <ArrowUpRightOnBox />
+            </Link>
+          </Button>
+        </div>
+
+        {design?.design_type && (
+          <SectionRow
+            title={t("partner.workOrders.type")}
+            value={
+              <Badge size="2xsmall" color="blue">
+                {String(design.design_type)}
+              </Badge>
+            }
+          />
+        )}
+        {design?.status && (
+          <SectionRow
+            title={t("partner.workOrders.designStatus")}
+            value={
+              <Badge size="2xsmall" color={getStatusBadgeColor(design.status)}>
+                {String(design.status)}
+              </Badge>
+            }
+          />
+        )}
+        {design?.priority && (
+          <SectionRow
+            title={t("partner.workOrders.priority")}
+            value={
+              <Badge
+                size="2xsmall"
+                color={
+                  design.priority === "urgent"
+                    ? "red"
+                    : design.priority === "high"
+                    ? "orange"
+                    : design.priority === "medium"
+                    ? "blue"
+                    : "grey"
+                }
+              >
+                {String(design.priority)}
+              </Badge>
+            }
+          />
+        )}
+        {design?.target_completion_date && (
+          <SectionRow
+            title={t("partner.workOrders.targetDate")}
+            value={getFullDate({ date: design.target_completion_date })}
+          />
+        )}
+        {cost != null && (
+          <SectionRow
+            title={t("partner.workOrders.estimatedCost")}
+            value={
+              <Text size="small" weight="plus">
+                {costCurrency
+                  ? `${String(costCurrency).toUpperCase()} ${cost}`
+                  : String(cost)}
+              </Text>
+            }
+          />
+        )}
+        <SectionRow
+          title={t("partner.workOrders.materials")}
+          value={String(materials)}
+        />
+        {design?.description && (
+          <div className="px-6 py-4">
+            <Text size="small" className="text-ui-fg-subtle whitespace-pre-line">
+              {String(design.description)}
+            </Text>
+          </div>
+        )}
+      </Container>
+
+      {/* The design's pictures, in the order. A partner working a collated
+          order sees what they're making without opening the design manager;
+          the links point at the design's own media routes, nested under this
+          order, so "Manage" stays in the Orders context. */}
+      <DesignMediaSection
+        design={design}
+        linkBase={`design-details/${design.id}`}
+      />
+
+      {/* Sizes (size_sets or legacy custom_sizes) + full BOM. The design
+          "specs" the operator asked to keep under the order form. */}
+      <DesignSizeSetsSection design={design} />
+      <DesignInventoryBomSection design={design} />
+      {/* Cost estimate only matters for partner-owned designs — hide it for
+          JYT-owned work-orders (#5). */}
+      {!!design?.is_owner && <DesignCostSection design={design} />}
+    </>
+  )
+}
+
+/**
+ * Graceful fallback when a design can't be loaded for this partner (missing
+ * design↔partner link — e.g. an order produced before the link fix). Shows the
+ * run status we do have plus a clear next step, instead of a forever skeleton.
+ */
+const DesignLineUnavailable = ({
+  line,
+  run,
+}: {
+  line: CollatedLine
+  run?: any
+}) => {
+  const title = designLineTitle(line, run)
+  const badge = run ? runPartnerBadge(run) : null
+  return (
+    <Container className="divide-y p-0">
+      <div className="flex flex-wrap items-center gap-2 px-6 py-4">
+        <Heading level="h2" className="truncate">
+          {title}
+        </Heading>
+        {badge && (
+          <StatusBadge color={badge.color}>{badge.label}</StatusBadge>
+        )}
+      </div>
+      <div className="px-6 py-4">
+        <Text size="small" className="text-ui-fg-subtle">
+          Design details aren't available for your account yet. Ask the admin to
+          (re)assign this design to you, then reopen the order.
+        </Text>
+      </div>
+    </Container>
+  )
+}
+
+/**
+ * The full inline detail for ONE design of a collated order: its specs stacked
+ * above its production run card (lifecycle + tasks). Fetches the run, design and
+ * consumption logs off the line metadata.
+ */
+export const DesignLineDetail = ({
+  line,
+  onActionSuccess,
+}: {
+  line: CollatedLine
+  onActionSuccess?: () => void
+}) => {
+  const runId = line?.metadata?.production_run_id as string | undefined
+  const designId = line?.metadata?.design_id as string | undefined
+
+  const { production_run, isError: runError } = usePartnerProductionRun(
+    runId ?? "",
+    { enabled: !!runId }
+  )
+  const {
+    design,
+    isError: designError,
+    isPending: designPending,
+  } = usePartnerDesign(designId ?? "", { enabled: !!designId })
+  const { logs = [], count = 0 } = usePartnerConsumptionLogs(
+    designId ?? "",
+    undefined,
+    { enabled: !!designId }
+  )
+
+  if (!runId || !designId) {
+    return null
+  }
+
+  // #826 — a design that 404s for this partner (no design↔partner link — e.g. an
+  // order produced before the link fix) must NOT hang on a skeleton. Show a
+  // graceful "unavailable" card with whatever run status we do have.
+  if (designError || runError || (!design && !designPending && !!designId)) {
+    return (
+      <DesignLineUnavailable line={line} run={production_run} />
+    )
+  }
+
+  if (!production_run || !design) {
+    return <DesignSectionsSkeleton />
+  }
+
+  return (
+    <div className="flex flex-col gap-y-3">
+      <DesignSpecs design={design} />
+      <ProductionRunCard
+        run={production_run}
+        design={design}
+        consumptionLogs={logs}
+        consumptionCount={count}
+        onActionSuccess={onActionSuccess}
+        showTimeline={false}
+        taskLinkBase="tasks"
+      />
+    </div>
+  )
+}

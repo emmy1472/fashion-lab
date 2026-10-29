@@ -1,0 +1,52 @@
+import { z } from "@medusajs/framework/zod";
+
+const inventoryLinkItemSchema = z.object({
+  inventoryId: z.string(),
+  // Metres of cloth are fractional (2.7 m of leftover after a robe is cut);
+  // the link column is decimal. `.int()` here refused real allocations.
+  plannedQuantity: z.number().nonnegative().optional(),
+  // Nullable, matching the PATCH schema: the link UI captures where a material
+  // is stocked and sends an explicit null when that is not unambiguous, which
+  // `.optional()` alone would reject.
+  locationId: z.string().nullable().optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+})
+
+export const AdminPostDesignInventoryReq = z
+  .object({
+    inventoryIds: z.array(z.string()).optional(),
+    inventoryItems: z.array(inventoryLinkItemSchema).optional(),
+  })
+  .refine(
+    (body) => {
+      return (
+        (body.inventoryIds && body.inventoryIds.length > 0) ||
+        (body.inventoryItems && body.inventoryItems.length > 0)
+      )
+    },
+    { message: "Provide at least one inventory id or inventory item payload." }
+  )
+
+export type AdminPostDesignInventoryReq = z.infer<typeof AdminPostDesignInventoryReq>
+
+export const AdminDeleteDesignInventoryReq = z.object({
+  inventoryIds: z.array(z.string()),
+})
+
+export type AdminDeleteDesignInventoryReq = z.infer<typeof AdminDeleteDesignInventoryReq>
+
+export const AdminPatchDesignInventoryLinkReq = z
+  .object({
+    plannedQuantity: z.number().nonnegative().nullable().optional(),
+    locationId: z.string().nullable().optional(),
+    metadata: z.record(z.string(), z.any()).nullable().optional(),
+  })
+  .refine(
+    (body) =>
+      body.plannedQuantity !== undefined ||
+      body.locationId !== undefined ||
+      body.metadata !== undefined,
+    { message: "Provide at least one field to update." }
+  )
+
+export type AdminPatchDesignInventoryLinkReq = z.infer<typeof AdminPatchDesignInventoryLinkReq>

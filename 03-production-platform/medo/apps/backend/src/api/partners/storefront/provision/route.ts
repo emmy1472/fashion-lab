@@ -1,0 +1,257 @@
+import {
+  AuthenticatedMedusaRequest,
+  MedusaResponse,
+} from "@medusajs/framework/http"
+import { ContainerRegistrationKeys, MedusaError } from "@medusajs/framework/utils"
+import { getPartnerFromAuthContext } from "../../helpers"
+import { provisionStorefrontWorkflow } from "../../../../workflows/stores/provision-storefront"
+import { resolveHostingProviderForPartner } from "../../../../modules/deployment/providers/resolve-partner-provider"
+import updatePartnerWorkflow from "../../../../workflows/partners/update-partner"
+
+const ROOT_DOMAIN = process.env.ROOT_DOMAIN || "cicilabel.com"
+const STOREFRONT_REPO_ENV = process.env.VERCEL_STOREFRONT_REPO || ""
+const STOREFRONT_ROOT_DIR_ENV = process.env.VERCEL_STOREFRONT_ROOT_DIR || ""
+const STOREFRONT_BRANCH_ENV = process.env.VERCEL_STOREFRONT_BRANCH || "main"
+const MEDUSA_BACKEND_URL =
+  process.env.MEDUSA_BACKEND_URL || "http://localhost:9000"
+const STRIPE_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_STRIPE_KEY || ""
+
+// S3 image hostname/pathname — passed to storefront for Next.js image optimization
+function getS3ImageConfig(): { hostname: string; pathname: string } {
+  // Derive from S3_FILE_URL (e.g. "https://automatic.jaalyantra.com/") and S3_PREFIX (e.g. "automatica/")
+  const fileUrl = process.env.S3_FILE_URL || ""
+  const prefix = process.env.S3_PREFIX || ""
+
+  let hostname = process.env.MEDUSA_CLOUD_S3_HOSTNAME || ""
+  let pathname = process.env.MEDUSA_CLOUD_S3_PATHNAME || ""
+
+  // Auto-derive from S3_FILE_URL if not explicitly set
+  if (!hostname && fileUrl) {
+    try {
+      hostname = new URL(fileUrl).hostname
+    } catch {
+      // ignore
+    }
+  }
+
+  // Auto-derive pathname from S3_PREFIX
+  if (!pathname && prefix) {
+    pathname = `/${prefix.replace(/^\//, "")}**`
+  }
+
+  return { hostname, pathname }
+}
+
+export const POST = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const partner = await getPartnerFromAuthContext(req.auth_context, req.scope)
+  if (!partner) {
+    throw new MedusaError(
+      MedusaError.Types.UNAUTHORIZED,
+      "No partner associated with this account"
+    )
+  }
+
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+
+  // Fetch partner with stores
+  const { data: partners } = await query.graph({
+    entity: "partners",
+    fields: ["*", "stores.*"],
+    filters: { id: partner.id },
+  })
+
+  const partnerData = partners?.[0] as any
+  const stores = partnerData?.stores || []
+
+  if (!stores.length) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      "You have no store. Create a store first."
+    )
+  }
+
+  const store = stores[0]
+  const salesChannelId = store.default_sales_channel_id
+
+  if (!salesChannelId) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      "Store has no default sales channel"
+    )
+  }
+
+  // Check if already provisioned — verify the project actually exists on the
+  // partner's current hosting provider (provider-agnostic; #884 S3).
+  const existingProjectRef =
+    partnerData.deployment_project_id ||
+    partnerData.deployment_project_name ||
+    partnerData.vercel_project_id ||
+    partnerData.metadata?.vercel_project_id
+  if (existingProjectRef) {
+    let projectExists = false
+    try {
+      const { provider, projectRef } = await resolveHostingProviderForPartner(
+        partnerData,
+        req.scope
+      )
+      if (projectRef) {
+        await provider.getProject(projectRef)
+        projectExists = true
+      }
+    } catch {
+      // Project doesn't exist on the provider (404) or creds missing —
+      // clear stale refs and allow re-provisioning.
+      projectExists = false
+    }
+
+    if (projectExists) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Storefront already provisioned. Use redeploy to update."
+      )
+    }
+
+    // Stale partner refs — clean up table columns and legacy metadata before re-provisioning
+    const currentMeta = (partnerData.metadata || {}) as Record<string, any>
+    const cleanMeta: Record<string, any> = {}
+    for (const [k, v] of Object.entries(currentMeta)) {
+      if (!["vercel_project_id", "vercel_project_name", "storefront_domain", "storefront_provisioned_at"].includes(k)) {
+        cleanMeta[k] = v
+      }
+    }
+    await updatePartnerWorkflow(req.scope).run({
+      input: {
+        id: partner.id,
+        data: {
+          hosting_provider: null,
+          deployment_account_id: null,
+          deployment_project_id: null,
+          deployment_project_name: null,
+          vercel_project_id: null,
+          vercel_project_name: null,
+          vercel_last_deployment_id: null,
+          vercel_linked: false,
+          metadata: Object.keys(cleanMeta).length > 0 ? cleanMeta : null,
+        },
+      },
+    })
+    partnerData.metadata = cleanMeta
+    partnerData.deployment_project_id = null
+    partnerData.deployment_project_name = null
+    partnerData.vercel_project_id = null
+    partnerData.vercel_project_name = null
+  }
+
+  // Find publishable API key linked to this sales channel
+  const { data: apiKeys } = await query.graph({
+    entity: "api_keys",
+    fields: ["*", "sales_channels.*"],
+    filters: { type: "publishable" },
+  })
+
+  const matchingKey = (apiKeys || []).find((key: any) => {
+    const keySalesChannels = key.sales_channels || []
+    return keySalesChannels.some((sc: any) => sc.id === salesChannelId)
+  })
+
+  if (!matchingKey) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      "No publishable API key found for your sales channel"
+    )
+  }
+
+  const rawHandle =
+    partnerData.handle ||
+    partnerData.name.toLowerCase().replace(/[^a-z0-9-]/g, "-")
+  const handle = rawHandle
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "")
+
+  const s3Config = getS3ImageConfig()
+
+  // Dev bypass: skip Vercel/hosting provider — just set storefront_domain so
+  // the partner UI can create websites and edit content locally.
+  const STOREFRONT_LOCAL_URL =
+    process.env.STOREFRONT_LOCAL_URL || "http://localhost:8000"
+
+  if (process.env.NODE_ENV !== "production") {
+    const localDomain = new URL(STOREFRONT_LOCAL_URL).hostname
+
+    // Check if already provisioned in dev
+    if (partnerData.storefront_domain || partnerData.metadata?.storefront_domain) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Storefront already provisioned (dev mode). Remove it first to re-provision."
+      )
+    }
+
+    await updatePartnerWorkflow(req.scope).run({
+      input: {
+        id: partner.id,
+        data: {
+          storefront_domain: localDomain,
+          metadata: {
+            ...(partnerData.metadata || {}),
+            storefront_provisioned_at: new Date().toISOString(),
+          },
+        },
+      },
+    })
+
+    return res.status(201).json({
+      message: "Storefront provisioned (dev mode — no hosting provider)",
+      storefront_url: STOREFRONT_LOCAL_URL,
+      domain: localDomain,
+    })
+  }
+
+  // Partner-level overrides take precedence over env fallbacks so each
+  // partner can BYO repo/branch/root later without code changes.
+  const storefrontRepo = partnerData.storefront_repo || STOREFRONT_REPO_ENV
+  const storefrontRootDir =
+    partnerData.storefront_root_dir || STOREFRONT_ROOT_DIR_ENV || undefined
+  const storefrontBranch =
+    partnerData.storefront_branch || STOREFRONT_BRANCH_ENV
+
+  if (!storefrontRepo) {
+    throw new MedusaError(
+      MedusaError.Types.INVALID_DATA,
+      "No storefront repo configured (partner.storefront_repo or VERCEL_STOREFRONT_REPO)"
+    )
+  }
+
+  const { result } = await provisionStorefrontWorkflow(req.scope).run({
+    input: {
+      partner_id: partner.id,
+      partner_name: partnerData.name || handle,
+      handle,
+      publishable_key: matchingKey.token,
+      root_domain: ROOT_DOMAIN,
+      storefront_repo: storefrontRepo,
+      storefront_root_dir: storefrontRootDir,
+      storefront_branch: storefrontBranch,
+      medusa_backend_url: MEDUSA_BACKEND_URL,
+      stripe_publishable_key: STRIPE_PUBLISHABLE_KEY,
+      s3_hostname: s3Config.hostname,
+      s3_pathname: s3Config.pathname,
+      // Partner-pinned provider wins; else the workflow rotates from the default
+      // (DEFAULT_HOSTING_PROVIDER env, or Cloudflare Pages).
+      preferred_provider: partnerData.hosting_provider || undefined,
+    },
+  })
+
+  // Log the full result for debugging
+  console.log("[provision-storefront] Full result:", JSON.stringify(result, null, 2))
+
+  res.status(201).json({
+    message: "Storefront provisioned successfully",
+    ...result,
+    storefront_url: `https://${handle}.${ROOT_DOMAIN}`,
+  })
+}

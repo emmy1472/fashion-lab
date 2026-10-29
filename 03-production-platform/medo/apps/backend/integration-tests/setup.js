@@ -1,0 +1,192 @@
+// Short lifecycle workflow timeouts for tests so async steps fail fast
+process.env.PRODUCTION_RUN_AWAIT_TIMEOUT_SECONDS = "5"
+// Disable Mastra AI connections in tests — not being tested
+process.env.MASTRA_DISABLED = "true"
+// Suppress noisy logs during tests (migrations, index engine, S3, etc.)
+process.env.LOG_LEVEL = "error"
+// WhatsApp webhook verification. Both whatsapp specs fall back to this literal
+// when the env var is unset, but nothing ever defined it: the service resolved
+// an empty verify token, matched nothing, and the webhook answered 403. Set it
+// here, before the app boots, so the fallback the specs assume is real.
+process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN =
+  process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "jyt_whatsapp_test_verify"
+
+// Bring the CRM up in EMBEDDED mode so its routes are testable (#1551/#1552).
+//
+// Without one of CRM_NODE_URL / CRM_HYPERBEE the loader logs "[crm] disabled"
+// and registers nothing, so every CRM route answers 500 — which is why the CRM
+// had no integration coverage at all. The loader is deliberately non-fatal, so
+// this cannot break boot: the worst case is the module stays offline and the
+// CRM specs fail loudly, which is the correct outcome rather than a silent skip.
+//
+// ⚠️ The store is IN MEMORY, one per worker process (#1648). It is not Postgres:
+// the runner restores a DB snapshot before every test and does NOT reset this, so
+// CRM rows still ACCUMULATE across the tests of one worker — a CRM spec must
+// assert on rows it created, never on a total count. They no longer accumulate
+// ACROSS workers, and nothing is written to disk.
+//
+// It used to be a directory, shared by every worker. The store is single-writer
+// and its lock is a file, so the moment a second CRM spec landed in a second
+// worker the loader failed with "File descriptor could not be locked" and every
+// /admin/crm/* route in that worker answered 500. corestore@7.11 has no RAM
+// storage (hypercore-storage is RocksDB-only), so ":memory:" is handled above
+// Corestore, at the BeeLike boundary — see src/modules/crm/dal/memory-bee.ts.
+process.env.CRM_HYPERBEE = process.env.CRM_HYPERBEE || "true"
+process.env.CRM_HYPERBEE_STORE = process.env.CRM_HYPERBEE_STORE || ":memory:"
+
+// Opt-in HTTP error tracing: `DEBUG_HTTP_ERRORS=1 pnpm test:integration:http:shared ...`
+//
+// An AxiosError prints its status and nothing else, so a spec that fails with
+// "Request failed with status code 400" tells you nothing about *why* — and the
+// body carrying the validator's complaint is discarded. This logs method, url
+// and response body for every failed request. Off by default; it is noisy.
+if (process.env.DEBUG_HTTP_ERRORS) {
+  const axios = require("axios")
+  const _create = axios.create.bind(axios)
+  const attach = (instance) => {
+    instance.interceptors.response.use(undefined, (err) => {
+      const res = err.response
+      if (res) {
+        const { method, url } = err.config || {}
+        console.error(
+          `[http-error] ${String(method).toUpperCase()} ${url} -> ${res.status} ${JSON.stringify(res.data)}`
+        )
+      }
+      return Promise.reject(err)
+    })
+    return instance
+  }
+  attach(axios)
+  axios.create = (...args) => attach(_create(...args))
+}
+
+// Silence console.log/warn noise from framework internals (Index engine, S3, Observability)
+const _origLog = console.log
+const _origWarn = console.warn
+const _origInfo = console.info
+const SUPPRESSED = [
+  "Index engine", "syncing entity", "S3Listing", "LocalFileService",
+  "Locking module", "Local Event Bus", "Observability configuration",
+  "[mastra:", "redisUrl not found", "IDX_user_email", "No link to load",
+  "Using flag MEDUSA_FF", "Migrations generated", "Pending migration",
+  "Running migration", "Migration scripts completed",
+]
+const shouldSuppress = (args) =>
+  args.some((a) => typeof a === "string" && SUPPRESSED.some((s) => a.includes(s)))
+
+console.log = (...args) => {
+  if (shouldSuppress(args)) return
+  // Also suppress winston JSON logs (they start with {"level":)
+  if (typeof args[0] === "string" && args[0].startsWith('{"level":')) {
+    try {
+      const parsed = JSON.parse(args[0])
+      if (parsed.level !== "error") return
+    } catch {}
+  }
+  _origLog.apply(console, args)
+}
+console.warn = (...args) => {
+  if (shouldSuppress(args)) return
+  _origWarn.apply(console, args)
+}
+console.info = (...args) => {
+  if (shouldSuppress(args)) return
+  _origInfo.apply(console, args)
+}
+
+// Replace waitWorkflowExecutions: wait briefly, then force-fail stuck async
+// steps so the workflow engine can reach a terminal state. Uses the Medusa
+// setStepFailure API per the docs for long-running workflow testing.
+try {
+  const { Modules, TransactionHandlerType } = require("@medusajs/framework/utils")
+  const { StepResponse } = require("@medusajs/framework/workflows-sdk")
+  const wweModule = require("@medusajs/test-utils/dist/medusa-test-runner-utils/wait-workflow-executions")
+
+  // Known async step IDs that may be stuck after tests
+  const ASYNC_STEPS = [
+    { workflowId: "run-production-run-lifecycle", stepId: "await-run-start" },
+    { workflowId: "run-production-run-lifecycle", stepId: "await-run-finish" },
+    { workflowId: "run-production-run-lifecycle", stepId: "await-run-complete" },
+    { workflowId: "dispatch-production-run", stepId: "wait-dispatch-template-selection" },
+  ]
+
+  wweModule.waitWorkflowExecutions = async function patchedWaitWorkflowExecutions(container) {
+    // Guard against null container — happens during teardown after a
+    // bootstrap failure (e.g. the tokenx ESM error blocks app start,
+    // then the test runner calls this hook with no container and the
+    // .resolve() crashes, masking the real error).
+    if (!container || typeof container.resolve !== "function") return
+    const wfe = container.resolve(Modules.WORKFLOW_ENGINE, { allowUnregistered: true })
+    if (!wfe) return
+
+    // Wait up to 8s for workflows to finish naturally
+    const deadline = Date.now() + 8000
+    while (Date.now() < deadline) {
+      const executions = await wfe.listWorkflowExecutions({
+        state: { $nin: ["not_started", "done", "reverted", "failed"] },
+      })
+      if (executions.length === 0) return
+      await new Promise((r) => setTimeout(r, 100))
+    }
+
+    // Force-fail stuck async steps
+    const stuck = await wfe.listWorkflowExecutions({
+      state: { $nin: ["not_started", "done", "reverted", "failed"] },
+    })
+
+    for (const exec of stuck) {
+      for (const { workflowId, stepId } of ASYNC_STEPS) {
+        if (exec.workflow_id !== workflowId) continue
+        try {
+          await wfe.setStepFailure({
+            idempotencyKey: {
+              action: TransactionHandlerType.INVOKE,
+              transactionId: exec.transaction_id,
+              stepId,
+              workflowId,
+            },
+            stepResponse: new StepResponse("Test cleanup"),
+            options: { throwOnError: false },
+          })
+        } catch {
+          // Step may not be the active one — skip
+        }
+      }
+    }
+
+    // Wait up to 5s for failed workflows to settle
+    const settleDeadline = Date.now() + 5000
+    while (Date.now() < settleDeadline) {
+      const remaining = await wfe.listWorkflowExecutions({
+        state: { $nin: ["not_started", "done", "reverted", "failed"] },
+      })
+      if (remaining.length === 0) return
+      await new Promise((r) => setTimeout(r, 100))
+    }
+  }
+} catch {
+  // Module not available — skip patch
+}
+
+const { MetadataStorage } = require("@mikro-orm/core")
+
+jest.mock(
+  "@sindresorhus/slugify",
+  () => {
+    return {
+      __esModule: true,
+      default: (str) => (str || "").toLowerCase().replace(/\s+/g, "-"),
+    }
+  },
+  { virtual: true },
+  
+)
+
+jest.mock("p-map", () => {
+    return {
+        __esModule: true,
+        default: async (iterable, mapper) => Promise.all(iterable.map(mapper)),
+    }
+}, { virtual: true })
+
+MetadataStorage.clear()

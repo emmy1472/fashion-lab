@@ -1,0 +1,562 @@
+name: Deploy to AWS ECS
+
+# Auto-deploys on push to main when backend code or AWS infra config changes.
+# Replaces the old Railway pipeline (deploy-to-railway.yml.disabled).
+#
+# Sequence per run:
+#   1. Build a Docker image ONCE, push to GHCR + ECR (sha-<hash>, +:latest on main)
+#   2. Run DB migrations as a gated one-off ECS task — auto-skipped when no
+#      schema/link/module/config paths changed (fails the deploy on error)
+#   3. `copilot svc deploy` for medusa-server + medusa-worker (parallel)
+#   4. Poll /health on the public ALB until green (or fail)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/backend/**'
+      - 'pnpm-lock.yaml'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - '.dockerignore'
+      - 'deploy/aws/**'
+      - '.github/workflows/deploy-to-aws.yml'
+  workflow_dispatch:
+    inputs:
+      deploy_services:
+        # When false (the default for dispatch), the workflow builds +
+        # mirrors the image only — copilot svc deploy is skipped. This
+        # is the safe path for branch dispatches: the sha-tagged image
+        # ends up in GHCR + ECR so run-backfill.sh can target it for a
+        # one-off task, but the live medusa-server / medusa-worker
+        # services keep running whatever :latest already pointed at.
+        #
+        # Push-to-main always deploys (the `if` on the deploy jobs
+        # below treats push events as deploy_services=true).
+        description: "Also deploy medusa-server + medusa-worker (push-to-main always does this)"
+        type: boolean
+        default: false
+      force_migrate:
+        # The migrate job normally auto-skips when a push touched no schema-
+        # affecting paths (migrations/links/modules/medusa-config). Set this to
+        # force the migration task to run regardless — e.g. to re-sync module
+        # links after a manual change, or when in doubt.
+        description: "Force the DB migration task to run even if no schema paths changed"
+        type: boolean
+        default: false
+
+# Serialize deploys on the same branch — but don't cancel a deploy
+# mid-flight; if you push twice in quick succession, the second waits.
+concurrency:
+  group: deploy-aws-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: jyt-medusa
+  GHCR_REGISTRY: ghcr.io
+  # GHCR_IMAGE is computed per-job (lowercase) — see the `image-vars` step
+  # in build-and-push. Docker rejects uppercase characters in image refs and
+  # ${{ github.repository }} preserves the org's case (Jaal-Yantra-Textiles).
+  # Same Node.js 24 opt-in as the old Railway pipeline used.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+permissions:
+  id-token: write   # AWS OIDC token request
+  contents: read
+  packages: write   # GHCR push
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1. Build the image ONCE and push it straight to BOTH GHCR and ECR in the
+  #    same buildx step. (Previously a separate "mirror-to-ECR" job re-pulled
+  #    the multi-GB image to the runner and re-pushed it — ~4 min of pure
+  #    overhead. buildx pushes to multiple registries from one build.)
+  #    The :latest tag (main only) is what the ECS task definitions reference;
+  #    sha-<hash> is the auditable, immutable tag used by run-migrations.sh /
+  #    run-backfill.sh. On branch dispatches only the sha tag is pushed — never
+  #    :latest — so ECS never silently pulls unmerged code.
+  # ─────────────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    outputs:
+      ghcr_image: ${{ steps.image-vars.outputs.ghcr_image }}
+      ecr_image: ${{ steps.image-vars.outputs.ecr_image }}
+      image_tag: ${{ steps.image-vars.outputs.image_tag }}
+      image_ref: ${{ steps.image-vars.outputs.ghcr_image }}:${{ steps.image-vars.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the cache-export decision below diffs against the
+          # pushed-from sha.
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/jyt-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image vars (lowercase)
+        id: image-vars
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          # GHCR + Docker require lowercase image names; the org is mixed case.
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          # Use the long commit SHA as the immutable tag; we never want :latest
+          # in a task definition because it would change under our feet.
+          {
+            echo "ghcr_image=ghcr.io/${REPO_LC}"
+            echo "ecr_image=${ECR_REGISTRY}/${ECR_REPOSITORY}"
+            echo "image_tag=sha-${{ github.sha }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # Both registries get the same tag rules. :latest is added only on the
+          # default branch (main); sha-<hash> is always added. So a branch
+          # dispatch pushes ONLY the sha tag to both registries — never :latest.
+          images: |
+            ${{ steps.image-vars.outputs.ghcr_image }}
+            ${{ steps.image-vars.outputs.ecr_image }}
+          # Priority forces the sha tag to be the primary one (metadata-action's
+          # default priorities are raw=200 > sha=100, which would otherwise make
+          # outputs.version="latest" on the default branch).
+          tags: |
+            type=sha,format=long,prefix=sha-,priority=1000
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Decide whether to re-export the build cache
+        id: cache-mode
+        run: |
+          set -euo pipefail
+          # A dispatch has no `before`, and a first/force push gives the zero
+          # sha — in both cases refresh the cache rather than guess.
+          BEFORE="${{ github.event.before }}"
+          REFRESH=1
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" || true)
+            # The inputs to the ONE layer that ever gets a cache hit
+            # (`pnpm fetch`), plus the Dockerfile itself, which invalidates
+            # everything below it.
+            if echo "$CHANGED" | grep -qE '^(pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc)$|^apps/backend/Dockerfile$'; then
+              echo "→ dependency graph or Dockerfile moved — refreshing the cache"
+            else
+              REFRESH=0
+              echo "→ source-only change — reusing the existing cache, not re-exporting it"
+            fi
+          else
+            echo "→ no usable base sha — refreshing the cache to be safe"
+          fi
+          if [ "$REFRESH" = "1" ]; then
+            echo "cache_to=type=gha,mode=max" >> "$GITHUB_OUTPUT"
+          else
+            echo "cache_to=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push (GHCR + ECR)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./apps/backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Baked into the Vite admin bundle at build time. Public URLs, not secrets.
+          build-args: |
+            MEDUSA_BACKEND_URL=${{ vars.MEDUSA_BACKEND_URL }}
+            VITE_MEDUSA_BACKEND_URL=${{ vars.MEDUSA_BACKEND_URL }}
+            VITE_MEDIA_GALLERY_BASE_URL=${{ vars.VITE_MEDIA_GALLERY_BASE_URL }}
+            VITE_STOREFRONT_URL=${{ vars.VITE_STOREFRONT_URL }}
+          cache-from: type=gha
+          # 🔴 Exported ONLY when the dependency graph moved. `mode=max` writes
+          # every intermediate builder layer to the GitHub Actions cache, and
+          # that export measured 240-376s on EVERY deploy — 4-6 minutes, a
+          # third of the whole build job, spent re-uploading layers that were
+          # byte-identical to the ones already there.
+          #
+          # 🔑 Only ONE layer is ever a cache HIT: `pnpm fetch`, which is keyed
+          # on the lockfile. The install / build / prod-deploy layers rebuild on
+          # every push by construction, because the layer above them is
+          # `COPY . .`. So re-exporting on a source-only push buys nothing and
+          # costs minutes. When the lockfile, the workspace or the Dockerfile
+          # DOES move, the export runs and refreshes the entry.
+          #
+          # GitHub evicts a cache entry after 7 days of no ACCESS, and
+          # `cache-from` above reads it on every run — so a long run of
+          # source-only pushes cannot age the entry out.
+          cache-to: ${{ steps.cache-mode.outputs.cache_to }}
+          # No provenance/SBOM attestation: it adds a second manifest and an
+          # extra export pass to both registries, and nothing consumes it.
+          provenance: false
+
+      - name: Build summary
+        run: |
+          {
+            echo "### Image"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Tags | \`${{ steps.meta.outputs.tags }}\` |"
+            echo "| SHA-tag | \`${{ steps.meta.outputs.version }}\` |"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.deploy_services }}" != "true" ]; then
+              echo ""
+              echo "**Build-only dispatch.** Live services were not redeployed."
+              echo ""
+              echo "To run a backfill against this image:"
+              echo ""
+              echo "\`\`\`bash"
+              echo "IMAGE_TAG=${{ steps.meta.outputs.version }} DRY_RUN=1 FOLLOW=1 \\"
+              echo "  ./deploy/aws/scripts/run-backfill.sh <script-name>"
+              echo "\`\`\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2. Run DB migrations as a gated one-off ECS task on the freshly-built
+  #    image, BEFORE rolling the services. The server/worker containers no
+  #    longer migrate on boot (see apps/backend/Dockerfile), so this step owns
+  #    the schema. A migration failure fails the deploy here — the old tasks
+  #    keep serving and the services are never rolled onto un-migrated schema.
+  #
+  #    Booting the framework for a one-off migration costs ~3 min, so we SKIP it
+  #    when the push touched no schema-affecting sources. "Schema-affecting"
+  #    means the narrow set that `medusa db:migrate --execute-all-links` acts on:
+  #      • any migration file            (/migrations/)            → pending DDL
+  #      • a DML model                   (src/modules/*/models/)   → schema source
+  #      • a module link                 (src/links/**)            → link tables
+  #      • module/link registration      (medusa-config[.prod].ts)
+  #      • an @medusajs/* lockfile bump   (framework migrations ship in the pkg)
+  #    A change to a module's service / subscriber / route / workflow / admin /
+  #    UI / email-template / script / test does NOT touch the schema and skips
+  #    the boot — jumping straight to the deploy jobs. Anything ambiguous (no
+  #    base sha, base not fetched, force_migrate) runs to be safe.
+  # ─────────────────────────────────────────────────────────────────────────
+  migrate:
+    name: Migrate DB
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    # Push to main, an explicit deploy_services dispatch — or force_migrate on
+    # its own.
+    #
+    # 🔴 That last clause is the fix for a recovery path that could not work.
+    # `force_migrate` is evaluated by the gate STEP inside this job, so with the
+    # job itself gated on `deploy_services` a dispatch of
+    # `force_migrate=true, deploy_services=false` (the default) skipped the whole
+    # job before the force was ever read — and the run still reported `success`.
+    # That is exactly what happened recovering the stranded S1 migration on
+    # 22 Aug: the dispatch was green, the Migrate DB job was SKIPPED, and prod
+    # kept 500ing on a column that did not exist.
+    if: >-
+      github.event_name == 'push'
+      || inputs.deploy_services == true
+      || inputs.force_migrate == true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so we can diff against the pushed-from sha.
+          fetch-depth: 0
+
+      - name: Decide whether migrations are needed
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Manual force always runs.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_migrate }}" = "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; echo "→ force_migrate"; exit 0
+          fi
+          # 🔴 The base is the last sha that actually REACHED PROD — not
+          # `github.event.before` (#1464).
+          #
+          # The gate is per-PUSH; the deploy is per-TREE. Merge two PRs back to
+          # back and the first run is cancelled as superseded, so its migration
+          # never runs — while the surviving run's push contains no migration
+          # files, the gate correctly reports "no schema changes", and the
+          # image it deploys carries all the new code anyway. The migration is
+          # then stranded PERMANENTLY and every job in the chain says `success`.
+          # That took prod's quote mint down on 22 Aug.
+          #
+          # Diffing from the last successfully DEPLOYED commit closes it: a
+          # cancelled run's migration stays inside the diff until some run
+          # actually applies it.
+          #
+          # 🔑 Every failure to determine that commit falls through to
+          # run=true. Running a migration that was already applied costs ~2
+          # minutes and is a no-op; SKIPPING one costs an outage. The asymmetry
+          # decides every branch here.
+          BEFORE=""
+          CANDIDATES=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/deploy-to-aws.yml/runs?branch=${{ github.ref_name }}&status=success&per_page=20" \
+            --jq '.workflow_runs[] | select(.id != ${{ github.run_id }}) | .id' 2>/dev/null || true)
+          for RUN_ID in $CANDIDATES; do
+            # 🔴 "Last DEPLOYED" is NOT the anchor — "last MIGRATED" is.
+            #
+            # A run deploys the tree and skips the migration all the time; that
+            # is the normal, correct path for a source-only push. Anchoring on
+            # the last deploy would therefore walk the base straight PAST a
+            # stranded migration and skip it forever — the same outage in a new
+            # place. Anchoring on the last run that actually APPLIED migrations
+            # means everything since is still in the diff, and the anchor only
+            # advances when a migration genuinely ran.
+            #
+            # The job's CONCLUSION cannot tell the two apart: a gate that
+            # decides "no schema changes" still leaves the job green. The STEP
+            # can — it is `skipped` when the gate said no. Read the step, never
+            # the job; that is the same lesson as #1464 itself.
+            MIGRATED=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}/jobs" \
+              --jq '[.jobs[] | select(.name == "Migrate DB") | .steps[]?
+                     | select(.name == "Run migrations (gated one-off task)")
+                     | .conclusion] | first // ""' 2>/dev/null || true)
+            if [ "$MIGRATED" = "success" ]; then
+              BEFORE=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}" --jq '.head_sha' 2>/dev/null || true)
+              echo "→ base = last MIGRATED sha ${BEFORE} (run ${RUN_ID})"
+              echo "base=${BEFORE}" >> "$GITHUB_OUTPUT"
+              echo "base_run=${RUN_ID}" >> "$GITHUB_OUTPUT"
+              break
+            fi
+          done
+
+          if [ -z "$BEFORE" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "→ no run in recent history applied migrations — running to be safe"
+            exit 0
+          fi
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; echo "→ no base sha, running"; exit 0
+          fi
+          # The deployed sha can be older than this clone's history depth, or
+          # gone after a force-push.
+          git fetch --quiet origin "$BEFORE" 2>/dev/null || true
+          if ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; echo "→ base sha not fetched, running"; exit 0
+          fi
+          # Whole-repo diff (not just apps/backend) so a Medusa core version bump
+          # in the lockfile is visible here too.
+          CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" || true)
+          echo "Changed files:"; echo "$CHANGED"; echo
+
+          # Only the NARROW set that db:migrate --execute-all-links actually acts
+          # on — NOT every file under a module. A service/subscriber/route change
+          # inside src/modules/** does not touch the schema and must not boot the
+          # migration task. Migration files live in /migrations/ (matched anywhere,
+          # incl. src/modules/*/migrations/), so DDL is never missed.
+          NEED=$(echo "$CHANGED" | grep -E '(/migrations/)|(^apps/backend/src/modules/.*/models/)|(^apps/backend/src/links/)|(medusa-config(\.prod)?\.ts$)' || true)
+
+          # A dependency bump can carry NEW @medusajs framework migrations; if the
+          # lockfile touched any @medusajs/* entry, run to be safe.
+          DEP=""
+          if echo "$CHANGED" | grep -q '^pnpm-lock\.yaml$' \
+             && git diff "$BEFORE" "${{ github.sha }}" -- pnpm-lock.yaml | grep -qE '^[+-].*@medusajs/'; then
+            DEP="pnpm-lock.yaml (@medusajs change)"
+          fi
+
+          if [ -n "$NEED" ] || [ -n "$DEP" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "→ schema-affecting changes — running migrations:"
+            # NB: plain `[ -n "$X" ] && echo` as the LAST line makes the step exit
+            # non-zero under `bash -e` whenever $X is empty (the failing test is the
+            # step's final exit code) — which silently failed the whole migrate gate
+            # for any schema/config change without an @medusajs lockfile bump. Use
+            # if-blocks so the step always ends 0.
+            if [ -n "$NEED" ]; then echo "$NEED"; fi
+            if [ -n "$DEP" ]; then echo "$DEP"; fi
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "→ no migration/model/link/config/@medusajs changes — skipping migration boot, jumping to deploy"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.gate.outputs.run == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/jyt-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run migrations (gated one-off task)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: ./deploy/aws/scripts/run-migrations.sh
+
+      - name: Skipped
+        if: steps.gate.outputs.run != 'true'
+        # 🔑 A skip has to name the base it measured from, or it cannot be
+        # argued with. #1464 read as `success` for days precisely because
+        # "skipped" looked identical whether the base was right or catastrophic.
+        #
+        # The anchor is the last run that actually APPLIED migrations, not the
+        # last that deployed — the earlier wording said DEPLOYED and described a
+        # design we deliberately do not have.
+        env:
+          BASE_SHA: ${{ steps.gate.outputs.base }}
+          BASE_RUN: ${{ steps.gate.outputs.base_run }}
+        run: |
+          echo "Migration task skipped — no migration/model/link/config path changed"
+          echo "since ${BASE_SHA:-<unknown>}, the last commit whose deploy actually"
+          echo "APPLIED migrations (run ${BASE_RUN:-<unknown>})."
+          echo
+          echo "Everything merged since that sha is still inside this diff, so a"
+          echo "migration stranded by a cancelled run stays visible until some run"
+          echo "applies it. If that sha looks far older than you expect, that is"
+          echo "correct — the anchor only advances when a migration truly ran."
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 3. Deploy server + worker in parallel via Copilot. Each deploy is its
+  #    own job so a worker-only or server-only failure is visible separately.
+  #    Both wait on `migrate` so services never roll onto un-migrated schema.
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy-server:
+    name: Deploy medusa-server
+    runs-on: ubuntu-latest
+    needs: [build-and-push, migrate]
+    # Push to main always deploys. Manual dispatch only deploys when
+    # the operator explicitly checked `deploy_services`. Branch
+    # dispatches default to build-only so they don't roll the prod
+    # service.
+    if: github.event_name == 'push' || inputs.deploy_services == true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/jyt-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install AWS Copilot CLI
+        run: |
+          # 🔴 PINNED, and retried. `releases/latest` 500'd on 2026-09-20 and
+          # failed "Deploy medusa-worker" while the SERVER deploy had already
+          # succeeded — the worst shape, because subscribers run on the worker,
+          # so prod was left half-current with a green health check. A pin also
+          # stops a surprise upstream version landing mid-deploy.
+          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+            -o /tmp/copilot \
+            https://github.com/aws/copilot-cli/releases/download/v1.34.1/copilot-linux
+          chmod +x /tmp/copilot
+          sudo mv /tmp/copilot /usr/local/bin/copilot
+          copilot --version
+
+      - name: Deploy medusa-server
+        working-directory: deploy/aws
+        # --force is required because the manifest uses `image.location` (a
+        # static ECR ref :latest), not `image.build`. With image.location,
+        # copilot ignores --tag and the CFN change set has no diff, so ECS
+        # never rolls new tasks even though a new image was just pushed to
+        # ECR :latest. --force makes ECS roll tasks, which pull :latest and
+        # pick up the freshly mirrored image. --tag is kept for parity with
+        # the worker and for any future move to image.build.
+        run: |
+          copilot svc deploy --name medusa-server --env prod --force \
+            --tag "${{ needs.build-and-push.outputs.image_tag }}"
+
+      # #1372 — `--force` above is NOT reliable. With `image.location` the CFN
+      # change set has no diff, ECS reports the deployment COMPLETED against the
+      # tasks already running, and copilot exits 0 having replaced nothing. This
+      # step is the only one in the pipeline that asks "is the new code running?"
+      # — it compares each running task's startedAt to the image's
+      # imagePushedAt, repairs via force-new-deployment if they are stale, and
+      # fails the job if the repair does not take.
+      - name: Assert medusa-server is running the new image
+        working-directory: deploy/aws
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          ./assert-service-rolled.sh medusa-server \
+            "${{ needs.build-and-push.outputs.image_tag }}"
+
+  deploy-worker:
+    name: Deploy medusa-worker
+    runs-on: ubuntu-latest
+    needs: [build-and-push, migrate]
+    # See deploy-server above for the rationale.
+    if: github.event_name == 'push' || inputs.deploy_services == true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/jyt-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install AWS Copilot CLI
+        run: |
+          # 🔴 PINNED, and retried. `releases/latest` 500'd on 2026-09-20 and
+          # failed "Deploy medusa-worker" while the SERVER deploy had already
+          # succeeded — the worst shape, because subscribers run on the worker,
+          # so prod was left half-current with a green health check. A pin also
+          # stops a surprise upstream version landing mid-deploy.
+          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+            -o /tmp/copilot \
+            https://github.com/aws/copilot-cli/releases/download/v1.34.1/copilot-linux
+          chmod +x /tmp/copilot
+          sudo mv /tmp/copilot /usr/local/bin/copilot
+          copilot --version
+
+      - name: Deploy medusa-worker
+        working-directory: deploy/aws
+        # See the medusa-server deploy step above for why --force is needed.
+        run: |
+          copilot svc deploy --name medusa-worker --env prod --force \
+            --tag "${{ needs.build-and-push.outputs.image_tag }}"
+
+      # See the medusa-server assertion above. The worker happened to roll on
+      # the run that exposed this (#1372) — which is exactly why the server's
+      # failure was invisible: two services, same workflow, different outcomes,
+      # one green check each.
+      - name: Assert medusa-worker is running the new image
+        working-directory: deploy/aws
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          ./assert-service-rolled.sh medusa-worker \
+            "${{ needs.build-and-push.outputs.image_tag }}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 4. Health-check the public endpoint after both deploys are done.
+  # ─────────────────────────────────────────────────────────────────────────
+  health-check:
+    name: Health Check — v3.jaalyantra.com
+    runs-on: ubuntu-latest
+    needs: [deploy-server, deploy-worker]
+    if: always() && needs.deploy-server.result == 'success'
+    steps:
+      - name: Poll /health until ready
+        env:
+          BACKEND_URL: ${{ vars.MEDUSA_BACKEND_URL }}
+        run: |
+          MAX_ATTEMPTS=20
+          INTERVAL=15
+          HEALTH_URL="${BACKEND_URL%/}/health"
+          echo "Polling ${HEALTH_URL} (max ${MAX_ATTEMPTS} × ${INTERVAL}s)"
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL" || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ healthy (attempt ${i}, HTTP ${HTTP_CODE})"
+              exit 0
+            fi
+            echo "⏳ attempt ${i}/${MAX_ATTEMPTS} — HTTP ${HTTP_CODE}"
+            sleep "$INTERVAL"
+          done
+          echo "❌ did not become healthy in time"
+          exit 1

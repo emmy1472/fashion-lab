@@ -1,0 +1,193 @@
+import { MedusaError, Modules, TransactionHandlerType } from "@medusajs/framework/utils"
+import {
+  StepResponse,
+  WorkflowResponse,
+  createStep,
+  createWorkflow,
+  transform,
+} from "@medusajs/framework/workflows-sdk"
+import type { IWorkflowEngineService } from "@medusajs/framework/types"
+
+import { PRODUCTION_RUNS_MODULE } from "../../modules/production_runs"
+import type ProductionRunService from "../../modules/production_runs/service"
+
+import { PRODUCTION_POLICY_MODULE } from "../../modules/production_policy"
+import type ProductionPolicyService from "../../modules/production_policy/service"
+import {
+  describeUnmet,
+  hasUnmet,
+  resolveUnmetDependencies,
+} from "./lib/run-dependencies"
+import {
+  sendProductionRunToProductionWorkflow,
+} from "./send-production-run-to-production"
+
+export const dispatchProductionRunWorkflowId = "dispatch-production-run"
+export const waitDispatchTemplateSelectionStepId =
+  "wait-dispatch-template-selection"
+
+export type DispatchProductionRunInput = {
+  production_run_id: string
+}
+
+/**
+ * What the operator picked at the `awaiting_templates` pause.
+ *
+ * #1261: `template_ids` was added because names are not unique — the selection
+ * used to travel as names only, so an operator who knew exactly which
+ * "Stitching" they meant had no way to say it, and dispatch picked for them.
+ * Ids take precedence; names still work and are now rejected when ambiguous.
+ */
+type DispatchTemplateSelection = {
+  template_names?: string[]
+  template_ids?: string[]
+}
+
+const retrieveProductionRunForDispatchStep = createStep(
+  "retrieve-production-run-for-dispatch",
+  async (input: { production_run_id: string }, { container }) => {
+    const productionRunService: ProductionRunService = container.resolve(
+      PRODUCTION_RUNS_MODULE
+    )
+    const productionPolicyService: ProductionPolicyService = container.resolve(
+      PRODUCTION_POLICY_MODULE
+    )
+
+    const run = await productionRunService.retrieveProductionRun(input.production_run_id)
+
+    if (!run) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_FOUND,
+        `ProductionRun ${input.production_run_id} not found`
+      )
+    }
+    
+
+    await productionPolicyService.assertCanStartDispatch(run)
+
+    // Check upstream dependencies — other partners' runs AND goods being
+    // supplied to this one (#1529). Both kinds are resolved by the shared
+    // helper the release subscribers use, so the guard and the releaser cannot
+    // hold different opinions about whether this run is ready.
+    const unmet = await resolveUnmetDependencies(container, run as any)
+    if (hasUnmet(unmet)) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        `Cannot dispatch: waiting for ${describeUnmet(unmet)}`
+      )
+    }
+
+    return new StepResponse(run)
+  }
+)
+
+const markDispatchStartedStep = createStep(
+  "mark-production-run-dispatch-started",
+  async (input: { run: any }, { container }) => {
+    const productionRunService: ProductionRunService = container.resolve(
+      PRODUCTION_RUNS_MODULE
+    )
+
+    const run = input.run
+
+    const updated = await productionRunService.updateProductionRuns({
+      id: run.id,
+      dispatch_state: "awaiting_templates" as any,
+      dispatch_started_at: new Date(),
+    })
+
+    return new StepResponse(updated)
+  }
+)
+
+const DISPATCH_TIMEOUT_SECONDS = (() => {
+  const env = Number(process.env.PRODUCTION_RUN_AWAIT_TIMEOUT_SECONDS)
+  return Number.isFinite(env) && env > 0 ? env : 60 * 60 * 1
+})()
+
+export const waitDispatchTemplateSelectionStep = createStep(
+  {
+    name: waitDispatchTemplateSelectionStepId,
+    async: true,
+    timeout: DISPATCH_TIMEOUT_SECONDS,
+  },
+  async () => {}
+)
+
+const markDispatchCompletedStep = createStep(
+  "mark-production-run-dispatch-completed",
+  async (input: { run: any }, { container }) => {
+    const productionRunService: ProductionRunService = container.resolve(
+      PRODUCTION_RUNS_MODULE
+    )
+
+    const run = await productionRunService.retrieveProductionRun(input.run.id)
+
+    const updated = await productionRunService.updateProductionRuns({
+      id: run.id,
+      dispatch_state: "completed" as any,
+      dispatch_completed_at: new Date(),
+    })
+
+    return new StepResponse(updated)
+  }
+)
+
+export const signalDispatchTemplateSelectionStep = createStep(
+  "signal-dispatch-template-selection-step",
+  async (
+    input: {
+      transaction_id: string
+      template_names?: string[]
+      template_ids?: string[]
+    },
+    { container }
+  ) => {
+    const engineService = container.resolve(
+      Modules.WORKFLOW_ENGINE
+    ) as IWorkflowEngineService
+
+    await engineService.setStepSuccess({
+      idempotencyKey: {
+        action: TransactionHandlerType.INVOKE,
+        transactionId: input.transaction_id,
+        stepId: waitDispatchTemplateSelectionStepId,
+        workflowId: dispatchProductionRunWorkflowId,
+      },
+      stepResponse: new StepResponse({
+        template_names: input.template_names ?? [],
+        template_ids: input.template_ids ?? [],
+      }),
+    })
+
+    return new StepResponse(true)
+  }
+)
+
+export const dispatchProductionRunWorkflow = createWorkflow(
+  {
+    name: dispatchProductionRunWorkflowId,
+    store: true,
+  },
+  (input: DispatchProductionRunInput) => {
+    const run = retrieveProductionRunForDispatchStep({
+      production_run_id: input.production_run_id,
+    })
+
+    markDispatchStartedStep({ run })
+
+    const selection = waitDispatchTemplateSelectionStep() as unknown as DispatchTemplateSelection
+
+    sendProductionRunToProductionWorkflow.runAsStep({
+      input: transform({ input, selection }, (data) => ({
+        production_run_id: data.input.production_run_id,
+        template_names: data.selection?.template_names || [],
+        template_ids: data.selection?.template_ids || [],
+      })),
+    })
+
+    markDispatchCompletedStep({ run })
+
+    return new WorkflowResponse({ run })
+  }
+)

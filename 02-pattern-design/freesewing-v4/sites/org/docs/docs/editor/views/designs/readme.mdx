@@ -1,0 +1,71 @@
+---
+title: Choose a different design (designs view)
+---
+import { CisFemaleIcon, ResetIcon, FilterIcon, ShowcaseIcon } from '@freesewing/react/components/Icon'
+
+#### Purpose of the designs view
+
+The _designs_ view allows you to chose the design you want to generate a pattern from.
+It is the first thing the Editor will present you with.
+
+#### Layout of the designs view
+
+This view does not have a [ribbon area](#areas). The entire editor real-estate
+is used for letting you choose a design.
+
+<Tabs>
+  <TabItem value="desktop" label="On Desktop">
+    ![A screenshot of the FreeSewing Editor in designs view, on a
+    desktop](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/c3bddad4-a0bb-43e6-c8d0-ce33b80c6e00/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in designs view, on a desktop._
+    </div>
+  </TabItem>
+  <TabItem value="tablet" label="On Tablet">
+    ![A screenshot of the FreeSewing Editor in designs view, on a
+    tablet](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/b2ce3fba-c44d-4fef-f83e-70b177acff00/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in designs view, on a tablet._
+    </div>
+  </TabItem>
+  <TabItem value="mobile" label="On Mobile">
+    ![A screenshot of the FreeSewing Editor in designs view on
+    mobile](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/5a012f40-bed0-4de9-9d9f-52910839bc00/public)
+    <div className="tw:text-center">
+      _A screenshot of the FreeSewing editor in designs view, on mobile._
+    </div>
+  </TabItem>
+</Tabs>
+
+#### Controlling the design grid
+
+By default, you will get a grid of pictures showcasing the available designs,
+as well as a list of design names at the top for quick access in case you
+already know which design you want.
+
+You can control the way the designs are displayed with the buttons between the
+list of names and the grid of pictures:
+
+| Button | Description |
+| ------ | ----------- |
+| <button className="tw:flex tw:flex-row tw:gap-2 tw:daisy-btn tw:daisy-btn-secondary tw:daisy-btn-outline"><CisFemaleIcon /> Show Line Drawings</button> | Display a line drawing for each design<br /><small>This button won't be shown when pictures are currently displayed</small> |
+| <button className="tw:flex tw:flex-row tw:gap-2 tw:daisy-btn tw:daisy-btn-secondary tw:daisy-btn-outline"><ShowcaseIcon /> Show Examples</button> | Display a picture for each design<br /><small>This button won't be shown when line drawings are currently displayed</small> |
+| <button className="tw:flex tw:flex-row tw:gap-2 tw:daisy-btn tw:daisy-btn-secondary tw:daisy-btn-outline"><FilterIcon /> Show Filters</button> | Display filters for the list of designs<br /><small>See [Design filters](#filters)</small> |
+| <button className="tw:flex tw:flex-row tw:gap-2 tw:daisy-btn tw:daisy-btn-secondary tw:daisy-btn-outline"><FilterIcon /> Hide Filters</button> | Display filters for the list of designs<br /><small>This button won't be shown unless filters are currently displayed</small> |
+| <button className="tw:flex tw:flex-row tw:gap-2 tw:daisy-btn tw:daisy-btn-secondary tw:daisy-btn-outline"><ResetIcon /> Clear Filters</button> | Display filters for the list of designs<br /><small>This button won't be shown unless filters are currently displayed</small> |
+
+##### Design filters {#filters}
+
+When you click the **Show Filters** button, it will bring up these filters:
+
+![A screenshot of the Design filters in the FreeSewing
+Editor](https://imagedelivery.net/ouSuR9yY1bHt-fuAokSA5Q/5c42adbd-7a11-4128-0ae5-3782f0def700/public)
+
+They allow you to filter on:
+
+- **Tags**: These designate different departments
+- **Techniques**: These let you filter based on the techniques that you are comfortable with
+- **Difficulty**: These let you filter based on the difficulty level of making the design
+
+You can click on any of them to select/deselect, and can also combine filters.
+

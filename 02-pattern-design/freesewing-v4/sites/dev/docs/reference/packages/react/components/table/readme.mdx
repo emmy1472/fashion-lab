@@ -1,0 +1,29 @@
+---
+title: Table
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import * as jsdoc from '@site/prebuild/jsdoc/components.table.mjs'
+import { TableExample, TableWrapperExample } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Table** component family provides the following components:
+
+- [Table](#table)
+- [TableWrapper](#tablewrapper)
+
+### Table
+
+<ComponentDocs docs={jsdoc.jsdocTable} example={TableExample} />
+
+### TableWrapper
+
+<ComponentDocs docs={jsdoc.jsdocTableWrapper} example={TableWrapperExample} />
+
+</DocusaurusDoc>

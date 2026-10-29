@@ -1,0 +1,174 @@
+/**
+ * Forecast Accuracy API
+ * Compare forecasts against actual performance
+ */
+
+import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http";
+import { z } from "@medusajs/framework/zod";
+import { AD_PLANNING_MODULE } from "../../../../../modules/ad-planning";
+import { SOCIALS_MODULE } from "../../../../../modules/socials";
+import { calculateForecastAccuracy } from "../../../../../modules/ad-planning/utils/forecast-engine";
+
+const AccuracyQuerySchema = z.object({
+  forecast_id: z.string().optional(),
+  ad_campaign_id: z.string().optional(),
+});
+
+/**
+ * Get forecast accuracy
+ * @route GET /admin/ad-planning/forecasts/accuracy
+ */
+export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
+  const params = AccuracyQuerySchema.parse(req.query);
+  const adPlanningService = req.scope.resolve(AD_PLANNING_MODULE);
+  let socialsService: any = null;
+  try {
+    socialsService = req.scope.resolve(SOCIALS_MODULE);
+  } catch {
+    // Socials module not available — will fall back to conversion-based estimates
+  }
+
+  const filters: Record<string, any> = {
+    is_actual_recorded: true,
+  };
+  if (params.forecast_id) filters.id = params.forecast_id;
+  if (params.ad_campaign_id) filters.ad_campaign_id = params.ad_campaign_id;
+
+  const forecasts = await adPlanningService.listBudgetForecasts(filters);
+
+  if (forecasts.length === 0) {
+    res.json({
+      accuracy_reports: [],
+      overall_accuracy: null,
+      message: "No completed forecasts found",
+    });
+    return;
+  }
+
+  const accuracyReports: Array<{
+    forecast_id: string;
+    campaign_id: string | null;
+    period_start: string;
+    period_end: string;
+    accuracy: number;
+    mape: number;
+    comparison_count: number;
+  }> = [];
+
+  let totalAccuracy = 0;
+  let count = 0;
+
+  for (const forecast of forecasts) {
+    // Get metadata for period info
+    const forecastMetadata = forecast.metadata as Record<string, any> | null;
+    const periodStart = forecastMetadata?.forecast_period_start ? new Date(forecastMetadata.forecast_period_start) : forecast.forecast_date;
+    const periodEnd = forecastMetadata?.forecast_period_end ? new Date(forecastMetadata.forecast_period_end) : new Date(forecast.forecast_date.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+    // Actuals differ by network. Google-sourced forecasts (tagged at generation
+    // time) pull real per-day revenue/spend/conversions from stored
+    // GoogleAdsInsights; everything else uses first-party Conversion rows.
+    const adSource =
+      (forecastMetadata as Record<string, any> | null)?.ad_source === "google"
+        ? "google"
+        : "meta";
+
+    const actualByDay: Record<string, number> = {};
+    let actualSpend = 0;
+    let actualConversionsCount = 0;
+
+    if (adSource === "google" && socialsService && forecast.ad_campaign_id) {
+      const startYmd = periodStart.toISOString().split("T")[0];
+      const endYmd = periodEnd.toISOString().split("T")[0];
+      let gInsights: any[] = [];
+      try {
+        gInsights = await socialsService.listGoogleAdsInsights({
+          level: "campaign",
+          campaign_id: forecast.ad_campaign_id,
+        });
+      } catch {
+        gInsights = [];
+      }
+      for (const ins of gInsights) {
+        if (ins.device != null || ins.network != null) continue; // base rows only
+        const dateKey = ins.date as string;
+        if (!dateKey || dateKey < startYmd || dateKey > endYmd) continue;
+        actualByDay[dateKey] =
+          (actualByDay[dateKey] || 0) + (Number(ins.conversions_value) || 0);
+        actualSpend += Number(ins.cost_micros) / 1_000_000;
+        actualConversionsCount += Number(ins.conversions) || 0;
+      }
+    } else {
+      const conversions = await adPlanningService.listConversions({
+        ad_campaign_id: forecast.ad_campaign_id,
+        converted_at: {
+          $gte: periodStart,
+          $lte: periodEnd,
+        },
+      });
+      for (const conv of conversions) {
+        const dateKey = new Date(conv.converted_at).toISOString().split("T")[0];
+        actualByDay[dateKey] =
+          (actualByDay[dateKey] || 0) + (Number(conv.conversion_value) || 0);
+      }
+      actualConversionsCount = conversions.length;
+    }
+
+    const actuals = Object.entries(actualByDay).map(([date, revenue]) => ({
+      date,
+      actual_revenue: revenue,
+    }));
+
+    // Get daily forecasts from metadata
+    const dailyForecasts = forecastMetadata?.daily_forecasts || [];
+
+    if (dailyForecasts.length > 0 && actuals.length > 0) {
+      const accuracy = calculateForecastAccuracy(dailyForecasts, actuals);
+
+      accuracyReports.push({
+        forecast_id: forecast.id,
+        campaign_id: forecast.ad_campaign_id,
+        period_start: periodStart.toISOString(),
+        period_end: periodEnd.toISOString(),
+        accuracy: accuracy.accuracy,
+        mape: accuracy.mape,
+        comparison_count: accuracy.comparisons.length,
+      });
+
+      totalAccuracy += accuracy.accuracy;
+      count++;
+
+      // Google spend was already summed from insights above. For Meta/default,
+      // pull actual spend from AdInsights (falling back to a budget × days est.).
+      if (adSource !== "google" && socialsService && forecast.ad_campaign_id) {
+        try {
+          const insights = await socialsService.listAdInsights({
+            ad_campaign_id: forecast.ad_campaign_id,
+            date_start: { $gte: periodStart },
+            date_stop: { $lte: periodEnd },
+          });
+          actualSpend = insights.reduce((sum: number, i: any) => sum + (Number(i.spend) || 0), 0);
+        } catch {
+          // Fall back to estimated spend from daily budget × days
+          const days = Math.ceil((periodEnd.getTime() - periodStart.getTime()) / (24 * 60 * 60 * 1000));
+          actualSpend = (Number(forecast.predicted_spend) / (forecastMetadata?.forecast_days || 30)) * days;
+        }
+      }
+
+      // Update forecast with actual data
+      await adPlanningService.updateBudgetForecasts({
+        id: forecast.id,
+        actual_spend: actualSpend,
+        actual_conversions: actualConversionsCount,
+        actual_revenue: Object.values(actualByDay).reduce((a, b) => a + b, 0),
+        forecast_error_percent: 100 - accuracy.accuracy,
+        is_actual_recorded: true,
+      });
+    }
+  }
+
+  res.json({
+    accuracy_reports: accuracyReports,
+    overall_accuracy: count > 0 ? Math.round((totalAccuracy / count) * 100) / 100 : null,
+    forecasts_analyzed: count,
+  });
+};

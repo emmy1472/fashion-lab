@@ -1,0 +1,185 @@
+{
+  "t": "Jett jacket",
+  "d": "A FreeSewing pattern for a bomber or letterman jacket",
+  "p": { 
+    "back": "Back",
+    "front": "Front",
+    "base": "Base",
+    "sleevecap": "Sleevecap",
+    "sleeve": "Sleeve",
+    "collar_ribbing": "Collar ribbing",
+    "cuff": "Cuff",
+    "yoke": "Yoke",
+    "pocket_welt": "Pocket welt",
+    "pocket_bag_front": "Front pocket bag",
+    "waistband": "Waistband",
+    "waistband_ends": "Waistband extension"
+  
+  },
+  "s": {
+      "bustWarning.t": "The bust dart won't be generated",
+      "bustWarning.d": "Chest is smaller than high bust. If these measurements are accurate, you don't need a bust dart.",
+      "waistWarning.t": "The bust dart won't be generated",
+      "waistWarning.d": "HPS to waist front is smaller than HPS to waist back.\nDid you take the HPS to waist front measurement down over the bust?"
+   },
+  "o": {
+    "hipsEase": {
+      "t": "Hips ease",
+      "d": "The amount of ease at your hips"
+    },
+    "ribbingHeight": {
+      "t": "Ribbing height",
+      "d": "Controls the height of the ribbing"
+    },
+    "ribbingStretch": {
+      "t": "Ribbing stretch",
+      "d": "Use this to adapt the pattern to how stretchy the ribbing that you are using is."
+    },
+    "bustDart": {
+      "t": "Bust dart (EXPERIMENTAL)",
+      "d": "Draft the pattern with a full bust adjustment and a bust dart. This only takes effect if Draft for High Bust is true.\nThis option isn't guaranteed to preserve the armhole or side seam lengths. Proceed with caution."
+    },
+    "bustDartNo": {
+      "t": "No",
+      "d": "Don't use a bust dart"
+    },
+    "bustDartYes": {
+      "t": "Yes",
+      "d": "Use a bust dart"
+    },
+    "fullBustEase": {
+      "t": "Full bust ease",
+      "d": "Allows you to independently control the ease in the bust adjustment without affecting the armscye"
+
+    },
+    "bustDartHeight": {
+      "t": "Bust dart height",
+      "d": "Where to place the bust dart on the side seam. Only used if the code can't automatically find an intersection on the side seam"
+    },
+    "sideCutAngle": {
+      "t": "Side cut angle",
+      "d": "Tweaks the angle of the dart for the full bust adjustment"
+    },
+    "dartLegsTruing": {
+      "t": "Dart legs truing",
+      "d": "This option tweaks the side seam to keep the bust dart legs the same length."
+    },
+    "dartLegsTruingYes": 
+    {
+      "t": "Yes",
+      "d": "Adjust the dart leg lengths"
+    },
+    "dartLegsTruingNo": 
+    {
+      "t": "No",
+      "d": "Don't adjust the dart leg lengths"
+    },
+    "bustDartPercentage": {
+      "t": "FBA adjustment percentage",
+      "d": "How much of the effect of the FBA to use."
+    },
+    "bustDartOffset": {
+      "t": "Bust dart offset",
+      "d": "How close to the bust apex to start the bust dart"
+    },
+    "ribbing": {
+      "t": "Ribbing",
+      "d": "Whether to generate a waistband and cuffs made of stretchy ribbing"
+    },
+    "ribbingYes": {
+      "t": "Yes"
+    },
+    "ribbingNo": {
+      "t": "No"
+    },
+    "ribbingEndsPercentage": {
+      "t": "Waistband extension percentage",
+      "d": "How wide to make the button placket extension at the ends of the waistband"
+    },
+    "neckShiftForward": {
+      "t": "Neck shift forward",
+      "d": "Cut the neck lower in the front than Brian's default neckline, by this percentage of the neck measurement"
+    },   
+     "yokesplit": {
+      "t": "Yoke height",
+      "d": "How tall to make the yoke"
+    },
+    "ribbedCollarWidth": {
+      "t": "Ribbed collar width",
+      "d": "How wide to make the ribbed collar"
+    },
+
+    "ribbedCollarCurve": {
+      "t": "Ribbed collar curve",
+      "d": "How far the ends of the ribbed collar curve"
+    },
+    "closureCount": {
+      "t": "Closure count",
+      "d": "How many buttons or snaps to use. The last one goes on the waistband extension"
+    },
+    "yoke": {
+      "t": "Yoke",
+      "d": "Whether to draft the back panel with a yoke across the shoulders. The yoke does no extra shaping right now, so this doesn't affect the fit."
+    },
+    "yokeYes": {
+      "t": "Yes"
+    },
+    "yokeNo": {
+      "t": "No"
+    },
+    "placketwidth": {
+      "t": "Placket width",
+      "d": "How wide to make the button placket, as a percentage of the chest measurement"
+    },
+    "useBellyAdjustment": {
+      "t": "Use full belly adjustment",
+      "d": "This widens the front piece to account for a waist wider than the hip measurement. To use this, make sure to take the waist measurement at the fullest part of your belly"
+    },
+    "useBellyAdjustmentYes": {
+      "t": "Yes"
+    },
+    "useBellyAdjustmentNo": {
+      "t": "No"
+    },
+    "bustDart.None": {
+      "t": "None",
+      "d": "No full bust adjustment"
+    },
+    "armCutAngle": {
+      "t": "Armhole cut angle",
+      "d": "This applies only to the rotation-based implementation. Tweak this if the armhole looks wrong."
+    },
+    "frontWeltPockets": {
+      "t": "Front welt pockets",
+      "d": "Determines whether to draft the pattern with diagonal welt pockets on the front"
+    },
+    "frontWeltPocketsYes": {
+      "t": "Yes",
+      "d": "Draft with pockets"
+    },
+    "frontWeltPocketsNo": {
+      "t": "No",
+      "d": "Draft without pockets"
+    },
+    "pocketBottomX": {
+      "t": "Pocket bottom X",
+      "d": "Horizontal position of the bottom of the pocket"
+    },
+    "pocketBottomY": {
+      "t": "Pocket bottom Y",
+      "d": "Vertical position of the bottom of the pocket"
+    },
+    "pocketTopX": {
+      "t": "Pocket top X",
+      "d": "Horizontal position of the top of the pocket"
+    },
+    "pocketTopY": {
+      "t": "Pocket top Y",
+      "d": "Vertical position of the top of the pocket"
+    },
+    "pocketWeltWidth": {
+      "t": "Pocket welt width",
+      "d": "How wide to make the pocket welt piece"
+    }
+   }
+}

@@ -1,0 +1,3843 @@
+import { ExecArgs } from "@medusajs/framework/types"
+import { Modules, ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import { createOrderFulfillmentWorkflow } from "@medusajs/medusa/core-flows"
+import { ensureOrderFulfillment } from "../../apps/backend/src/workflows/orders/fulfillment-context"
+import { PARTNER_QUOTE_MODULE } from "../../apps/backend/src/modules/partner-quote"
+import { PAYMENT_SCHEDULE_MODULE } from "../../apps/backend/src/modules/payment_schedule"
+import { createProductionRunWorkflow } from "../../apps/backend/src/workflows/production-runs/create-production-run"
+import { approveProductionRunWorkflow } from "../../apps/backend/src/workflows/production-runs/approve-production-run"
+import { autoDispatchApprovedChildren } from "../../apps/backend/src/api/admin/production-runs/auto-dispatch-approved-children"
+import { createInventoryOrderWorkflow } from "../../apps/backend/src/workflows/inventory_orders/create-inventory-orders"
+import { ORDER_INVENTORY_MODULE } from "../../apps/backend/src/modules/inventory_orders"
+import { produceDesignsAsWorkOrder } from "../../apps/backend/src/workflows/designs/produce-designs-as-work-order"
+import { syncWorkOrderFromMirror } from "../../apps/backend/src/lib/work-orders/sync-from-mirror"
+import Scrypt from "scrypt-kdf"
+import * as fs from "fs"
+import * as path from "path"
+
+const E2E_AWB = "E2EAWB1234567"
+
+/**
+ * #1118 — seed a retail order whose fulfillment carries a Shiprocket shipment
+ * blob, so the order-detail "Shipping & Tracking" widget can be exercised in
+ * CI (the browser heavy-lifting Playwright does headlessly). Reuses the demo
+ * commerce infra (region / sales channel / manual shipping option / product)
+ * created by `src/scripts/seed.ts`, which the e2e:seed step runs first. Mirrors
+ * the plain-fulfillment path in `workflows/orders/fulfillment-context.ts`, then
+ * stamps the carrier refs the real Shiprocket flow persists onto
+ * `fulfillment.data` (#1116 courier_rate, #1117 tracking_events).
+ */
+async function seedShipmentTrackingOrder(container: any): Promise<string> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+
+  const { data: regions } = await query.graph({
+    entity: "region",
+    fields: ["id", "currency_code", "countries.iso_2"],
+  })
+  const region = regions?.[0]
+  const { data: channels } = await query.graph({
+    entity: "sales_channel",
+    fields: ["id"],
+  })
+  const salesChannelId = channels?.[0]?.id
+  if (!region || !salesChannelId) {
+    throw new Error(
+      "E2E seed: no region/sales channel found. Run the demo seed first: `medusa exec ./src/scripts/seed.ts`."
+    )
+  }
+  const countryCode = region.countries?.[0]?.iso_2 || "gb"
+
+  // Create the order via the order module directly rather than
+  // createOrderWorkflow: the workflow runs an update-order-tax-lines step that
+  // resolves a tax provider for the region, which is unconfigured on a fresh CI
+  // DB ("tax provider with id: null"). A fixture order needs no tax lines, and
+  // the fulfillment still goes through the proper workflow below.
+  const orderModule: any = container.resolve(Modules.ORDER)
+  const created: any = await orderModule.createOrders({
+    status: "pending",
+    region_id: region.id,
+    currency_code: region.currency_code,
+    sales_channel_id: salesChannelId,
+    email: "e2e-buyer@jyt.test",
+    shipping_address: {
+      first_name: "Elena",
+      last_name: "Doe",
+      address_1: "9 Buyer Rd",
+      city: "London",
+      postal_code: "EC1A 1BB",
+      country_code: countryCode,
+      phone: "8887776665",
+    },
+    // Title-only line item (no variant) — same shape as design-order converts,
+    // which avoids inventory lookups and still fulfills via the manual path.
+    items: [{ title: "Tangaliya Stole (e2e)", quantity: 1, unit_price: 1500 }],
+    metadata: { source: "e2e-shipment-tracking" },
+  })
+  const order = Array.isArray(created) ? created[0] : created
+
+  // Line-item ids for the fulfillment (read back — createOrders' return shape
+  // for nested items isn't relied upon).
+  const { data: withItems } = await query.graph({
+    entity: "order",
+    fields: ["id", "items.id"],
+    filters: { id: order.id },
+  })
+  const itemId = withItems?.[0]?.items?.[0]?.id
+  if (!itemId) throw new Error("E2E seed: order line item not created")
+
+  // Resolve a manual shipping option (with a stock location) for the plain
+  // fulfillment — identical selection to resolvePlainFulfillmentContext.
+  const { data: opts } = await query.graph({
+    entity: "shipping_option",
+    fields: ["id", "provider_id", "service_zone.fulfillment_set.location.id"],
+  })
+  const isManual = (o: any) =>
+    typeof o?.provider_id === "string" && o.provider_id.startsWith("manual")
+  const manual =
+    (opts || []).find(
+      (o: any) => isManual(o) && o.service_zone?.fulfillment_set?.location?.id
+    ) || (opts || []).find(isManual)
+  if (!manual) {
+    throw new Error(
+      "E2E seed: no manual shipping option found. Run the demo seed first."
+    )
+  }
+
+  await createOrderFulfillmentWorkflow(container).run({
+    input: {
+      order_id: order.id,
+      items: [{ id: itemId, quantity: 1 }],
+      shipping_option_id: manual.id,
+      location_id: manual.service_zone?.fulfillment_set?.location?.id,
+      no_notification: true,
+    } as any,
+  })
+
+  const { data: refetched } = await query.graph({
+    entity: "order",
+    fields: ["fulfillments.id"],
+    filters: { id: order.id },
+  })
+  const fulfillmentId = refetched?.[0]?.fulfillments?.[0]?.id
+  if (!fulfillmentId) throw new Error("E2E seed: fulfillment not created")
+
+  const now = new Date().toISOString()
+  const fulfillmentModule = container.resolve(Modules.FULFILLMENT)
+  await fulfillmentModule.updateFulfillment(fulfillmentId, {
+    data: {
+      carrier: "shiprocket",
+      waybill: E2E_AWB,
+      tracking_number: E2E_AWB,
+      tracking_url: `https://shiprocket.co/tracking/${E2E_AWB}`,
+      label_url: "https://sr-core-cdn.shiprocket.in/label/e2e.pdf",
+      current_status: "In Transit",
+      shipment_id: 999001,
+      sr_order_id: 999002,
+      provider_refs: {
+        shipment_id: 999001,
+        sr_order_id: 999002,
+        courier_name: "Xpressbees Surface",
+        // #1116 S3 — auto-selected international courier's quoted rate.
+        courier_rate: 845.5,
+        courier_rate_currency: "INR",
+        international: true,
+      },
+      // #1117 — carrier webhook scan history (oldest first).
+      tracking_events: [
+        { at: null, received_at: now, status: "Pickup Scheduled", status_code: 42, location: "Surendranagar" },
+        { at: null, received_at: now, status: "In Transit", status_code: 18, location: "Ahmedabad Hub" },
+      ],
+    },
+    labels: [
+      {
+        tracking_number: E2E_AWB,
+        tracking_url: `https://shiprocket.co/tracking/${E2E_AWB}`,
+        label_url: "https://sr-core-cdn.shiprocket.in/label/e2e.pdf",
+      },
+    ],
+  })
+
+  return order.id
+}
+
+/**
+ * A product that would FAIL an international label: a real variant with no
+ * HS/HSN code at any of the three levels a label reads (variant → the variant's
+ * inventory item → the product).
+ *
+ * The existing gate fixture can't cover this. Its line item is title-only with
+ * no variant at all, so it can only ever exercise the `metadata.hsn` fallback —
+ * the catalogue chain is invisible to it. This one has a variant precisely so
+ * specs can write a code at each level and watch the resolution change.
+ *
+ * `manage_inventory: false` is deliberate and load-bearing: it is the case the
+ * placement rule cares about, where the correct target is the PRODUCT top level
+ * rather than the variant.
+ */
+async function seedHsCodeGapProduct(container: any): Promise<{
+  productId: string
+  variantId: string
+}> {
+  const productModule: any = container.resolve(Modules.PRODUCT)
+
+  const product = await productModule.createProducts({
+    title: "Kutch Mirror-Work Stole (e2e HSN gap)",
+    status: "published",
+    handle: `e2e-hsn-gap-${Date.now()}`,
+    // Enough context for an LLM to classify the goods — the tooling is
+    // explicitly forbidden from guessing a code off an id or SKU.
+    description:
+      "Hand-woven cotton stole with traditional Kutch mirror embroidery, 70x200cm.",
+    material: "Cotton",
+    // No hs_code at ANY level — that's the whole fixture.
+    options: [{ title: "Size", values: ["One Size"] }],
+    variants: [
+      {
+        title: "One Size",
+        sku: `E2E-HSN-${Date.now()}`,
+        manage_inventory: false,
+        options: { Size: "One Size" },
+      },
+    ],
+  })
+  const created = Array.isArray(product) ? product[0] : product
+
+  const variantId = created?.variants?.[0]?.id
+  if (!variantId) {
+    throw new Error("E2E seed: HSN gap product variant not created")
+  }
+  if (created.hs_code || created.variants[0].hs_code) {
+    // If this ever trips, something upstream is defaulting a code and the specs
+    // would be asserting against a gap that no longer exists.
+    throw new Error("E2E seed: HSN gap fixture unexpectedly has an hs_code")
+  }
+
+  return { productId: created.id, variantId }
+}
+
+/**
+ * A `partner_fee` for the gate order, carrying BOTH deductions — the platform
+ * commission and a recorded platform-shipping charge — so the partner-UI payout
+ * block has something real to render.
+ *
+ * The gate order is built with `orderModule.createOrders`, which never emits
+ * `order.placed`, so the accrual subscriber doesn't run and no fee exists. That
+ * is deliberate (the fixture must stay inert), so the fee is written directly.
+ *
+ * The numbers are chosen so a wrong calculation is obvious rather than
+ * coincidental: 1500 − 45 − 120 = 1335, and no pair of them sums to another.
+ */
+async function seedPartnerFeeForGateOrder(
+  container: any,
+  orderId: string,
+  partnerId: string,
+  currencyCode: string
+): Promise<{ orderTotal: number; commission: number; shipping: number; net: number }> {
+  const billing: any = container.resolve("partner_billing")
+
+  await billing.createPartnerFees([
+    {
+      partner_id: partnerId,
+      order_id: orderId,
+      order_total: 1500,
+      currency_code: currencyCode,
+      fee_basis: "percentage",
+      fee_rate: 300, // 3.00%
+      fee_amount: 45,
+      status: "accrued",
+      accrued_at: new Date(),
+      // Partner used OUR carrier account — the second deduction.
+      shipping_amount: 120,
+      shipping_currency_code: currencyCode,
+      shipping_carrier: "shiprocket",
+      metadata: { source: "e2e-payout-summary" },
+    },
+  ])
+
+  return { orderTotal: 1500, commission: 45, shipping: 120, net: 1335 }
+}
+
+/**
+ * #1112 — seed a design-LESS product that has been sold and fulfilled, so the
+ * admin product-detail "Production Runs" section (in the Linked Designs widget)
+ * can be eyeballed in CI. Fulfilling emits `order.fulfillment_created`, whose
+ * subscriber retroactively mints a COMPLETED product-only run (design_id null)
+ * hung off the product spine. Returns the product id.
+ */
+async function seedProvenanceProductRun(container: any): Promise<string> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const productModule: any = container.resolve(Modules.PRODUCT)
+  const orderModule: any = container.resolve(Modules.ORDER)
+
+  const { data: regions } = await query.graph({
+    entity: "region",
+    fields: ["id", "currency_code"],
+  })
+  const region = regions?.[0]
+  if (!region) {
+    throw new Error(
+      "E2E seed: no region found. Run the demo seed first: `medusa exec ./src/scripts/seed.ts`."
+    )
+  }
+
+  const product = await productModule.createProducts({
+    title: "Retail Provenance Stole (e2e)",
+    status: "published",
+    handle: `e2e-provenance-${Date.now()}`,
+    options: [{ title: "Default", values: ["Default"] }],
+  })
+
+  const created: any = await orderModule.createOrders({
+    status: "pending",
+    region_id: region.id,
+    currency_code: region.currency_code || "usd",
+    email: "e2e-provenance@jyt.test",
+    // Title-only line item carrying product_id (no variant → no inventory), so
+    // the manual fulfillment path works and the run is hung off the product.
+    items: [
+      {
+        title: "Retail Provenance Stole (e2e)",
+        quantity: 3,
+        unit_price: 2500,
+        product_id: product.id,
+      },
+    ],
+    metadata: { source: "e2e-provenance" },
+  })
+  const order = Array.isArray(created) ? created[0] : created
+
+  await ensureOrderFulfillment(container, order.id)
+
+  // The subscriber mints the run async on the emitted event — poll for it so
+  // the seed file only advertises the product once its run exists.
+  let minted = false
+  for (let i = 0; i < 40; i++) {
+    const { data: runs } = await query.graph({
+      entity: "production_runs",
+      fields: ["id", "design_id", "status"],
+      filters: { product_id: product.id },
+    })
+    if ((runs || []).length) {
+      minted = true
+      break
+    }
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  if (!minted) {
+    throw new Error("E2E seed: product-only production run was not minted")
+  }
+
+  return product.id
+}
+
+/**
+ * #1867 / #1963 — a region that DECLARES countries, seeded on OUR side rather
+ * than assumed to exist.
+ *
+ * The quote-draft spec selects a region by name and then asserts the country
+ * Select fills from it. `Singapore` existed only on one developer's laptop, so
+ * every CI run timed out waiting for an option that was never rendered. A
+ * region with an EMPTY countries list would fill the currency but leave the
+ * country Select empty — the exact regression the spec guards — so this one
+ * declares ["in"] on purpose.
+ *
+ * Find-or-create by name, never blind-create: the seed re-runs, and a duplicate
+ * region would make the option ambiguous and break the spec a different way.
+ */
+async function seedQuoteRegion(container: any): Promise<{
+  id: string
+  name: string
+}> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const regionService: any = container.resolve(Modules.REGION)
+
+  const { data: existing } = await query.graph({
+    entity: "region",
+    fields: ["id", "name", "currency_code", "countries.iso_2"],
+  })
+  const found = (existing ?? []).find(
+    (r: any) => r.name === "E2E Quote Region"
+  )
+  if (found) {
+    return { id: found.id, name: found.name }
+  }
+
+  /**
+   * 🔴 Find by NAME, then by what the region actually COVERS.
+   *
+   * Name alone was not enough. A country belongs to at most one region, so on
+   * any database that already has an India region — which is every realistic
+   * one, including the platform's own — the create below failed outright:
+   *
+   *     MedusaError: Countries with codes: "in" are already assigned to a region
+   *
+   * and `pnpm e2e:seed` died before writing `.e2e-seed.json`, taking the whole
+   * e2e suite with it. The seed is supposed to be runnable on a working
+   * database, not only on an empty one.
+   *
+   * An existing INR region covering India serves this seed's purpose exactly
+   * (a quote lane priced in rupees), so it is REUSED rather than duplicated —
+   * and duplicating it is not even possible.
+   */
+  const coversIndia = (existing ?? []).find(
+    (r: any) =>
+      String(r?.currency_code ?? "").toLowerCase() === "inr" &&
+      (r?.countries ?? []).some(
+        (c: any) => String(c?.iso_2 ?? "").toLowerCase() === "in"
+      )
+  )
+  if (coversIndia) {
+    return { id: coversIndia.id, name: coversIndia.name }
+  }
+
+  const created = await regionService.createRegions({
+    name: "E2E Quote Region",
+    currency_code: "inr",
+    countries: ["in"],
+  })
+  const row = Array.isArray(created) ? created[0] : created
+  return { id: row.id, name: row.name }
+}
+
+/**
+ * #1439 S3/S4 — two quotes on one partner, so the admin quote surface can be
+ * driven in a browser (#1463 shipped without ever having been).
+ *
+ * Written straight through the module service rather than by driving a real
+ * mint: the mint needs a partner store with a priced product and a quotable
+ * freight lane, and the fixture only needs the END state the surface renders.
+ * The mint path itself is covered against a real container by
+ * `integration-tests/http/partner-quote-mint.spec.ts`.
+ *
+ * 🔑 TWO quotes, and the second is `superseded` on purpose. Active-only
+ * fixtures would let the surface treat every dead quote as a revocation, and
+ * "the partner withdrew this offer" is a different and wrong story to tell an
+ * operator about a quote that was simply re-issued (#1435).
+ *
+ * `token_hash` is random rather than a hash of a known token: the raw token is
+ * never persisted, and a fixture that pretended otherwise would model a
+ * recoverable link, which is exactly what the detail page states cannot exist.
+ */
+async function seedAdminQuotes(container: any): Promise<{
+  partnerId: string
+  partnerName: string
+  activeQuoteId: string
+  activeQuoteCompany: string
+  supersededQuoteId: string
+  supersededQuoteCompany: string
+  acceptedQuoteId: string
+  acceptedQuoteCompany: string
+  zeroDepositQuoteId: string
+  zeroDepositQuoteCompany: string
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const link: any = container.resolve(ContainerRegistrationKeys.LINK)
+  // 🔴 `partnerQuote`, camelCase — NOT `partner_quote`.
+  //
+  // The module registers itself as `PARTNER_QUOTE_MODULE = "partnerQuote"`
+  // (`src/modules/partner-quote/index.ts`), while the directory, the table and
+  // every column prefix are snake_case. Resolving the snake_case name threw
+  // `Could not resolve 'partner_quote'` and took the WHOLE e2e suite red from
+  // 22 Aug — the seed dies before any spec runs, so a failure here reads like
+  // "the module is not registered" when it is registered in both configs.
+  // Imported from the module rather than retyped, so the next rename moves it.
+  const quoteService: any = container.resolve(PARTNER_QUOTE_MODULE)
+  const scheduleService: any = container.resolve(PAYMENT_SCHEDULE_MODULE)
+
+  const stamp = Date.now()
+
+  const createdPartner = await partnerModule.createPartners({
+    name: `E2E Quote Partner ${stamp}`,
+    handle: `e2e-quote-${stamp}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partner = Array.isArray(createdPartner) ? createdPartner[0] : createdPartner
+
+  /**
+   * #1963 — the quote partner needs a DEDICATED store, or the draft route
+   * refuses to price for it ("Partner ... has no store, so a quote cannot be
+   * priced for them") and every Save 400s. Mirrors the gate-partner store block
+   * below: the partner↔store link is one store per partner, so reusing an
+   * already-linked store throws "Cannot create multiple links between 'partner'
+   * and 'store'" the second time the seed runs.
+   */
+  const { data: quoteRegions } = await query.graph({
+    entity: "region",
+    fields: ["id"],
+  })
+  const { data: quoteChannels } = await query.graph({
+    entity: "sales_channel",
+    fields: ["id"],
+  })
+  const { data: quoteLocations } = await query.graph({
+    entity: "stock_location",
+    fields: ["id"],
+  })
+  const quoteRegionId = quoteRegions?.[0]?.id
+  const quoteChannelId = quoteChannels?.[0]?.id
+  const quoteLocationId = quoteLocations?.[0]?.id
+  if (!quoteRegionId || !quoteChannelId || !quoteLocationId) {
+    throw new Error(
+      `E2E seed: the quote partner's store needs a region (${quoteRegionId}), a sales channel (${quoteChannelId}) and a stock location (${quoteLocationId}). Without all three the draft route cannot price a quote for this partner. Run the demo seed first: \`medusa exec ./src/scripts/seed.ts\`.`
+    )
+  }
+
+  const storeModule: any = container.resolve(Modules.STORE)
+  const createdStore: any = await storeModule.createStores({
+    name: `E2E Quote Store ${stamp}`,
+    default_sales_channel_id: quoteChannelId,
+    default_location_id: quoteLocationId,
+    default_region_id: quoteRegionId,
+  })
+  const storeId = Array.isArray(createdStore) ? createdStore[0].id : createdStore.id
+
+  await link.create({
+    partner: { partner_id: partner.id },
+    store: { store_id: storeId },
+  })
+
+  // Stamped company names: the spec SEARCHES for these, and the search reaches
+  // the server (#1461), so a duplicate from a previous seed would make a
+  // one-row assertion flap.
+  const activeCompany = `E2E Active Buyer ${stamp} Pvt Ltd`
+  const supersededCompany = `E2E Superseded Buyer ${stamp} Pvt Ltd`
+
+  const mkQuote = async (suffix: string, over: Record<string, any>) => {
+    const created = await quoteService.createPartnerQuotes({
+      partner_id: partner.id,
+      destination_country_code: "in",
+      destination_postal_code: "400001",
+      destination_city: "Mumbai",
+      currency_code: "inr",
+      quoted_subtotal: 800000,
+      quoted_freight: 15000,
+      quoted_landed_total: 815000,
+      quoted_weight_grams: 11800,
+      quoted_at: new Date(),
+      // 32 random hex chars — shaped like the sha256 the mint stores, and
+      // unique because the column is.
+      token_hash: `e2e${stamp}${Math.random().toString(16).slice(2)}${suffix}`,
+      expires_at: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+      ...over,
+    })
+    const row = Array.isArray(created) ? created[0] : created
+
+    await quoteService.createPartnerQuoteLines([
+      {
+        quote_id: row.id,
+        variant_id: `variant_e2e_${stamp}_${suffix}`,
+        quantity: 25,
+        position: 0,
+        quoted_unit_amount: 28000,
+        quoted_subtotal: 700000,
+        quoted_unit_weight_grams: 400,
+        quoted_weight_source: "variant",
+      },
+    ])
+
+    return row.id as string
+  }
+
+  const activeQuoteId = await mkQuote("a", {
+    recipient_name: "Priya Menon",
+    recipient_company: activeCompany,
+    email_sent_to: `e2e-active-${stamp}@buyer.test`,
+    status: "active",
+  })
+
+  const supersededQuoteId = await mkQuote("s", {
+    recipient_name: "Rahul Iyer",
+    recipient_company: supersededCompany,
+    email_sent_to: `e2e-superseded-${stamp}@buyer.test`,
+    status: "superseded",
+  })
+
+  /**
+   * #1439 S11 — the two deposit cases the UI has to tell apart, plus an
+   * acceptance with a real ledger row behind it.
+   *
+   * 🔑 `deposit_pct: 0` is seeded ON PURPOSE and is the whole point of this
+   * fixture. Null means "nobody named terms, the platform's 30% applies at
+   * acceptance"; 0 means "this buyer pays nothing up front". Every `||` on the
+   * path from the form to the column collapses one into the other, and the
+   * collapse is silent — the partner sees the number they typed and the buyer
+   * is asked for a third of the order. A spec can only catch that if a 0
+   * actually exists in the data.
+   */
+  const acceptedCompany = `E2E Accepted Buyer ${stamp} Pvt Ltd`
+  const zeroDepositCompany = `E2E Zero Deposit Buyer ${stamp} Pvt Ltd`
+
+  const acceptedCartId = `cart_e2e_${stamp}`
+  const acceptedQuoteId = await mkQuote("x", {
+    recipient_name: "Anita Rao",
+    recipient_company: acceptedCompany,
+    email_sent_to: `e2e-accepted-${stamp}@buyer.test`,
+    status: "active",
+    deposit_pct: 40,
+    accepted_cart_id: acceptedCartId,
+    accepted_at: new Date(),
+  })
+
+  const zeroDepositQuoteId = await mkQuote("z", {
+    recipient_name: "Vikram Shah",
+    recipient_company: zeroDepositCompany,
+    email_sent_to: `e2e-zero-${stamp}@buyer.test`,
+    status: "active",
+    deposit_pct: 0,
+  })
+
+  /**
+   * The ledger behind the acceptance. Written through `openForCart` rather than
+   * by hand so the fixture cannot disagree with the split the product uses —
+   * a seeded deposit/balance pair that does not add back to the total would
+   * make the panel look right while proving nothing.
+   */
+  await scheduleService.openForCart({
+    cart_id: acceptedCartId,
+    currency_code: "inr",
+    total_due: 815000,
+    source_type: "quote",
+    source_id: acceptedQuoteId,
+    rail: "payu",
+    quote_deposit_pct: 40,
+  })
+
+  // One activity row, so the timeline renders its real shape rather than its
+  // "no activity recorded yet" fallback — the actor badge is the thing an
+  // operator reads first when a buyer challenges a price.
+  await quoteService.recordEvent({
+    quote_id: activeQuoteId,
+    type: "minted",
+    actor_type: "admin",
+    message: "Quote minted on the partner's behalf.",
+  })
+
+  return {
+    partnerId: partner.id as string,
+    partnerName: partner.name as string,
+    activeQuoteId,
+    activeQuoteCompany: activeCompany,
+    supersededQuoteId,
+    supersededQuoteCompany: supersededCompany,
+    acceptedQuoteId,
+    acceptedQuoteCompany: acceptedCompany,
+    zeroDepositQuoteId,
+    zeroDepositQuoteCompany: zeroDepositCompany,
+  }
+}
+
+/**
+ * #1228 — a production run parked in `awaiting_reassignment`, plus the two
+ * partners the reassign drawer picks between: the one that let it lapse
+ * (`previous_partner_id`, the "same partner again" option) and a fresh one.
+ *
+ * Written straight through the module services rather than by driving a real
+ * decline: the fixture only needs the END state, and going through the partner
+ * decline route would drag the whole auth + dispatch chain into the seed.
+ *
+ * Mirrors exactly what `reassignProductionRunWorkflow` leaves behind — partner
+ * unassigned, previous partner retained, a park reason for the drawer to show —
+ * so the spec exercises the same shape production produces.
+ */
+async function seedParkedProductionRun(container: any): Promise<{
+  runId: string
+  designId: string
+  lapsedPartnerId: string
+  lapsedPartnerName: string
+  freshPartnerName: string
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const designService: any = container.resolve("design")
+  const runService: any = container.resolve("production_runs")
+
+  const stamp = Date.now()
+
+  const mkPartner = async (label: string) => {
+    const created = await partnerModule.createPartners({
+      // Stamped: the name is what the reassign picker shows and what the spec
+      // selects on, so repeat seeds must not produce duplicates.
+      name: `E2E ${label} Partner ${stamp}`,
+      handle: `e2e-${label.toLowerCase()}-${stamp}`,
+      status: "active",
+      is_verified: true,
+    })
+    const row = Array.isArray(created) ? created[0] : created
+    return { id: row.id as string, name: row.name as string }
+  }
+
+  const lapsed = await mkPartner("Lapsed")
+  const fresh = await mkPartner("Fresh")
+
+  const design = await designService.createDesigns({
+    name: `Reassign Fixture (e2e ${stamp})`,
+    description: "e2e #1228 manual reassignment fixture",
+    design_type: "Original",
+    status: "Commerce_Ready",
+    priority: "Medium",
+  })
+  const designId = (Array.isArray(design) ? design[0] : design).id as string
+
+  const run = await runService.createProductionRuns({
+    design_id: designId,
+    quantity: 3,
+    run_type: "production",
+    // Both non-nullable on the model; the run page reads design.name off the
+    // snapshot.
+    snapshot: { design: { id: designId, name: `Reassign Fixture (e2e ${stamp})` } },
+    captured_at: new Date(),
+    status: "awaiting_reassignment",
+    partner_id: null,
+    previous_partner_id: lapsed.id,
+    cancelled_reason: "Declined by partner (capacity): Machine servicing",
+    reminder_count: 0,
+    reminder_status: "closed",
+  })
+  const runId = (Array.isArray(run) ? run[0] : run).id as string
+
+  return {
+    runId,
+    designId,
+    lapsedPartnerId: lapsed.id,
+    lapsedPartnerName: lapsed.name,
+    freshPartnerName: fresh.name,
+  }
+}
+
+/**
+ * #1556 — a partner with COMPLETED, priced production runs, so the admin
+ * payment-submission screen can be driven through the runs tab.
+ *
+ * The fixture's whole point is the two numbers disagreeing:
+ *
+ *   - ordered 9, produced 4 — the screen must bill 4. Billing the ordered
+ *     figure is what `runPayableAmount` still does on the auto-draft path, so a
+ *     fixture where the two match cannot tell the paths apart.
+ *   - a rate on the RUN (1200/unit) that disagrees with the design's own
+ *     `estimated_cost` (5000). Pricing off the design would bill 45,000 for
+ *     work worth 4,800, and a fixture whose design cost equals the run rate
+ *     would pass whichever one the screen actually used.
+ *
+ * 🔑 The design is left in `Technical_Review` deliberately. That is where run
+ * completion puts a design, and it is NOT one of the statuses the hand-
+ * submission gate accepts — so the spec also proves the screen waives that gate
+ * for run-sourced payouts rather than requiring someone to edit a design's
+ * review status in order to release a payment.
+ *
+ * A second run of the same design is included with NO rate: it must render as
+ * unpayable rather than silently billing zero or vanishing from the list.
+ *
+ * ⚠️ THREE runs, not two, and deliberately so. Creating a submission consumes a
+ * run permanently — the run-level guard is the whole point — so a spec that
+ * billed the same run it also makes read-only assertions about would pass once
+ * and then fail on every re-run and on every CI RETRY. `billableRunId` is the
+ * sacrificial one; `payableRunId` is never billed and stays assertable.
+ */
+async function seedPayableProductionRuns(container: any): Promise<{
+  partnerId: string
+  partnerName: string
+  partnerEmail: string
+  designId: string
+  designName: string
+  payableRunId: string
+  billableRunId: string
+  unpricedRunId: string
+  partnerBillableRunId: string
+  partnerBillableDesignName: string
+  partnerSumRunAId: string
+  partnerSumRunBId: string
+  sumDesignName: string
+  partnerMixedRunAId: string
+  partnerMixedRunBId: string
+  mixedDesignName: string
+  adminMixedRunAId: string
+  adminMixedRunBId: string
+  adminMixedDesignName: string
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const designService: any = container.resolve("design")
+  const runService: any = container.resolve("production_runs")
+  const remoteLink: any = container.resolve(ContainerRegistrationKeys.LINK)
+  const authModule: any = container.resolve(Modules.AUTH)
+
+  const stamp = Date.now()
+
+  const created = await partnerModule.createPartners({
+    name: `E2E Payout Partner ${stamp}`,
+    handle: `e2e-payout-${stamp}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partner = Array.isArray(created) ? created[0] : created
+
+  /**
+   * The payout partner needs a real login: the #1571 B-half spec drives the
+   * PARTNER UI, not the admin app, so it has to sign in as the partner who owns
+   * these runs. Mirrors the gate-partner block below, including the verified
+   * `auth_verification` row — without it login returns
+   * `{ verification_required: true }` with an actorless token that the partner
+   * UI deliberately refuses to persist, and every request 401s.
+   */
+  const partnerEmail = `e2e-payout-${stamp}@jyt.test`
+  await partnerModule.createPartnerAdmins({
+    email: partnerEmail,
+    first_name: "E2E",
+    last_name: "Payout",
+    role: "admin",
+    partner_id: partner.id,
+  })
+  const payoutHash = await Scrypt.kdf(SEED_PASSWORD, { logN: 15, r: 8, p: 1 })
+  const payoutAuth: any = await authModule.createAuthIdentities({
+    provider_identities: [
+      {
+        provider: "emailpass",
+        entity_id: partnerEmail,
+        provider_metadata: { password: payoutHash.toString("base64") },
+      },
+    ],
+    app_metadata: { partner_id: partner.id },
+  })
+  const payoutAuthId = Array.isArray(payoutAuth)
+    ? payoutAuth[0].id
+    : payoutAuth.id
+  const verifiedAt = new Date()
+  await authModule.createAuthVerifications([
+    {
+      auth_identity_id: payoutAuthId,
+      entity_id: partnerEmail,
+      entity_type: "email",
+      code_provider: "emailpass",
+      requested_at: verifiedAt,
+      verified_at: verifiedAt,
+    },
+  ])
+
+  const designName = `Payable Run Fixture (e2e ${stamp})`
+  const design = await designService.createDesigns({
+    name: designName,
+    description: "e2e #1556 payable production run fixture",
+    design_type: "Original",
+    // Where run completion leaves a design — see the note above.
+    status: "Technical_Review",
+    priority: "Medium",
+    // Deliberately NOT 1200: if the screen prices off the design instead of the
+    // run, the amount is visibly wrong rather than coincidentally right.
+    estimated_cost: 5000,
+  })
+  const designId = (Array.isArray(design) ? design[0] : design).id as string
+
+  // The submission workflow validates that the design belongs to the partner
+  // through this link, so the fixture is not payable without it.
+  await remoteLink.create({
+    design: { design_id: designId },
+    partner: { partner_id: partner.id },
+  })
+
+  const mkRun = async (overrides: Record<string, any>) => {
+    const run = await runService.createProductionRuns({
+      design_id: designId,
+      partner_id: partner.id,
+      run_type: "production",
+      status: "completed",
+      completed_at: new Date(),
+      snapshot: { design: { id: designId, name: designName } },
+      captured_at: new Date(),
+      ...overrides,
+    })
+    return (Array.isArray(run) ? run[0] : run).id as string
+  }
+
+  const payableRunId = await mkRun({
+    quantity: 9,
+    produced_quantity: 4,
+    partner_cost_estimate: 1200,
+    cost_type: "per_unit",
+  })
+
+  // Identical to `payableRunId`, and consumed by the spec that actually
+  // creates a submission. See the THREE-runs note above.
+  const billableRunId = await mkRun({
+    quantity: 9,
+    produced_quantity: 4,
+    partner_cost_estimate: 1200,
+    cost_type: "per_unit",
+  })
+
+  const unpricedRunId = await mkRun({
+    quantity: 2,
+    produced_quantity: 2,
+    partner_cost_estimate: null,
+  })
+
+  /**
+   * Consumed by the PARTNER-UI spec (#1571 B half). Separate from
+   * `billableRunId`, which the admin spec consumes — two specs billing one run
+   * would make whichever ran second fail on the double-pay guard, and that
+   * failure looks exactly like a real defect.
+   *
+   * 🔴 On its OWN design, and a separate RUN is not enough. Step 5 of
+   * `validateDesignsForSubmissionStep` refuses a DESIGN that already carries a
+   * Pending submission — a guard one level coarser than the run-level one. The
+   * partner spec submits before the admin spec does, so while both billable
+   * runs shared this fixture's design the admin submission was refused with
+   * "Designs already in an active payment submission", which names neither
+   * spec and reads like a product defect. Same reasoning as the sum-run design
+   * below; it was applied there and missed here.
+   */
+  const partnerBillableDesignName = `Partner Billable Fixture (e2e ${stamp})`
+  const partnerBillableDesign = await designService.createDesigns({
+    name: partnerBillableDesignName,
+    description: "e2e #1571 partner-submitted payout fixture",
+    design_type: "Original",
+    status: "Technical_Review",
+    priority: "Medium",
+    estimated_cost: 5000,
+  })
+  const partnerBillableDesignId = (
+    Array.isArray(partnerBillableDesign)
+      ? partnerBillableDesign[0]
+      : partnerBillableDesign
+  ).id as string
+  await remoteLink.create({
+    design: { design_id: partnerBillableDesignId },
+    partner: { partner_id: partner.id },
+  })
+
+  const partnerBillableRun = await runService.createProductionRuns({
+    design_id: partnerBillableDesignId,
+    partner_id: partner.id,
+    run_type: "production",
+    status: "completed",
+    completed_at: new Date(),
+    snapshot: {
+      design: { id: partnerBillableDesignId, name: partnerBillableDesignName },
+    },
+    captured_at: new Date(),
+    quantity: 9,
+    produced_quantity: 4,
+    partner_cost_estimate: 1200,
+    cost_type: "per_unit",
+  })
+  const partnerBillableRunId = (
+    Array.isArray(partnerBillableRun)
+      ? partnerBillableRun[0]
+      : partnerBillableRun
+  ).id as string
+
+  /**
+   * A PAIR of priced runs on the same design, billed together in one
+   * submission. A payment line is keyed by design, so both collapse into one
+   * line whose quantity must be the SUM (3 + 5 = 8), not the last one seen.
+   * The two produced figures differ on purpose: if the screen overwrites
+   * instead of summing, the total is 5x1200 or 3x1200 rather than 8x1200, and
+   * the assertion says which.
+   *
+   * 🔴 They sit on their OWN design, deliberately. Step 5 of
+   * `validateDesignsForSubmissionStep` refuses a design that already has a
+   * Pending submission ("Designs already in an active payment submission"), and
+   * the submit spec creates exactly that against the main fixture design. Put
+   * these two runs on it and the summing spec fails EVERY time, with a message
+   * about active submissions that says nothing about summing — a fixture
+   * collision wearing the costume of a product bug.
+   */
+  const sumDesignName = `Sum Run Fixture (e2e ${stamp})`
+  const sumDesign = await designService.createDesigns({
+    name: sumDesignName,
+    description: "e2e #1571 two-runs-one-line fixture",
+    design_type: "Original",
+    status: "Technical_Review",
+    priority: "Medium",
+    estimated_cost: 5000,
+  })
+  const sumDesignId = (Array.isArray(sumDesign) ? sumDesign[0] : sumDesign)
+    .id as string
+  await remoteLink.create({
+    design: { design_id: sumDesignId },
+    partner: { partner_id: partner.id },
+  })
+
+  const mkSumRun = async (overrides: Record<string, any>) => {
+    const run = await runService.createProductionRuns({
+      design_id: sumDesignId,
+      partner_id: partner.id,
+      run_type: "production",
+      status: "completed",
+      completed_at: new Date(),
+      snapshot: { design: { id: sumDesignId, name: sumDesignName } },
+      captured_at: new Date(),
+      ...overrides,
+    })
+    return (Array.isArray(run) ? run[0] : run).id as string
+  }
+
+  const partnerSumRunAId = await mkSumRun({
+    quantity: 3,
+    produced_quantity: 3,
+    partner_cost_estimate: 1200,
+    cost_type: "per_unit",
+  })
+  const partnerSumRunBId = await mkSumRun({
+    quantity: 5,
+    produced_quantity: 5,
+    partner_cost_estimate: 1200,
+    cost_type: "per_unit",
+  })
+
+  /**
+   * #1596 — a pair of runs on one design at DIFFERENT agreed rates: the exact
+   * case the issue was opened for, "3 at ₹850 and 1 at ₹1,200".
+   *
+   * 🔴 Different rates is the whole fixture. The summing pair above is
+   * deliberately 1200 and 1200, so a screen that collapses two rates into one
+   * typed total passes it — the sum is right either way. Only a pair that
+   * DISAGREES can tell a breakdown from an average, and only then does the
+   * line's `unit_amount` have to come back null.
+   *
+   * ⚠️ Its own design again, for the reason the block above gives: a design
+   * already carrying a Pending submission is refused outright, so sharing one
+   * would fail this spec with a message about active submissions that says
+   * nothing about per-piece prices. And these runs are CONSUMED by the
+   * submitting spec — read attempt #1, never a retry.
+   */
+  const mixedDesignName = `Mixed Rate Fixture (e2e ${stamp})`
+  const mixedDesign = await designService.createDesigns({
+    name: mixedDesignName,
+    description: "e2e #1596 per-piece prices fixture",
+    design_type: "Original",
+    status: "Technical_Review",
+    priority: "Medium",
+    estimated_cost: 5000,
+  })
+  const mixedDesignId = (
+    Array.isArray(mixedDesign) ? mixedDesign[0] : mixedDesign
+  ).id as string
+  await remoteLink.create({
+    design: { design_id: mixedDesignId },
+    partner: { partner_id: partner.id },
+  })
+
+  const mkMixedRun = async (overrides: Record<string, any>) => {
+    const run = await runService.createProductionRuns({
+      design_id: mixedDesignId,
+      partner_id: partner.id,
+      run_type: "production",
+      status: "completed",
+      completed_at: new Date(),
+      snapshot: { design: { id: mixedDesignId, name: mixedDesignName } },
+      captured_at: new Date(),
+      ...overrides,
+    })
+    return (Array.isArray(run) ? run[0] : run).id as string
+  }
+
+  const partnerMixedRunAId = await mkMixedRun({
+    quantity: 3,
+    produced_quantity: 3,
+    partner_cost_estimate: 850,
+    cost_type: "per_unit",
+  })
+  const partnerMixedRunBId = await mkMixedRun({
+    quantity: 1,
+    produced_quantity: 1,
+    partner_cost_estimate: 1200,
+    cost_type: "per_unit",
+  })
+
+  /**
+   * The same case again for the ADMIN create screen. A separate design and a
+   * separate pair, because both screens CONSUME what they bill — sharing one
+   * would make whichever spec ran second fail on the double-pay guard, and that
+   * failure looks exactly like a real defect.
+   */
+  const adminMixedDesignName = `Admin Mixed Rate Fixture (e2e ${stamp})`
+  const adminMixedDesign = await designService.createDesigns({
+    name: adminMixedDesignName,
+    description: "e2e #1596 per-piece prices fixture (admin screen)",
+    design_type: "Original",
+    status: "Technical_Review",
+    priority: "Medium",
+    estimated_cost: 5000,
+  })
+  const adminMixedDesignId = (
+    Array.isArray(adminMixedDesign) ? adminMixedDesign[0] : adminMixedDesign
+  ).id as string
+  await remoteLink.create({
+    design: { design_id: adminMixedDesignId },
+    partner: { partner_id: partner.id },
+  })
+
+  const mkAdminMixedRun = async (overrides: Record<string, any>) => {
+    const run = await runService.createProductionRuns({
+      design_id: adminMixedDesignId,
+      partner_id: partner.id,
+      run_type: "production",
+      status: "completed",
+      completed_at: new Date(),
+      snapshot: { design: { id: adminMixedDesignId, name: adminMixedDesignName } },
+      captured_at: new Date(),
+      ...overrides,
+    })
+    return (Array.isArray(run) ? run[0] : run).id as string
+  }
+
+  const adminMixedRunAId = await mkAdminMixedRun({
+    quantity: 3,
+    produced_quantity: 3,
+    partner_cost_estimate: 850,
+    cost_type: "per_unit",
+  })
+  const adminMixedRunBId = await mkAdminMixedRun({
+    quantity: 1,
+    produced_quantity: 1,
+    partner_cost_estimate: 1200,
+    cost_type: "per_unit",
+  })
+
+  return {
+    partnerId: partner.id as string,
+    partnerName: partner.name as string,
+    partnerEmail,
+    designId,
+    designName,
+    payableRunId,
+    billableRunId,
+    unpricedRunId,
+    partnerBillableRunId,
+    partnerBillableDesignName,
+    partnerSumRunAId,
+    partnerSumRunBId,
+    sumDesignName,
+    partnerMixedRunAId,
+    partnerMixedRunBId,
+    mixedDesignName,
+    adminMixedRunAId,
+    adminMixedRunBId,
+    adminMixedDesignName,
+  }
+}
+
+/**
+ * #1363 — a design with a MULTI-ITEM bill of materials and an approvable run,
+ * so the per-assignment material allocation can be driven through the admin UI.
+ *
+ * The BOM has to have more than one item or the fixture cannot discriminate:
+ * the whole defect was that a run carried EVERY item its design was linked to,
+ * and a one-item design looks identical whether the feature works or not. Three
+ * items means an assignment that takes one is visibly a choice.
+ *
+ * Two partners, because the point is that two assignments off the SAME design
+ * can be sent different materials. The run is left in `pending_review` — the
+ * status `approve` is allowed from — so the spec drives the real approval, not
+ * a shortcut into the end state.
+ */
+async function seedAllocationDesignRun(container: any): Promise<{
+  runId: string
+  designId: string
+  designName: string
+  partnerAName: string
+  partnerBName: string
+  materialALabel: string
+  materialBLabel: string
+  materialCLabel: string
+  materialAId: string
+  materialCId: string
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const designService: any = container.resolve("design")
+  const runService: any = container.resolve("production_runs")
+  const inventoryService: any = container.resolve(Modules.INVENTORY)
+  const remoteLink: any = container.resolve(ContainerRegistrationKeys.LINK)
+
+  const stamp = Date.now()
+
+  const mkPartner = async (label: string) => {
+    const created = await partnerModule.createPartners({
+      name: `E2E Alloc ${label} ${stamp}`,
+      handle: `e2e-alloc-${label.toLowerCase()}-${stamp}`,
+      status: "active",
+      is_verified: true,
+    })
+    const row = Array.isArray(created) ? created[0] : created
+    return { id: row.id as string, name: row.name as string }
+  }
+
+  const partnerA = await mkPartner("Weaver")
+  const partnerB = await mkPartner("Finisher")
+
+  const designName = `Allocation Fixture (e2e ${stamp})`
+  const design = await designService.createDesigns({
+    name: designName,
+    description: "e2e #1363 per-assignment material allocation fixture",
+    design_type: "Original",
+    status: "Commerce_Ready",
+    priority: "Medium",
+    /**
+     * #938 — a garment type that a MODEL supplied, not a designer.
+     *
+     * `product_type` and `design_type` answer different questions and the
+     * fixture carries both so a spec can prove the UI does not conflate them:
+     * this design is an "Original" (how original the work is) that is a
+     * "stole" (what the thing is).
+     *
+     * 🔑 `product_type_source: "inferred"` is the load-bearing half. An
+     * inferred type is provisional — it is what a human correction overwrites
+     * — so it has to be badged, and a fixture where every type looked
+     * designer-authored could never show that the badge appears.
+     */
+    product_type: "stole",
+    product_type_source: "inferred",
+  })
+  const designId = (Array.isArray(design) ? design[0] : design).id as string
+
+  // The bill of materials. Stamped titles because the spec selects on them and
+  // a repeat seed must not produce two chips reading the same thing.
+  const specs = [
+    { title: `E2E Mulberry Silk ${stamp}`, planned: 40 },
+    { title: `E2E Cotton Thread ${stamp}`, planned: 2 },
+    { title: `E2E Lining ${stamp}`, planned: 12 },
+  ]
+
+  const items: Array<{ id: string; title: string }> = []
+  for (const spec of specs) {
+    const created = await inventoryService.createInventoryItems({
+      title: spec.title,
+      sku: `e2e-alloc-${items.length}-${stamp}`,
+      requires_shipping: false,
+    })
+    const row = Array.isArray(created) ? created[0] : created
+    items.push({ id: row.id as string, title: spec.title })
+  }
+
+  await remoteLink.create(
+    items.map((item, i) => ({
+      design: { design_id: designId },
+      [Modules.INVENTORY]: { inventory_item_id: item.id },
+      data: { planned_quantity: specs[i].planned },
+    }))
+  )
+
+  const run = await runService.createProductionRuns({
+    design_id: designId,
+    quantity: 6,
+    run_type: "production",
+    // The parent snapshots the design's FULL BOM — that is what it is, the
+    // design's plan. The children get narrowed to what each partner is issued.
+    snapshot: {
+      design: { id: designId, name: designName },
+      inventory_links: items.map((item, i) => ({
+        inventory_item_id: item.id,
+        planned_quantity: specs[i].planned,
+        inventory_item: { id: item.id, title: item.title },
+      })),
+    },
+    captured_at: new Date(),
+    status: "pending_review",
+  })
+  const runId = (Array.isArray(run) ? run[0] : run).id as string
+
+  return {
+    runId,
+    designId,
+    designName,
+    partnerAName: partnerA.name,
+    partnerBName: partnerB.name,
+    materialALabel: specs[0].title,
+    materialBLabel: specs[1].title,
+    materialCLabel: specs[2].title,
+    materialAId: items[0].id,
+    materialCId: items[2].id,
+  }
+}
+
+/**
+ * #1113 — seed a design carrying a full brief (concept + aesthetic anchor +
+ * persona + competitors + price point + milestones + design budget), so the
+ * designer-invite → brief-moodboard flow (S1 invite/accept + S2 generate) can be
+ * driven end-to-end against the live server in CI. Returns the design id.
+ */
+async function seedDesignerInviteDesign(container: any): Promise<string> {
+  const designService: any = container.resolve("design")
+  const design = await designService.createDesigns({
+    name: `Designer Invite Brief (e2e)`,
+    description: "e2e designer-onboarding brief",
+    design_type: "Original",
+    status: "Conceptual",
+    priority: "Medium",
+    // Brief columns (#604 / #1113 S2) → the moodboard's anchor cards.
+    concept_theme: "90s Tokyo Streetwear",
+    aesthetic_keywords: ["utilitarian", "sleek", "nostalgic"],
+    persona: { age_range: "25-34", lifestyle: "urban minimalist", values: ["sustainability"] },
+    competitors: [{ name: "Acme Knits", differentiator: "hand-loomed" }],
+    price_point: "mid_market",
+    design_budget: 250000,
+    cost_currency: "inr",
+    milestones: [
+      { label: "Initial sketches", date: "2026-08-01" },
+      { label: "Production-ready samples", date: null },
+    ],
+  })
+  return design.id
+}
+
+/**
+ * #1195 — an order in the exact shape that hid "Mark as shipped": a line item
+ * the derivation stamps `requires_shipping: false` (title-only, so no shipping
+ * profile and no inventory to vote true), fulfilled against a NON-pickup manual
+ * option. The pickup rule the Medusa user guide documents is therefore NOT what
+ * suppresses the action — the undocumented `requires_shipping` term is.
+ *
+ * Deliberately built with `orderModule.createOrders` + the fulfillment
+ * workflow, NOT `createOrderWorkflow` (no tax provider on a fresh CI DB) and
+ * NOT through a cart (which would emit `order.placed`, whose subscriber repairs
+ * profiled items — this fixture must stay broken for the specs to mean
+ * anything).
+ */
+export async function seedShipmentGateOrder(container: any): Promise<{
+  orderId: string
+  fulfillmentId: string
+  currencyCode: string
+}> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const orderModule: any = container.resolve(Modules.ORDER)
+
+  const { data: regions } = await query.graph({
+    entity: "region",
+    fields: ["id", "currency_code", "countries.iso_2"],
+  })
+  const region = regions?.[0]
+  const { data: channels } = await query.graph({
+    entity: "sales_channel",
+    fields: ["id"],
+  })
+  const salesChannelId = channels?.[0]?.id
+  if (!region || !salesChannelId) {
+    throw new Error(
+      "E2E seed: no region/sales channel found. Run the demo seed first."
+    )
+  }
+
+  const created: any = await orderModule.createOrders({
+    status: "pending",
+    region_id: region.id,
+    currency_code: region.currency_code,
+    sales_channel_id: salesChannelId,
+    email: "e2e-gate@jyt.test",
+    shipping_address: {
+      first_name: "Gate",
+      last_name: "Check",
+      address_1: "1 Loom St",
+      city: "London",
+      postal_code: "EC1A 1BB",
+      country_code: region.countries?.[0]?.iso_2 || "gb",
+      phone: "8887776665",
+    },
+    items: [
+      {
+        title: "Tangaliya Stole (#1195 gate)",
+        quantity: 1,
+        unit_price: 1500,
+        // Explicit, so the fixture cannot drift if the derivation is fixed
+        // upstream — the spec's whole point is this value being false.
+        requires_shipping: false,
+      },
+    ],
+    metadata: { source: "e2e-shipment-gate" },
+  })
+  const order = Array.isArray(created) ? created[0] : created
+
+  const { data: withItems } = await query.graph({
+    entity: "order",
+    fields: ["id", "items.id"],
+    filters: { id: order.id },
+  })
+  const itemId = withItems?.[0]?.items?.[0]?.id
+  if (!itemId) throw new Error("E2E seed: gate order line item not created")
+
+  const { data: opts } = await query.graph({
+    entity: "shipping_option",
+    fields: [
+      "id",
+      "provider_id",
+      "service_zone.fulfillment_set.type",
+      "service_zone.fulfillment_set.location.id",
+    ],
+  })
+  const manual = (opts || []).find(
+    (o: any) =>
+      typeof o?.provider_id === "string" &&
+      o.provider_id.startsWith("manual") &&
+      o.service_zone?.fulfillment_set?.location?.id &&
+      o.service_zone?.fulfillment_set?.type !== "pickup"
+  )
+  if (!manual) {
+    throw new Error(
+      "E2E seed: no manual NON-pickup shipping option found. Run the demo seed first."
+    )
+  }
+
+  await createOrderFulfillmentWorkflow(container).run({
+    input: {
+      order_id: order.id,
+      items: [{ id: itemId, quantity: 1 }],
+      shipping_option_id: manual.id,
+      location_id: manual.service_zone?.fulfillment_set?.location?.id,
+      no_notification: true,
+    } as any,
+  })
+
+  const { data: refetched } = await query.graph({
+    entity: "order",
+    fields: ["fulfillments.id", "fulfillments.requires_shipping"],
+    filters: { id: order.id },
+  })
+  const fulfillment = refetched?.[0]?.fulfillments?.[0]
+  if (!fulfillment?.id) {
+    throw new Error("E2E seed: gate fulfillment not created")
+  }
+  if (fulfillment.requires_shipping !== false) {
+    // If this ever trips, upstream changed the derivation — the specs that use
+    // this fixture are asserting a bug that no longer exists. Fail loudly here
+    // rather than let them pass for the wrong reason.
+    throw new Error(
+      `E2E seed: gate fulfillment expected requires_shipping=false, got ${fulfillment.requires_shipping}`
+    )
+  }
+
+  return {
+    orderId: order.id,
+    fulfillmentId: fulfillment.id,
+    currencyCode: region.currency_code,
+  }
+}
+
+
+/**
+ * #1576 — an order the partner UI can actually SHIP.
+ *
+ * ## Why this could not reuse the #1195 gate fixture
+ *
+ * `seedShipmentGateOrder` is built to be the case where "Mark as shipped" is
+ * SUPPRESSED — its own docblock says the fixture "must stay broken for the
+ * specs to mean anything". Its line item is title-only, so the derivation
+ * stamps `requires_shipping: false`, and core treats a fulfillment that needs
+ * no shipping as already shipped. `POST .../shipment` therefore answers
+ * `400 Shipment has already been created` on the FIRST attempt.
+ *
+ * The carrier-modal spec asserts the opposite — that completing step 2 marks
+ * the fulfillment shipped — so it was asking the one fixture in this repo
+ * built to refuse it. It never passed and could not.
+ *
+ * ## What makes this one shippable, and why each part is load-bearing
+ *
+ * `requires_shipping` is derived as `hasShippingProfile ||
+ * someInventoryRequiresShipping` (core-flows `prepare-line-item-data`), and
+ * `create-fulfillment` then copies the item flag onto the fulfillment. So:
+ *
+ * 1. a REAL variant, not a title-only line — the profile is reached through
+ *    `item.variant.product.shipping_profile`;
+ * 2. its product linked to a shipping profile — 🔴 and to the SAME profile the
+ *    fulfillment's option carries. `create-fulfillment` throws "Shipping
+ *    profile X does not match the shipping profile of the order item Y" when
+ *    they differ, and for a profile-less product that comparison is
+ *    `undefined !== sp_…` — always true. Flipping the flag on a profile-less
+ *    product does not reveal the action, it makes the order UNFULFILLABLE.
+ * 3. `requires_shipping: true` written explicitly on the item, because this
+ *    seeder creates the order through `orderModule.createOrders` rather than
+ *    the workflow (no tax provider on a fresh CI DB), so nothing derives it.
+ *
+ * ⚠️ The assertion at the end is not decoration. If the fulfillment comes back
+ * `requires_shipping: false` the spec would fail 15 minutes later looking like
+ * a broken screen, exactly as it did before this fixture existed. Fail here,
+ * where the message names the cause.
+ */
+export async function seedShippablePartnerOrder(container: any): Promise<{
+  orderId: string
+  fulfillmentId: string
+  currencyCode: string
+}> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const orderModule: any = container.resolve(Modules.ORDER)
+  const productModule: any = container.resolve(Modules.PRODUCT)
+  const link: any = container.resolve(ContainerRegistrationKeys.LINK)
+
+  const { data: regions } = await query.graph({
+    entity: "region",
+    fields: ["id", "currency_code", "countries.iso_2"],
+  })
+  const region = regions?.[0]
+  const { data: channels } = await query.graph({
+    entity: "sales_channel",
+    fields: ["id"],
+  })
+  const salesChannelId = channels?.[0]?.id
+  if (!region || !salesChannelId) {
+    throw new Error(
+      "E2E seed: no region/sales channel found. Run the demo seed first."
+    )
+  }
+  const countryCode = region.countries?.[0]?.iso_2 || "gb"
+
+  /**
+   * The option the fulfillment will use, AND its profile — both, together.
+   * Picking the option here and the profile somewhere else is how they come to
+   * disagree, and a mismatch is a throw at fulfillment time.
+   */
+  const { data: opts } = await query.graph({
+    entity: "shipping_option",
+    fields: [
+      "id",
+      "provider_id",
+      "shipping_profile_id",
+      "service_zone.fulfillment_set.type",
+      "service_zone.fulfillment_set.location.id",
+    ],
+  })
+  const manual = (opts || []).find(
+    (o: any) =>
+      typeof o?.provider_id === "string" &&
+      o.provider_id.startsWith("manual") &&
+      o.service_zone?.fulfillment_set?.location?.id &&
+      o.service_zone?.fulfillment_set?.type !== "pickup" &&
+      o.shipping_profile_id
+  )
+  if (!manual) {
+    throw new Error(
+      "E2E seed: no manual NON-pickup shipping option WITH a shipping profile found. Run the demo seed first."
+    )
+  }
+
+  const stamp = Date.now()
+  const product = await productModule.createProducts({
+    title: `E2E Shippable Stole (#1576) ${stamp}`,
+    status: "published",
+    handle: `e2e-shippable-${stamp}`,
+    options: [{ title: "Size", values: ["One Size"] }],
+    variants: [
+      {
+        title: "One Size",
+        sku: `E2E-SHIP-${stamp}`,
+        // No inventory to manage: the profile alone carries the derivation,
+        // and stock would only add a way for this fixture to fail.
+        manage_inventory: false,
+        options: { Size: "One Size" },
+      },
+    ],
+  })
+  const createdProduct = Array.isArray(product) ? product[0] : product
+  const variantId = createdProduct?.variants?.[0]?.id
+  if (!variantId) {
+    throw new Error("E2E seed: shippable product variant not created")
+  }
+
+  // 🔴 The SAME profile the option carries — see the docblock.
+  await link.create({
+    [Modules.PRODUCT]: { product_id: createdProduct.id },
+    [Modules.FULFILLMENT]: { shipping_profile_id: manual.shipping_profile_id },
+  })
+
+  const created: any = await orderModule.createOrders({
+    status: "pending",
+    region_id: region.id,
+    currency_code: region.currency_code,
+    sales_channel_id: salesChannelId,
+    email: "e2e-carrier@jyt.test",
+    shipping_address: {
+      first_name: "Ravi",
+      last_name: "Kumar",
+      address_1: "12 Carrier Rd",
+      city: "London",
+      postal_code: "EC1A 1BB",
+      country_code: countryCode,
+      phone: "8887776665",
+    },
+    items: [
+      {
+        title: `E2E Shippable Stole (#1576) ${stamp}`,
+        quantity: 1,
+        unit_price: 2500,
+        variant_id: variantId,
+        product_id: createdProduct.id,
+        // Explicit: nothing derives it on this path. See the docblock.
+        requires_shipping: true,
+      },
+    ],
+    metadata: { source: "e2e-carrier-modal" },
+  })
+  const order = Array.isArray(created) ? created[0] : created
+
+  const { data: withItems } = await query.graph({
+    entity: "order",
+    fields: ["items.id"],
+    filters: { id: order.id },
+  })
+  const itemId = withItems?.[0]?.items?.[0]?.id
+  if (!itemId) {
+    throw new Error("E2E seed: shippable order line item not created")
+  }
+
+  await createOrderFulfillmentWorkflow(container).run({
+    input: {
+      order_id: order.id,
+      items: [{ id: itemId, quantity: 1 }],
+      shipping_option_id: manual.id,
+      location_id: manual.service_zone?.fulfillment_set?.location?.id,
+      no_notification: true,
+    } as any,
+  })
+
+  const { data: refetched } = await query.graph({
+    entity: "order",
+    fields: ["fulfillments.id", "fulfillments.requires_shipping", "fulfillments.shipped_at"],
+    filters: { id: order.id },
+  })
+  const fulfillment = refetched?.[0]?.fulfillments?.[0]
+  if (!fulfillment?.id) {
+    throw new Error("E2E seed: shippable fulfillment not created")
+  }
+
+  /**
+   * 🔴 Both assertions, loudly. This fixture exists ONLY to be shippable, and
+   * a silent regression in either direction turns the carrier spec into a
+   * 15-minute failure that reads like a broken screen.
+   */
+  if (fulfillment.requires_shipping !== true) {
+    throw new Error(
+      `E2E seed: shippable fulfillment expected requires_shipping=true, got ${fulfillment.requires_shipping}. The product/option shipping profiles have probably diverged — see seedShippablePartnerOrder.`
+    )
+  }
+  if (fulfillment.shipped_at) {
+    throw new Error(
+      `E2E seed: shippable fulfillment was already shipped at ${fulfillment.shipped_at} — the carrier spec has nothing left to do.`
+    )
+  }
+
+  return {
+    orderId: order.id,
+    fulfillmentId: fulfillment.id,
+    currencyCode: region.currency_code,
+  }
+}
+
+/**
+ * #1195 — a partner that can open the gate order in the partner-UI. Mirrors the
+ * admin identity seeding above (Scrypt-hashed emailpass identity), then links
+ * the store and the order.
+ *
+ * The store link is NOT optional: without one the partner order-detail route
+ * requests `/partners/stores/undefined/locations/<id>` and error-boundaries the
+ * whole page into a 400, so the fulfillment section never renders.
+ */
+export async function seedShipmentGatePartner(
+  container: any,
+  orderId: string
+): Promise<{ email: string; password: string; partnerId: string }> {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const authModule = container.resolve(Modules.AUTH)
+  const link: any = container.resolve(ContainerRegistrationKeys.LINK)
+  const partnerModule: any = container.resolve("partner")
+
+  const email = `e2e-partner-gate-${Date.now()}@jyt.test`
+  const partner = await partnerModule.createPartners({
+    name: "E2E Gate Partner",
+    handle: `e2e-gate-${Date.now()}`,
+    // Active + verified, else the app parks the session on /onboarding.
+    status: "active",
+    is_verified: true,
+  })
+  const partnerId = Array.isArray(partner) ? partner[0].id : partner.id
+
+  await partnerModule.createPartnerAdmins({
+    email,
+    first_name: "E2E",
+    last_name: "Partner",
+    role: "admin",
+    partner_id: partnerId,
+  })
+
+  const hashConfig = { logN: 15, r: 8, p: 1 }
+  const passwordHash = await Scrypt.kdf(SEED_PASSWORD, hashConfig)
+  const authIdentity: any = await authModule.createAuthIdentities({
+    provider_identities: [
+      {
+        provider: "emailpass",
+        entity_id: email,
+        provider_metadata: { password: passwordHash.toString("base64") },
+      },
+    ],
+    app_metadata: { partner_id: partnerId },
+  })
+  const authIdentityId = Array.isArray(authIdentity)
+    ? authIdentity[0].id
+    : authIdentity.id
+
+  // PARTNER_EMAIL_VERIFICATION: without a VERIFIED auth_verification row the
+  // login returns `{ verification_required: true }` with an actorless token,
+  // and the partner UI deliberately does not persist that token — so the seeded
+  // partner would appear to log in and then 401 on every request. Same row the
+  // `backfill-partner-email-verified` DP job writes.
+  const now = new Date()
+  await authModule.createAuthVerifications([
+    {
+      auth_identity_id: authIdentityId,
+      entity_id: email,
+      entity_type: "email",
+      code_provider: "emailpass",
+      requested_at: now,
+      verified_at: now,
+    },
+  ])
+
+  // A DEDICATED store, not the demo one: the partner↔store link is one store
+  // per partner (`defineLink(partner, { store, isList: true })`), so reusing an
+  // already-linked store throws "Cannot create multiple links between 'partner'
+  // and 'store'" the second time the seed runs.
+  //
+  /**
+   * 🔴 The three defaults are NOT decoration — the store is unusable without
+   * them, and the way it fails is the worst kind.
+   *
+   * `GET /partners/stores` throws `NOT_FOUND` when any of
+   * `default_sales_channel_id` / `default_location_id` / `default_region_id` is
+   * missing. The partner order-detail page requests it, the route error
+   * boundary paints a 404 for the whole page, and the ORDER never renders —
+   * even though every order request returned 200 and the action the spec just
+   * performed had succeeded.
+   *
+   * That is precisely how "completing step 2 marks the fulfillment shipped"
+   * failed on main: the shipment POST returned 200, the fulfillment WAS
+   * shipped, and the assertion then looked for "Shipped" on a page reading
+   * "404 - There is no page at this address". A seed defect wearing the costume
+   * of a broken screen — and the retries could never pass either, because the
+   * first attempt had already shipped the fulfillment.
+   */
+  const { data: gateRegions } = await query.graph({
+    entity: "region",
+    fields: ["id"],
+  })
+  const { data: gateChannels } = await query.graph({
+    entity: "sales_channel",
+    fields: ["id"],
+  })
+  const { data: gateLocations } = await query.graph({
+    entity: "stock_location",
+    fields: ["id"],
+  })
+  const gateRegionId = gateRegions?.[0]?.id
+  const gateChannelId = gateChannels?.[0]?.id
+  const gateLocationId = gateLocations?.[0]?.id
+  if (!gateRegionId || !gateChannelId || !gateLocationId) {
+    throw new Error(
+      `E2E seed: the gate partner's store needs a region (${gateRegionId}), a sales channel (${gateChannelId}) and a stock location (${gateLocationId}). Without all three, /partners/stores 404s and every partner order page renders as a 404. Run the demo seed first: \`medusa exec ./src/scripts/seed.ts\`.`
+    )
+  }
+
+  const storeModule: any = container.resolve(Modules.STORE)
+  const createdStore: any = await storeModule.createStores({
+    name: `E2E Gate Store ${Date.now()}`,
+    default_sales_channel_id: gateChannelId,
+    default_location_id: gateLocationId,
+    default_region_id: gateRegionId,
+  })
+  const storeId = Array.isArray(createdStore)
+    ? createdStore[0].id
+    : createdStore.id
+
+  await link.create({
+    partner: { partner_id: partnerId },
+    store: { store_id: storeId },
+  })
+  await link.create({
+    partner: { partner_id: partnerId },
+    order: { order_id: orderId },
+  })
+
+  // Password returned explicitly rather than letting the spec reuse the admin
+  // `password` field — they happen to be the same constant today, and a spec
+  // that silently depends on that fails with "Invalid email or password".
+  return { email, password: SEED_PASSWORD, partnerId }
+}
+
+/**
+ * Seed a partner + website + page + blocks for the visual block editor e2e spec.
+ * Mirrors seedShipmentGatePartner for auth, then creates a website with a page
+ * containing a Hero block and a Feature block so the editor has content to render.
+ */
+async function seedContentEditorPartner(
+  container: any
+): Promise<{
+  email: string
+  password: string
+  partnerId: string
+  pageId: string
+  websiteId: string
+}> {
+  const authModule = container.resolve(Modules.AUTH)
+  const link: any = container.resolve(ContainerRegistrationKeys.LINK)
+  const partnerModule: any = container.resolve("partner")
+  const websiteService = container.resolve("websites")
+  const storeModule: any = container.resolve(Modules.STORE)
+
+  const email = `e2e-content-${Date.now()}@jyt.test`
+
+  // Partner
+  const partner = await partnerModule.createPartners({
+    name: "E2E Content Partner",
+    handle: `e2e-content-${Date.now()}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partnerId = Array.isArray(partner) ? partner[0].id : partner.id
+
+  await partnerModule.createPartnerAdmins({
+    email,
+    first_name: "Content",
+    last_name: "Editor",
+    role: "admin",
+    partner_id: partnerId,
+  })
+
+  // Auth identity + verification
+  const hashConfig = { logN: 15, r: 8, p: 1 }
+  const passwordHash = await Scrypt.kdf(SEED_PASSWORD, hashConfig)
+  const authIdentity: any = await authModule.createAuthIdentities({
+    provider_identities: [
+      {
+        provider: "emailpass",
+        entity_id: email,
+        provider_metadata: { password: passwordHash.toString("base64") },
+      },
+    ],
+    app_metadata: { partner_id: partnerId },
+  })
+  const authIdentityId = Array.isArray(authIdentity)
+    ? authIdentity[0].id
+    : authIdentity.id
+
+  const now = new Date()
+  await authModule.createAuthVerifications([
+    {
+      auth_identity_id: authIdentityId,
+      entity_id: email,
+      entity_type: "email",
+      code_provider: "emailpass",
+      requested_at: now,
+      verified_at: now,
+    },
+  ])
+
+  // Store
+  const createdStore: any = await storeModule.createStores({
+    name: `E2E Content Store ${Date.now()}`,
+  })
+  const storeId = Array.isArray(createdStore)
+    ? createdStore[0].id
+    : createdStore.id
+  await link.create({
+    partner: { partner_id: partnerId },
+    store: { store_id: storeId },
+  })
+
+  // Website
+  const domain = `e2e-content-${Date.now()}.jyt.test`
+  const website = await websiteService.createWebsites({
+    domain,
+    name: "E2E Content Website",
+    status: "Active",
+    primary_language: "en",
+  })
+
+  // Link partner to website
+  await partnerModule.updatePartners({
+    id: partnerId,
+    storefront_domain: domain,
+    website_id: website.id,
+  })
+
+  // Page
+  const pageService = container.resolve("websites")
+  const page = await pageService.createPages({
+    website_id: website.id,
+    title: "E2E Content Page",
+    slug: "e2e-content-page",
+    content: "Test content for visual editor",
+    page_type: "Custom",
+    status: "Published",
+    last_modified: new Date(),
+  })
+
+  // Seed blocks: one Hero (unique) + one Feature (repeatable)
+  await websiteService.createBlocks({
+    page_id: page.id,
+    name: "Hero Section",
+    type: "Hero",
+    content: { title: "Welcome to our store", subtitle: "Handcrafted textiles" },
+    settings: { backgroundColor: "#f5f5f5", padding: "40", max_width: "wide" },
+    status: "Active",
+    order: 0,
+  })
+  await websiteService.createBlocks({
+    page_id: page.id,
+    name: "Feature Highlight",
+    type: "Feature",
+    content: { title: "Natural fibers", description: "100% organic cotton" },
+    settings: {},
+    status: "Active",
+    order: 1,
+  })
+
+  return { email, password: SEED_PASSWORD, partnerId, pageId: page.id, websiteId: website.id }
+}
+
+/**
+ * One CRM contact with a prior inbound activity, for the contact-detail spec.
+ *
+ * The CRM lives on a Hyperbee node, not Postgres — the e2e run uses the
+ * EMBEDDED store (`CRM_HYPERBEE=true`), so this writes through the module
+ * service exactly as the admin route does. If the module is disabled the
+ * resolve throws, which is the honest failure: a CRM spec against no CRM would
+ * otherwise "pass" by finding nothing.
+ *
+ * The activity matters as much as the person. An empty timeline renders the
+ * same empty-state whether the section works or not, so the spec needs at least
+ * one row it can point at.
+ */
+async function seedCrmContact(container: any): Promise<{
+  personId: string
+  personName: string
+  activityBody: string
+}> {
+  const crm: any = container.resolve("crm")
+
+  const first = "Noor"
+  const last = `Weaver-${Date.now()}`
+  const person = await crm.createCrmPeople({
+    first_name: first,
+    last_name: last,
+    email: `e2e-crm-${Date.now()}@jyt.test`,
+    phone: "+911234567890",
+    title: "Head weaver",
+  })
+  const created = Array.isArray(person) ? person[0] : person
+
+  const activityBody = "Asked for a photo of the border before sampling."
+  await crm.recordCrmActivity({
+    related_type: "person",
+    related_id: created.id,
+    activity_type: "message",
+    direction: "inbound",
+    channel: "whatsapp",
+    body: activityBody,
+  })
+
+  return {
+    personId: created.id,
+    personName: `${first} ${last}`,
+    activityBody,
+  }
+}
+
+/**
+ * Partner + two linked payment methods for the partner-UI settings/payments
+ * spec (edit + delete). Mirrors `seedShipmentGatePartner` for auth, then links
+ * two `internal_payment_details` rows to the partner via the same
+ * `partner ↔ internal_payments` link the create workflow writes.
+ *
+ * TWO methods, deliberately: the edit case renames one and the delete case
+ * removes the other, so neither case mutates the other's fixture. Both carry a
+ * stamped account name — the spec selects rows by that text, and a repeat seed
+ * must not produce two rows reading the same thing.
+ */
+async function seedPaymentMethodsPartner(container: any): Promise<{
+  partnerId: string
+  email: string
+  password: string
+  editMethodId: string
+  editMethodName: string
+  deleteMethodId: string
+  deleteMethodName: string
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const authModule = container.resolve(Modules.AUTH)
+  const link: any = container.resolve(ContainerRegistrationKeys.LINK)
+  const payments: any = container.resolve("internal_payments")
+
+  const stamp = Date.now()
+
+  const created = await partnerModule.createPartners({
+    name: `E2E Payments Partner ${stamp}`,
+    handle: `e2e-payments-${stamp}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partnerId = Array.isArray(created) ? created[0].id : created.id
+
+  const email = `e2e-payments-${stamp}@jyt.test`
+  await partnerModule.createPartnerAdmins({
+    email,
+    first_name: "E2E",
+    last_name: "Payments",
+    role: "admin",
+    partner_id: partnerId,
+  })
+
+  const hashConfig = { logN: 15, r: 8, p: 1 }
+  const passwordHash = await Scrypt.kdf(SEED_PASSWORD, hashConfig)
+  const authIdentity: any = await authModule.createAuthIdentities({
+    provider_identities: [
+      {
+        provider: "emailpass",
+        entity_id: email,
+        provider_metadata: { password: passwordHash.toString("base64") },
+      },
+    ],
+    app_metadata: { partner_id: partnerId },
+  })
+  const authIdentityId = Array.isArray(authIdentity)
+    ? authIdentity[0].id
+    : authIdentity.id
+
+  const now = new Date()
+  await authModule.createAuthVerifications([
+    {
+      auth_identity_id: authIdentityId,
+      entity_id: email,
+      entity_type: "email",
+      code_provider: "emailpass",
+      requested_at: now,
+      verified_at: now,
+    },
+  ])
+
+  const mkMethod = async (suffix: string, type: string) => {
+    const createdMethod = await payments.createPaymentDetails({
+      type,
+      account_name: `E2E ${suffix} Acct ${stamp}`,
+      account_number: `E2E-ACCT-${suffix}-${stamp}`,
+      bank_name: "E2E Bank",
+      ifsc_code: "E2E0000123",
+      wallet_id: null,
+    })
+    const method = Array.isArray(createdMethod) ? createdMethod[0] : createdMethod
+
+    await link.create({
+      partner: { partner_id: partnerId },
+      internal_payments: { internal_payment_details_id: method.id },
+    })
+
+    return { id: method.id as string, name: method.account_name as string }
+  }
+
+  const editMethod = await mkMethod("Edit", "bank_account")
+  const deleteMethod = await mkMethod("Delete", "bank_account")
+
+  return {
+    partnerId,
+    email,
+    password: SEED_PASSWORD,
+    editMethodId: editMethod.id,
+    editMethodName: editMethod.name,
+    deleteMethodId: deleteMethod.id,
+    deleteMethodName: deleteMethod.name,
+  }
+}
+
+/**
+ * #1553 — a run whose transfers cover ALL THREE carrier states, so the row can
+ * be driven in a browser.
+ *
+ * 🔴 The point of the change is not "show the AWB". It is that `not_booked` and
+ * `unresolved` must not read the same: one is a van run with no waybill and
+ * that is the final answer, the other is a booked shipment the server could not
+ * read — and collapsing them sends an operator to re-book goods the carrier has
+ * already collected. A fixture with only a booked hop cannot fail that.
+ */
+async function seedRunTransferCarrier(container: any): Promise<{
+  runId: string
+  designName: string
+  bookedAwb: string
+  bookedCarrier: string
+  danglingShipmentId: string
+}> {
+  const designService: any = container.resolve("design")
+  const runService: any = container.resolve("production_runs")
+  const fulfilled: any = container.resolve("fullfilled_orders")
+  const stockLocation: any = container.resolve(Modules.STOCK_LOCATION)
+
+  const stamp = Date.now()
+
+  const designName = `Transfer Carrier Fixture (e2e ${stamp})`
+  const design = await designService.createDesigns({
+    name: designName,
+    description: "e2e #1553 goods-transfer carrier fixture",
+    design_type: "Original",
+    status: "Technical_Review",
+    priority: "Medium",
+  })
+  const designId = (Array.isArray(design) ? design[0] : design).id as string
+
+  const run = await runService.createProductionRuns({
+    design_id: designId,
+    run_type: "production",
+    status: "completed",
+    quantity: 12,
+    produced_quantity: 12,
+    completed_at: new Date(),
+    snapshot: { design: { id: designId, name: designName } },
+    captured_at: new Date(),
+  })
+  const runId = (Array.isArray(run) ? run[0] : run).id as string
+
+  // Named locations, so the row reads as a movement rather than two ids. The
+  // component falls back to the raw id, which would pass an assertion while
+  // looking broken.
+  const mkLocation = async (name: string) => {
+    const created = await stockLocation.createStockLocations({ name })
+    return (Array.isArray(created) ? created[0] : created).id as string
+  }
+  const fromLocationId = await mkLocation(`E2E Transfer Origin ${stamp}`)
+  const toLocationId = await mkLocation(`E2E Transfer Finisher ${stamp}`)
+
+  const mkTransfer = async (overrides: Record<string, any>) => {
+    const created = await fulfilled.createGoodsTransfers({
+      production_run_id: runId,
+      design_id: designId,
+      quantity: 4,
+      from_location_id: fromLocationId,
+      to_location_id: toLocationId,
+      reason: "finishing",
+      status: "in_transit",
+      ...overrides,
+    })
+    return (Array.isArray(created) ? created[0] : created).id as string
+  }
+
+  // ── booked ────────────────────────────────────────────────────────────────
+  // The whole point: a waybill that outlives the booking toast.
+  const bookedCarrier = "Bluedart"
+  const bookedAwb = `E2ECARRIER${stamp}`
+  const shipmentCreated = await fulfilled.createInventoryShipments({
+    carrier: bookedCarrier,
+    awb: bookedAwb,
+    tracking_number: bookedAwb,
+    tracking_url: `https://example.invalid/track/${bookedAwb}`,
+    label_url: `https://example.invalid/label/${bookedAwb}.pdf`,
+    status: "pickup_scheduled",
+    pickup_location_name: `E2E Transfer Origin ${stamp}`,
+    pickup_scheduled_date: "2026-09-02",
+  })
+  const shipment = Array.isArray(shipmentCreated)
+    ? shipmentCreated[0]
+    : shipmentCreated
+  await mkTransfer({
+    shipment_id: shipment.id,
+    shipped_at: new Date("2026-08-30T04:00:00.000Z"),
+  })
+
+  // ── not_booked ────────────────────────────────────────────────────────────
+  // A van run between two of our own locations. No AWB, and that is correct.
+  await mkTransfer({ reason: "stock", status: "draft", shipment_id: null })
+
+  // ── unresolved ────────────────────────────────────────────────────────────
+  // A `shipment_id` naming a row that cannot be read. Deliberately a plain
+  // string rather than a deleted row: `shipment_id` is a column, not a
+  // relation, so nothing stops it dangling — which is exactly why the third
+  // state has to exist.
+  const danglingShipmentId = `ship_e2e_missing_${stamp}`
+  await mkTransfer({ reason: "qc", shipment_id: danglingShipmentId })
+
+  return { runId, designName, bookedAwb, bookedCarrier, danglingShipmentId }
+}
+
+/**
+ * #1612 — a partner carrying BOTH money records, so the merged ledger panel can
+ * be driven in a browser.
+ *
+ * 🔴 The defect this closes is a panel that shows half the money and reads as
+ * complete, so the fixture is deliberately mixed: a payout (a submission with a
+ * line behind it) that no `internal_payments` row was ever written for — every
+ * payout since #1638 — plus a historical `internal_payments` row that no payout
+ * points at. A partner with only one of the two cannot fail the old code.
+ */
+async function seedPartnerLedgerFixture(container: any): Promise<{
+  partnerId: string
+  partnerName: string
+  designName: string
+  submissionId: string
+  payoutAmount: number
+  paymentAmount: number
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const designService: any = container.resolve("design")
+  const submissionsService: any = container.resolve("payment_submissions")
+  const paymentsService: any = container.resolve("internal_payments")
+  const remoteLink: any = container.resolve(ContainerRegistrationKeys.LINK)
+
+  const stamp = Date.now()
+
+  const created = await partnerModule.createPartners({
+    name: `E2E Ledger Partner ${stamp}`,
+    handle: `e2e-ledger-${stamp}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partner = Array.isArray(created) ? created[0] : created
+
+  const designName = `Ledger Fixture Design (e2e ${stamp})`
+  const design = await designService.createDesigns({
+    name: designName,
+    description: "e2e #1612 merged partner ledger fixture",
+    design_type: "Original",
+    status: "Technical_Review",
+    priority: "Medium",
+    estimated_cost: 900,
+  })
+  const designId = (Array.isArray(design) ? design[0] : design).id as string
+  await remoteLink.create({
+    design: { design_id: designId },
+    partner: { partner_id: partner.id },
+  })
+
+  /**
+   * The payout half. `Approved` rather than `Paid`: approval is exactly the
+   * state that writes no payment row, so this entry is invisible to the old
+   * `internal_payments`-only panel AND lands in `outstanding` rather than
+   * `paid`, which the totals line then has to distinguish.
+   */
+  const payoutAmount = 4500
+  const submissionCreated = await submissionsService.createPaymentSubmissions({
+    partner_id: partner.id,
+    status: "Approved",
+    total_amount: payoutAmount,
+    currency: "inr",
+    submitted_at: new Date("2026-08-01T04:00:00.000Z"),
+    reviewed_at: new Date("2026-08-02T04:00:00.000Z"),
+  })
+  const submission = Array.isArray(submissionCreated)
+    ? submissionCreated[0]
+    : submissionCreated
+
+  await submissionsService.createPaymentSubmissionItems({
+    submission_id: submission.id,
+    source_type: "design",
+    design_id: designId,
+    design_name: designName,
+    amount: payoutAmount,
+    quantity: 5,
+    unit_amount: 900,
+  })
+
+  /**
+   * The payment half — a row of the shape the 31 historical ones have: money
+   * that moved, with no statement of what it was for. Deliberately a DIFFERENT
+   * amount from the payout, so a panel that renders one entry twice shows a
+   * total that is visibly wrong rather than coincidentally right.
+   */
+  const paymentAmount = 1200
+  const paymentCreated = await paymentsService.createPayments({
+    amount: paymentAmount,
+    status: "Pending",
+    payment_type: "Bank",
+    payment_date: new Date("2025-11-14T04:00:00.000Z"),
+  })
+  const payment = Array.isArray(paymentCreated)
+    ? paymentCreated[0]
+    : paymentCreated
+
+  await remoteLink.create({
+    partner: { partner_id: partner.id },
+    internal_payments: { internal_payments_id: payment.id },
+  })
+
+  return {
+    partnerId: partner.id as string,
+    partnerName: partner.name as string,
+    designName,
+    submissionId: submission.id as string,
+    payoutAmount,
+    paymentAmount,
+  }
+}
+
+/**
+ * #1596 — a submission carrying a mixed-price line beside an ordinary one, so
+ * the Rate cell can be driven in a browser.
+ *
+ * 🔴 A mixed line's `unit_amount` is NULL by design: an average is a rate
+ * nobody agreed to. That null is why the cell said "typed total" — exactly
+ * wrong, since the rates ARE recorded, there are simply more than one. The
+ * fixture therefore needs BOTH kinds on one submission: a mixed line alone
+ * cannot show that the ordinary path still reads a single rate, and an
+ * ordinary line alone cannot show the bands at all.
+ *
+ * `Pending`, so the lines are editable — which is the only state in which the
+ * "a breakdown is not editable here" half is even assertable.
+ */
+async function seedRateBreakdownSubmission(container: any): Promise<{
+  partnerId: string
+  submissionId: string
+  mixedDesignName: string
+  flatDesignName: string
+  mixedBreakdownText: string
+  mixedAmount: number
+  flatUnitAmount: number
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const designService: any = container.resolve("design")
+  const submissionsService: any = container.resolve("payment_submissions")
+  const remoteLink: any = container.resolve(ContainerRegistrationKeys.LINK)
+
+  const stamp = Date.now()
+
+  const created = await partnerModule.createPartners({
+    name: `E2E Rate Partner ${stamp}`,
+    handle: `e2e-rate-${stamp}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partner = Array.isArray(created) ? created[0] : created
+
+  const mkDesign = async (name: string) => {
+    const design = await designService.createDesigns({
+      name,
+      description: "e2e #1596 rate breakdown fixture",
+      design_type: "Original",
+      status: "Technical_Review",
+      priority: "Medium",
+    })
+    const id = (Array.isArray(design) ? design[0] : design).id as string
+    await remoteLink.create({
+      design: { design_id: id },
+      partner: { partner_id: partner.id },
+    })
+    return id
+  }
+
+  const mixedDesignName = `Mixed Price Fixture (e2e ${stamp})`
+  const flatDesignName = `Flat Price Fixture (e2e ${stamp})`
+  const mixedDesignId = await mkDesign(mixedDesignName)
+  const flatDesignId = await mkDesign(flatDesignName)
+
+  // 3 × 850 + 1 × 1200 = 3750. The bands are NOT round multiples of each
+  // other, so a screen that averaged them (937.5) would be visibly wrong.
+  const mixedAmount = 3750
+  const flatUnitAmount = 850
+  const flatAmount = 7650
+
+  const submissionCreated = await submissionsService.createPaymentSubmissions({
+    partner_id: partner.id,
+    status: "Pending",
+    total_amount: mixedAmount + flatAmount,
+    currency: "inr",
+    submitted_at: new Date("2026-08-20T04:00:00.000Z"),
+  })
+  const submission = Array.isArray(submissionCreated)
+    ? submissionCreated[0]
+    : submissionCreated
+
+  await submissionsService.createPaymentSubmissionItems({
+    submission_id: submission.id,
+    source_type: "design",
+    design_id: mixedDesignId,
+    design_name: mixedDesignName,
+    amount: mixedAmount,
+    quantity: 4,
+    // Null, deliberately — see the note above. This is what made the cell lie.
+    unit_amount: null,
+    rate_breakdown: [
+      { quantity: 3, unit_amount: 850 },
+      { quantity: 1, unit_amount: 1200 },
+    ],
+  })
+
+  await submissionsService.createPaymentSubmissionItems({
+    submission_id: submission.id,
+    source_type: "design",
+    design_id: flatDesignId,
+    design_name: flatDesignName,
+    amount: flatAmount,
+    quantity: 9,
+    unit_amount: flatUnitAmount,
+  })
+
+  return {
+    partnerId: partner.id as string,
+    submissionId: submission.id as string,
+    mixedDesignName,
+    flatDesignName,
+    mixedBreakdownText: "3 × 850 + 1 × 1200",
+    mixedAmount,
+    flatUnitAmount,
+  }
+}
+
+const SEED_PASSWORD = "e2etest123!"
+const SEED_FILE = path.resolve(__dirname, "../../apps/backend/.e2e-seed.json")
+
+/**
+ * The design-detail LAYOUT fixture — a partner-OWNED design that has both
+ * reference images and a photographed material on its BOM.
+ *
+ * Both halves matter and neither is decoration:
+ *  - `media_files` is what the header media strip renders. Without it the strip
+ *    shows its empty state and a spec asserting "the thumbnails are in the
+ *    header" would pass against a page with no thumbnails anywhere.
+ *  - the raw material's `media` is what the admin BOM rows render. The photos
+ *    were already on the wire (`inventory_item.raw_materials.*`); the admin
+ *    section simply printed the inventory id instead.
+ *
+ * `owner_partner_id` AND the design↔partner link: the link is what lets the
+ * partner GET the design at all, the column is what makes `is_owner` true and
+ * therefore what renders the header card the strip lives in. Seeding one
+ * without the other produces a 404 or a headerless page — two different
+ * failures that look identical from the spec.
+ *
+ * Read-only for every consumer, so re-runs and Playwright retries find it
+ * unchanged.
+ */
+async function seedDesignDetailLayout(container: any): Promise<{
+  partnerId: string
+  email: string
+  password: string
+  designId: string
+  designName: string
+  mediaUrl: string
+  materialTitle: string
+  materialPhotoUrl: string
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const authModule = container.resolve(Modules.AUTH)
+  const designService: any = container.resolve("design")
+  const inventoryService: any = container.resolve(Modules.INVENTORY)
+  const rawMaterialService: any = container.resolve("raw_materials")
+  const remoteLink: any = container.resolve(ContainerRegistrationKeys.LINK)
+
+  const stamp = Date.now()
+
+  const created = await partnerModule.createPartners({
+    name: `E2E Layout Partner ${stamp}`,
+    handle: `e2e-layout-${stamp}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partnerId = Array.isArray(created) ? created[0].id : created.id
+
+  const email = `e2e-layout-${stamp}@jyt.test`
+  await partnerModule.createPartnerAdmins({
+    email,
+    first_name: "E2E",
+    last_name: "Layout",
+    role: "admin",
+    partner_id: partnerId,
+  })
+
+  const hashConfig = { logN: 15, r: 8, p: 1 }
+  const passwordHash = await Scrypt.kdf(SEED_PASSWORD, hashConfig)
+  const authIdentity: any = await authModule.createAuthIdentities({
+    provider_identities: [
+      {
+        provider: "emailpass",
+        entity_id: email,
+        provider_metadata: { password: passwordHash.toString("base64") },
+      },
+    ],
+    app_metadata: { partner_id: partnerId },
+  })
+  const authIdentityId = Array.isArray(authIdentity)
+    ? authIdentity[0].id
+    : authIdentity.id
+
+  // Without the verification row the login page shows "verify your email" and
+  // never navigates — see seedActionFirstRun.
+  const now = new Date()
+  await authModule.createAuthVerifications([
+    {
+      auth_identity_id: authIdentityId,
+      entity_id: email,
+      entity_type: "email",
+      code_provider: "emailpass",
+      requested_at: now,
+      verified_at: now,
+    },
+  ])
+
+  /**
+   * A data URI, not a CDN link. The spec asserts the thumbnails RENDER, and a
+   * fixture that depends on the network turns an offline run (or a dead bucket)
+   * into a layout failure. A 1×1 PNG loads everywhere and is still a real
+   * `<img src>` as far as the page is concerned.
+   */
+  const PIXEL =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+  const designName = `Layout Fixture Tunic (e2e ${stamp})`
+  const design = await designService.createDesigns({
+    name: designName,
+    description: "e2e design-detail layout fixture (media strip + photo BOM)",
+    design_type: "Original",
+    status: "Approved",
+    priority: "Medium",
+    // is_owner — what makes the partner header card (and its media strip) render.
+    owner_partner_id: partnerId,
+    media_files: [
+      { id: `mf_${stamp}_1`, url: PIXEL, isThumbnail: true },
+      { id: `mf_${stamp}_2`, url: PIXEL },
+    ],
+  })
+  const designId = (Array.isArray(design) ? design[0] : design).id as string
+
+  // Access: the partner design routes look this link up before anything else.
+  await remoteLink.create({
+    design: { design_id: designId },
+    partner: { partner_id: partnerId },
+  })
+
+  const materialTitle = `E2E Mill Spun Pashmina ${stamp}`
+  const inventoryItem = await inventoryService.createInventoryItems({
+    title: materialTitle,
+    sku: `e2e-layout-${stamp}`,
+    requires_shipping: false,
+  })
+  const inventoryItemId = (
+    Array.isArray(inventoryItem) ? inventoryItem[0] : inventoryItem
+  ).id as string
+
+  /**
+   * The canonical prod media shape — `{ files: [...] }`. Deliberately NOT a
+   * bare array: that is the shape the partner side used to read, and the one
+   * the admin helper had to grow `mediaUrls` to unwrap. A fixture in the easy
+   * shape would pass on a helper that cannot read production.
+   */
+  const rawMaterial = await rawMaterialService.createRawMaterials({
+    name: materialTitle,
+    composition: "70% Pashmina / 30% Silk",
+    color: "Ecru",
+    media: { files: [PIXEL] },
+  })
+  const rawMaterialId = (
+    Array.isArray(rawMaterial) ? rawMaterial[0] : rawMaterial
+  ).id as string
+
+  // Same shape `create-raw-material` writes in production, `data` included.
+  await remoteLink.create({
+    [Modules.INVENTORY]: { inventory_item_id: inventoryItemId },
+    raw_materials: { raw_materials_id: rawMaterialId },
+    data: { raw_materials_id: rawMaterialId, inventory_id: inventoryItemId },
+  })
+
+  await remoteLink.create({
+    design: { design_id: designId },
+    [Modules.INVENTORY]: { inventory_item_id: inventoryItemId },
+    data: { planned_quantity: 2 },
+  })
+
+  return {
+    partnerId,
+    email,
+    password: SEED_PASSWORD,
+    designId,
+    designName,
+    mediaUrl: PIXEL,
+    materialTitle,
+    materialPhotoUrl: PIXEL,
+  }
+}
+/**
+ * #2357 — a collated design work-order whose BOTH designs are offered and
+ * untouched, for the "Designs at a glance" panel and the "Actions for all
+ * designs" drawer. Its own partner and its own order: the spec ACCEPTS and
+ * STARTS runs, so sharing #2264's read-only collated order would change what
+ * that spec reads.
+ *
+ * 🔑 Produced WITHOUT templates, like #2264's collated fixture: the runs are
+ * born `sent_to_partner` — offered, which is the state the panel acts on.
+ * WITH templates `produceDesignsAsWorkOrder` currently throws "Cannot create
+ * multiple links between 'order' and 'production_runs'": each dispatch mints
+ * a per-run work order (#2306 S3, mirrorRunPartnerLinkOnUnifiedOrderStep)
+ * before the batch is collated, so the collation finds every run already on
+ * an order. Found by this fixture on 2026-10-07; tracked separately.
+ */
+/**
+ * #2377 Inbox — two emails in two folders unique to this seed run, so the
+ * spec's folder counts are about its own rows on a database that keeps every
+ * earlier run's mail. One is a shop's order confirmation (HTML table, ₹),
+ * the other a plain note the spec ignores. Re-seeded every run; the spec
+ * tolerates a Playwright retry finding the note already ignored.
+ */
+async function seedInboxEmails(container: any): Promise<{
+  ordersFolder: string
+  notesFolder: string
+  orderEmailId: string
+  orderSubject: string
+  noteEmailId: string
+  noteSubject: string
+}> {
+  const inbound: any = container.resolve("inbound_emails")
+  const stamp = Date.now()
+  const ordersFolder = `E2E_ORDERS_${stamp}`
+  const notesFolder = `E2E_NOTES_${stamp}`
+  const orderSubject = `Your Button Bazaar order #BB-${stamp} is confirmed`
+  const noteSubject = `Weekly update ${stamp}`
+
+  const order = await inbound.createInboundEmails({
+    imap_uid: `e2e-order-${stamp}`,
+    message_id: `<e2e-order-${stamp}@buttonbazaar.test>`,
+    from_address: "no-reply@buttonbazaar.test",
+    to_addresses: ["orders@jaalyantra.com"],
+    subject: orderSubject,
+    html_body:
+      "<h1>Button Bazaar</h1><p>Thanks for your order.</p>" +
+      "<table><tr><th>Item</th><th>Qty</th><th>Price</th></tr>" +
+      "<tr><td>Coconut shell button 15mm (pack of 100)</td><td>2</td><td>&#8377;450.00</td></tr></table>" +
+      "<p>Total: &#8377;960.00</p>",
+    text_body: null,
+    folder: ordersFolder,
+    received_at: new Date(),
+    status: "received",
+  })
+  const note = await inbound.createInboundEmails({
+    imap_uid: `e2e-note-${stamp}`,
+    message_id: `<e2e-note-${stamp}@updates.test>`,
+    from_address: "news@updates.test",
+    to_addresses: ["updates@jaalyantra.com"],
+    subject: noteSubject,
+    html_body: "<p>Nothing to do here.</p>",
+    text_body: "Nothing to do here.",
+    folder: notesFolder,
+    received_at: new Date(Date.now() - 60_000),
+    status: "received",
+  })
+  return {
+    ordersFolder,
+    notesFolder,
+    orderEmailId: order.id,
+    orderSubject,
+    noteEmailId: note.id,
+    noteSubject,
+  }
+}
+
+async function seedCollatedActionsFixture(container: any): Promise<{
+  email: string
+  password: string
+  workOrderId: string
+  designs: { name: string; runId: string }[]
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const authModule = container.resolve(Modules.AUTH)
+  const designService: any = container.resolve("design")
+  const stamp = Date.now()
+
+  // A partner with a VERIFIED login (see seedActionFirstRun for why).
+  const created = await partnerModule.createPartners({
+    name: `E2E Collated Actions ${stamp}`,
+    handle: `e2e-collated-actions-${stamp}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partnerId = (Array.isArray(created) ? created[0] : created).id as string
+  const email = `e2e-collated-actions-${stamp}@jyt.test`
+  await partnerModule.createPartnerAdmins({
+    email,
+    first_name: "E2E",
+    last_name: "Collated Actions",
+    role: "admin",
+    partner_id: partnerId,
+  })
+  const hash = await Scrypt.kdf(SEED_PASSWORD, { logN: 15, r: 8, p: 1 })
+  const identity: any = await authModule.createAuthIdentities({
+    provider_identities: [
+      {
+        provider: "emailpass",
+        entity_id: email,
+        provider_metadata: { password: hash.toString("base64") },
+      },
+    ],
+    app_metadata: { partner_id: partnerId },
+  })
+  const now = new Date()
+  await authModule.createAuthVerifications([
+    {
+      auth_identity_id: (Array.isArray(identity) ? identity[0] : identity).id,
+      entity_id: email,
+      entity_type: "email",
+      code_provider: "emailpass",
+      requested_at: now,
+      verified_at: now,
+    },
+  ])
+
+  const names = [`E2E Bulk Robe ${stamp}`, `E2E Bulk Apron ${stamp}`]
+  const designIds: string[] = []
+  for (const name of names) {
+    const d = await designService.createDesigns({
+      name,
+      description: "e2e #2357 collated actions fixture",
+      design_type: "Original",
+      status: "Approved",
+      priority: "Medium",
+    })
+    designIds.push((Array.isArray(d) ? d[0] : d).id)
+  }
+  const produced: any = await produceDesignsAsWorkOrder(container, designIds, partnerId, {
+    collate: "new",
+  })
+  if (!produced.work_order_id || produced.run_ids?.length !== designIds.length) {
+    throw new Error(`#2357 fixture: expected one work order with both runs — ${JSON.stringify(produced)}`)
+  }
+
+  return {
+    email,
+    password: SEED_PASSWORD,
+    workOrderId: produced.work_order_id,
+    designs: names.map((name, i) => ({ name, runId: produced.run_ids[i] })),
+  }
+}
+
+/**
+ * #2018 — a design work-order the partner has been OFFERED and not yet
+ * accepted, so the action-first layout can be driven in a real browser.
+ *
+ * Offered is the phase the rework is ABOUT: the partner has not accepted, so
+ * the action block must read "Accept this run" and the job detail must be
+ * collapsed behind Details. Any later phase reveals everything and proves
+ * less — `deriveRunPhase` returns "offered" only while `accepted_at` is unset.
+ *
+ * 🔑 Dispatched through the REAL path — create → approve → auto-dispatch, the
+ * same three calls `POST /admin/designs/:id/production-runs` makes. Writing a
+ * child row by hand would produce a run the partner UI never sees: it is
+ * dispatch that dual-writes the partner order, and `/orders/design` lists
+ * orders, not runs.
+ */
+async function seedActionFirstRun(container: any): Promise<{
+  partnerId: string
+  email: string
+  password: string
+  designId: string
+  designName: string
+  runId: string
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const authModule = container.resolve(Modules.AUTH)
+  const designService: any = container.resolve("design")
+  const runService: any = container.resolve("production_runs")
+  const taskService: any = container.resolve("tasks")
+
+  const stamp = Date.now()
+
+  const created = await partnerModule.createPartners({
+    name: `E2E Action-First Partner ${stamp}`,
+    handle: `e2e-action-first-${stamp}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partnerId = Array.isArray(created) ? created[0].id : created.id
+
+  const email = `e2e-action-first-${stamp}@jyt.test`
+  await partnerModule.createPartnerAdmins({
+    email,
+    first_name: "E2E",
+    last_name: "ActionFirst",
+    role: "admin",
+    partner_id: partnerId,
+  })
+
+  const hashConfig = { logN: 15, r: 8, p: 1 }
+  const passwordHash = await Scrypt.kdf(SEED_PASSWORD, hashConfig)
+  const authIdentity: any = await authModule.createAuthIdentities({
+    provider_identities: [
+      {
+        provider: "emailpass",
+        entity_id: email,
+        provider_metadata: { password: passwordHash.toString("base64") },
+      },
+    ],
+    app_metadata: { partner_id: partnerId },
+  })
+  const authIdentityId = Array.isArray(authIdentity)
+    ? authIdentity[0].id
+    : authIdentity.id
+
+  /**
+   * 🔴 The verification row, not a nicety. `POST /auth/partner/emailpass`
+   * happily issues a token for an unverified partner, so an API login proves
+   * nothing about the SCREEN: the login page swaps the sign-in form for a
+   * "verify your email" panel and never navigates. Without this the spec fails
+   * at sign-in with no hint that verification is what stopped it.
+   */
+  const now = new Date()
+  await authModule.createAuthVerifications([
+    {
+      auth_identity_id: authIdentityId,
+      entity_id: email,
+      entity_type: "email",
+      code_provider: "emailpass",
+      requested_at: now,
+      verified_at: now,
+    },
+  ])
+
+  const designName = `Action-First Jacket (e2e ${stamp})`
+  const design = await designService.createDesigns({
+    name: designName,
+    description: "e2e #2018 action-first work-order fixture",
+    design_type: "Original",
+    status: "Approved",
+    priority: "Medium",
+  })
+  const designId = (Array.isArray(design) ? design[0] : design).id as string
+
+  /**
+   * A template is what makes the run DISPATCH — `selectDispatchInput` returns
+   * null for a child that names none, and auto-dispatch then SKIPS it as
+   * "nothing to dispatch, not a failure". The run would sit approved and the
+   * partner would see no work at all, with nothing in the report to say why.
+   *
+   * By id, not by name: ids win outright in `selectDispatchInput`, and a name
+   * that matches two templates is a hard dispatch failure (#1262).
+   *
+   * No `category`: the admin route reads it as a category_ID relationship, and
+   * local templates carry `category_id: null`, so omitting it is the normal
+   * shape.
+   */
+  const createdTemplate = await taskService.createTaskTemplates({
+    name: `e2e-action-first-${stamp}`,
+    description: "e2e #2018 dispatch template",
+    priority: "medium",
+    estimated_duration: 60,
+    required_fields: {},
+    eventable: false,
+    notifiable: false,
+    message_template: "",
+    metadata: { workflow_type: "production_run" },
+  })
+  const templateId = (
+    Array.isArray(createdTemplate) ? createdTemplate[0] : createdTemplate
+  ).id as string
+
+  const { result: parent, errors } = await createProductionRunWorkflow(
+    container
+  ).run({
+    input: {
+      design_id: designId,
+      partner_id: null,
+      quantity: 2,
+      run_type: "production",
+      metadata: { source: "admin.designs.manual" },
+    },
+  })
+  if (errors?.length) {
+    throw new Error(
+      `#2018 fixture: create run failed — ${errors
+        .map((e: any) => e?.error?.message || String(e))
+        .join(", ")}`
+    )
+  }
+
+  const { result: approved } = await approveProductionRunWorkflow(
+    container
+  ).run({
+    input: {
+      production_run_id: (parent as any).id,
+      assignments: [
+        {
+          partner_id: partnerId,
+          quantity: 2,
+          role: "stitching",
+          template_ids: [templateId],
+        },
+      ],
+    },
+  })
+
+  const child = ((approved as any)?.children || [])[0]
+  if (!child?.id) {
+    throw new Error("#2018 fixture: approval produced no child run")
+  }
+
+  /**
+   * ⚠️ Auto-dispatch REPORTS failures rather than throwing (#1268), so the
+   * fixture has to read the report. A silent skip here is what produces the
+   * worst version of this spec: a partner who signs in fine and sees an empty
+   * work-order list, failing at "the action is visible" for a reason that has
+   * nothing to do with #2018.
+   */
+  const dispatch = await autoDispatchApprovedChildren(container, [child] as any)
+  if (dispatch.failed?.length) {
+    throw new Error(
+      `#2018 fixture: dispatch failed — ${dispatch.failed
+        .map((f) => `${f.production_run_id}: ${f.message}`)
+        .join(", ")}`
+    )
+  }
+  if (!dispatch.dispatched?.includes(child.id)) {
+    throw new Error(
+      `#2018 fixture: run ${child.id} was not dispatched (skipped: ${JSON.stringify(
+        dispatch.skipped
+      )})`
+    )
+  }
+
+  /**
+   * The fixture asserts its own phase before any spec runs. "Offered" is
+   * `deriveRunStepIndex === 0`: not cancelled, and no `accepted_at`. If a
+   * future dispatch change starts stamping acceptance, the reveal assertions
+   * would go red for a reason no #2018 fix could address — this says so here
+   * instead.
+   */
+  const seededRun: any = await runService.retrieveProductionRun(child.id)
+  if (seededRun.accepted_at || String(seededRun.status) === "cancelled") {
+    throw new Error(
+      `#2018 fixture: run ${child.id} is not OFFERED (status=${seededRun.status}, accepted_at=${seededRun.accepted_at})`
+    )
+  }
+
+  return {
+    partnerId,
+    email,
+    password: SEED_PASSWORD,
+    designId,
+    designName,
+    runId: child.id as string,
+  }
+}
+
+
+/**
+ * #2264 — one work order of each kind, for partner-work-orders.spec.ts.
+ *
+ * Partner A holds an INVENTORY work order and a one-run DESIGN work order;
+ * partner B holds a COLLATED design work order (two designs). Two partners on
+ * purpose: produced for partner A, the batch would JOIN A's open design work
+ * order (#1597) instead of making its own, and the spec would test a join.
+ *
+ * Everything goes through the real workflows, so the core-order mirror AND the
+ * `work_order` row (#2263 shadow write) both exist — the spec reads whichever
+ * `WORK_ORDER_READS` selects, and the CI job runs it both ways.
+ *
+ * READ-ONLY for the spec: it opens pages and reads the API, never accepts or
+ * cancels, so a re-run and every Playwright RETRY see the same fixture.
+ */
+async function seedWorkOrdersFixture(container: any): Promise<{
+  partnerAEmail: string
+  partnerBEmail: string
+  password: string
+  inventoryOrderId: string
+  inventoryWorkOrderId: string
+  inventoryLineTitle: string
+  runId: string
+  designWorkOrderId: string
+  designName: string
+  collatedWorkOrderId: string
+  collatedDesignNames: string[]
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const authModule = container.resolve(Modules.AUTH)
+  const inventory: any = container.resolve(Modules.INVENTORY)
+  const stockLocation: any = container.resolve(Modules.STOCK_LOCATION)
+  const link: any = container.resolve(ContainerRegistrationKeys.LINK)
+  const query: any = container.resolve(ContainerRegistrationKeys.QUERY)
+  const designService: any = container.resolve("design")
+  const taskService: any = container.resolve("tasks")
+  const stamp = Date.now()
+
+  // A partner with a VERIFIED login (see seedActionFirstRun for why).
+  const mkPartner = async (label: string) => {
+    const created = await partnerModule.createPartners({
+      name: `E2E WorkOrders ${label} ${stamp}`,
+      handle: `e2e-wo-${label.toLowerCase()}-${stamp}`,
+      status: "active",
+      is_verified: true,
+    })
+    const partnerId = (Array.isArray(created) ? created[0] : created).id as string
+    const email = `e2e-wo-${label.toLowerCase()}-${stamp}@jyt.test`
+    await partnerModule.createPartnerAdmins({
+      email,
+      first_name: "E2E",
+      last_name: `WO ${label}`,
+      role: "admin",
+      partner_id: partnerId,
+    })
+    const hash = await Scrypt.kdf(SEED_PASSWORD, { logN: 15, r: 8, p: 1 })
+    const identity: any = await authModule.createAuthIdentities({
+      provider_identities: [
+        {
+          provider: "emailpass",
+          entity_id: email,
+          provider_metadata: { password: hash.toString("base64") },
+        },
+      ],
+      app_metadata: { partner_id: partnerId },
+    })
+    const now = new Date()
+    await authModule.createAuthVerifications([
+      {
+        auth_identity_id: (Array.isArray(identity) ? identity[0] : identity).id,
+        entity_id: email,
+        entity_type: "email",
+        code_provider: "emailpass",
+        requested_at: now,
+        verified_at: now,
+      },
+    ])
+    return { partnerId, email }
+  }
+  const a = await mkPartner("A")
+  const b = await mkPartner("B")
+
+  const mirrorOf = async (entity: "inventory_orders" | "production_runs", id: string) => {
+    const { data } = await query.graph({ entity, filters: { id }, fields: ["order.id"] })
+    const orderId = (data?.[0] as any)?.order?.id as string | undefined
+    if (!orderId) throw new Error(`#2264 fixture: ${entity} ${id} has no work order`)
+    return orderId
+  }
+
+  // ── INVENTORY: 70.6 m of cloth, linked to partner A ─────────────────────────
+  const inventoryLineTitle = `E2E WO Linen ${stamp}`
+  const item = await inventory.createInventoryItems({
+    title: inventoryLineTitle,
+    sku: `e2e-wo-linen-${stamp}`,
+  })
+  const itemId = (Array.isArray(item) ? item[0] : item).id as string
+  const mkLocation = async (label: string) => {
+    const r = await stockLocation.createStockLocations({ name: `E2E WO ${label} ${stamp}` })
+    return (Array.isArray(r) ? r[0] : r).id as string
+  }
+  const { result: invResult, errors: invErrors } = await createInventoryOrderWorkflow(container).run({
+    input: {
+      quantity: 70.6,
+      total_price: 48714,
+      currency_code: "inr",
+      status: "Pending",
+      expected_delivery_date: new Date(Date.now() + 7 * 864e5),
+      order_date: new Date(),
+      shipping_address: {},
+      stock_location_id: await mkLocation("Warehouse"),
+      from_stock_location_id: await mkLocation("Mill"),
+      is_sample: false,
+      order_lines: [{ inventory_item_id: itemId, quantity: 70.6, price: 690 }],
+    },
+  })
+  if (invErrors?.length) {
+    throw new Error(`#2264 fixture: inventory order failed — ${invErrors.map((e: any) => e?.error?.message).join(", ")}`)
+  }
+  const inventoryOrderId = (invResult as any).order.id as string
+  const inventoryWorkOrderId = await mirrorOf("inventory_orders", inventoryOrderId)
+  await link.create({
+    partner: { partner_id: a.partnerId },
+    inventory_orders: { inventory_orders_id: inventoryOrderId },
+  })
+  await link.create({
+    partner: { partner_id: a.partnerId },
+    order: { order_id: inventoryWorkOrderId },
+  })
+  // The partner link was written by hand, so bring work_order along the same
+  // way every mirror writer does.
+  await syncWorkOrderFromMirror(container, inventoryWorkOrderId)
+
+  // ── DESIGN, one run: approved + dispatched to partner A ──────────────────────
+  const designName = `E2E WO Kurta ${stamp}`
+  const design = await designService.createDesigns({
+    name: designName,
+    description: "e2e #2264 work-order fixture",
+    design_type: "Original",
+    status: "Approved",
+    priority: "Medium",
+  })
+  const designId = (Array.isArray(design) ? design[0] : design).id as string
+  const template = await taskService.createTaskTemplates({
+    name: `e2e-wo-${stamp}`,
+    description: "e2e #2264 dispatch template",
+    priority: "medium",
+    estimated_duration: 60,
+    required_fields: {},
+    eventable: false,
+    notifiable: false,
+    message_template: "",
+    metadata: { workflow_type: "production_run" },
+  })
+  const templateId = (Array.isArray(template) ? template[0] : template).id as string
+  const { result: parent } = await createProductionRunWorkflow(container).run({
+    input: {
+      design_id: designId,
+      partner_id: null,
+      quantity: 4,
+      run_type: "production",
+      metadata: { source: "admin.designs.manual" },
+    },
+  })
+  const { result: approved } = await approveProductionRunWorkflow(container).run({
+    input: {
+      production_run_id: (parent as any).id,
+      assignments: [
+        { partner_id: a.partnerId, quantity: 4, role: "stitching", template_ids: [templateId] },
+      ],
+    },
+  })
+  const child = ((approved as any)?.children || [])[0]
+  if (!child?.id) throw new Error("#2264 fixture: approval produced no child run")
+  const dispatch = await autoDispatchApprovedChildren(container, [child] as any)
+  if (!dispatch.dispatched?.includes(child.id)) {
+    throw new Error(`#2264 fixture: run ${child.id} was not dispatched (${JSON.stringify(dispatch)})`)
+  }
+  const designWorkOrderId = await mirrorOf("production_runs", child.id)
+
+  // ── DESIGN, collated: two designs sent to partner B as ONE work order ───────
+  const collatedDesignNames = [`E2E WO Shawl ${stamp}`, `E2E WO Scarf ${stamp}`]
+  const batch: string[] = []
+  for (const name of collatedDesignNames) {
+    const d = await designService.createDesigns({
+      name,
+      description: "e2e #2264 collated fixture",
+      design_type: "Original",
+      status: "Approved",
+      priority: "Medium",
+    })
+    batch.push((Array.isArray(d) ? d[0] : d).id)
+  }
+  const produced = await produceDesignsAsWorkOrder(container, batch, b.partnerId)
+  if (!produced.work_order_id) {
+    throw new Error("#2264 fixture: produce made no collated work order")
+  }
+
+  // Every mirror must have its work_order, or the flag-on run tests nothing.
+  const ids = [inventoryWorkOrderId, designWorkOrderId, produced.work_order_id]
+  const { data: rows } = await query.graph({ entity: "work_order", fields: ["id"], filters: { id: ids } })
+  if ((rows ?? []).length !== ids.length) {
+    throw new Error(`#2264 fixture: work_order rows ${JSON.stringify(rows)} for ${ids.join(",")}`)
+  }
+
+  return {
+    partnerAEmail: a.email,
+    partnerBEmail: b.email,
+    password: SEED_PASSWORD,
+    inventoryOrderId,
+    inventoryWorkOrderId,
+    inventoryLineTitle,
+    runId: child.id as string,
+    designWorkOrderId,
+    designName,
+    collatedWorkOrderId: produced.work_order_id,
+    collatedDesignNames,
+  }
+}
+
+/**
+ * The house store must still belong to nobody — checked before AND after.
+ *
+ * 🔴 #2100. A seed run linked the house store (`Medusa Store`) to
+ * `E2E Gate Partner` and never released it. `readHouseStore` identifies the
+ * house store as the one store belonging to NO partner and returns null when
+ * that is not a single unambiguous row, so from that moment the platform had no
+ * house store at all: design-order creation, the FX fanout and the currency
+ * sellability gate all just began refusing, and the nearest error named a SALES
+ * CHANNEL. Finding it meant counting link rows by hand.
+ *
+ * The seeding code was already fixed — every fixture below mints its OWN store
+ * — but "every fixture creates its own" was an incidental property that nothing
+ * asserted. This is the assertion. Run first, it refuses to seed onto a
+ * database already in that state; run last, it names the run that did it.
+ *
+ * 🔑 Deliberately a THROW, not a warning. The failure it guards is silent and
+ * total, and a warning in seed output nobody reads is how it stayed hidden for
+ * six weeks.
+ */
+export async function assertHouseStoreIntact(
+  container: any,
+  logger: any,
+  when: "before" | "after"
+) {
+  const query = container.resolve(ContainerRegistrationKeys.QUERY)
+  const [{ data: stores = [] }, { data: partners = [] }] = await Promise.all([
+    query.graph({ entity: "store", fields: ["id", "name"] }),
+    query.graph({ entity: "partners", fields: ["id", "name", "stores.id"] }),
+  ])
+
+  const owner = new Map<string, string>()
+  for (const p of partners as any[]) {
+    for (const st of (p?.stores ?? []) as any[]) {
+      if (st?.id) owner.set(String(st.id), String(p?.name ?? p?.id))
+    }
+  }
+
+  const ownerless = (stores as any[]).filter((st) => !owner.has(String(st?.id)))
+
+  if (ownerless.length === 1) {
+    logger.info(
+      `E2E seed: house store intact (${when}) — "${ownerless[0]?.name}" belongs to no partner.`
+    )
+    return
+  }
+
+  if (ownerless.length === 0) {
+    const claimed = (stores as any[])
+      .filter((st) => /medusa store/i.test(String(st?.name ?? "")))
+      .map((st) => `"${st?.name}" -> ${owner.get(String(st?.id))}`)
+    throw new Error(
+      `E2E seed (${when}): every one of the ${stores.length} stores is claimed by a partner, ` +
+        `so the platform has NO house store and design orders, the FX fanout and the ` +
+        `sellability gate will all refuse (#2100). ` +
+        (claimed.length ? `Suspect: ${claimed.join(", ")}. ` : "") +
+        `Dismiss the partner-stores-link on the house store, then seed again.`
+    )
+  }
+
+  throw new Error(
+    `E2E seed (${when}): ${ownerless.length} stores belong to no partner ` +
+      `(${ownerless.map((st: any) => `"${st?.name}"`).join(", ")}), so the house store is ` +
+      `ambiguous and readHouseStore refuses to guess (#2100). Link the partner-owned ones ` +
+      `to their partners, or remove the strays.`
+  )
+}
+
+/**
+ * #1752 — a partner's proposed inventory-order revision, driven end-to-end in a
+ * browser: the admin approves a seeded pending change (banner → Approve), and
+ * the partner proposes a fresh one (drawer → banner → actions locked).
+ *
+ * TWO orders on ONE partner:
+ *   - `adminOrderId` carries a PENDING change already (proposed qty edit + a
+ *     removal + tax), so the admin spec only has to approve it. SINGLE-USE: an
+ *     approved change cannot be approved again.
+ *   - `partnerOrderId` is left editable with NO change, so the partner spec
+ *     drives the real proposal through the drawer. The partner↔order and
+ *     partner↔inventory-order links are what make it appear in the partner's
+ *     work-order list and pass the ownership guards.
+ */
+async function seedInventoryOrderChange(container: any): Promise<{
+  adminOrderId: string
+  adminTaxAmount: number
+  adminEditedLineLabel: string
+  adminRemovedLineLabel: string
+  partnerOrderId: string
+  partnerUnifiedOrderId: string
+  partnerEmail: string
+  partnerPassword: string
+  partnerId: string
+  partnerLineLabel: string
+}> {
+  const partnerModule: any = container.resolve("partner")
+  const authModule = container.resolve(Modules.AUTH)
+  const inventory: any = container.resolve(Modules.INVENTORY)
+  const stockLocation: any = container.resolve(Modules.STOCK_LOCATION)
+  const link: any = container.resolve(ContainerRegistrationKeys.LINK)
+  const query: any = container.resolve(ContainerRegistrationKeys.QUERY)
+  const ioService: any = container.resolve(ORDER_INVENTORY_MODULE)
+
+  const stamp = Date.now()
+
+  // Partner with a verified login — mirrors seedActionFirstRun (the verification
+  // row is what lets the partner-UI login page advance past "verify your email").
+  const created = await partnerModule.createPartners({
+    name: `E2E Change Partner ${stamp}`,
+    handle: `e2e-change-${stamp}`,
+    status: "active",
+    is_verified: true,
+  })
+  const partnerId = Array.isArray(created) ? created[0].id : created.id
+
+  const partnerEmail = `e2e-change-${stamp}@jyt.test`
+  await partnerModule.createPartnerAdmins({
+    email: partnerEmail,
+    first_name: "E2E",
+    last_name: "Change",
+    role: "admin",
+    partner_id: partnerId,
+  })
+  const hashConfig = { logN: 15, r: 8, p: 1 }
+  const passwordHash = await Scrypt.kdf(SEED_PASSWORD, hashConfig)
+  const authIdentity: any = await authModule.createAuthIdentities({
+    provider_identities: [
+      {
+        provider: "emailpass",
+        entity_id: partnerEmail,
+        provider_metadata: { password: passwordHash.toString("base64") },
+      },
+    ],
+    app_metadata: { partner_id: partnerId },
+  })
+  const authIdentityId = Array.isArray(authIdentity)
+    ? authIdentity[0].id
+    : authIdentity.id
+  const now = new Date()
+  await authModule.createAuthVerifications([
+    {
+      auth_identity_id: authIdentityId,
+      entity_id: partnerEmail,
+      entity_type: "email",
+      code_provider: "emailpass",
+      requested_at: now,
+      verified_at: now,
+    },
+  ])
+
+  const mkItem = async (label: string) => {
+    const r = await inventory.createInventoryItems({
+      title: `E2E ${label} ${stamp}`,
+      sku: `e2e-change-${label.toLowerCase()}-${stamp}`,
+    })
+    return (Array.isArray(r) ? r[0] : r).id as string
+  }
+  const itemA = await mkItem("Linen")
+  const itemB = await mkItem("Cotton")
+  const itemC = await mkItem("Silk")
+
+  const mkLocation = async (label: string) => {
+    const r = await stockLocation.createStockLocations({
+      name: `E2E Change ${label} ${stamp}`,
+    })
+    return (Array.isArray(r) ? r[0] : r).id as string
+  }
+  const toLoc = await mkLocation("Warehouse")
+  const fromLoc = await mkLocation("Origin")
+
+  const mkOrder = async (lines: Array<{ itemId: string; quantity: number; price: number }>) => {
+    const quantity = lines.reduce((s, l) => s + l.quantity, 0)
+    const total_price = lines.reduce((s, l) => s + l.price * l.quantity, 0)
+    const { result, errors } = await createInventoryOrderWorkflow(container).run({
+      input: {
+        quantity,
+        total_price,
+        currency_code: "inr",
+        status: "Pending",
+        expected_delivery_date: new Date(Date.now() + 7 * 864e5),
+        order_date: new Date(),
+        shipping_address: {},
+        stock_location_id: toLoc,
+        from_stock_location_id: fromLoc,
+        is_sample: false,
+        order_lines: lines.map((l) => ({
+          inventory_item_id: l.itemId,
+          quantity: l.quantity,
+          price: l.price,
+        })),
+      },
+    })
+    if (errors?.length) {
+      throw new Error(
+        `#1752 fixture: create inventory order failed — ${errors
+          .map((e: any) => e?.error?.message || String(e))
+          .join(", ")}`
+      )
+    }
+    return (result as any).order
+  }
+
+  // ── admin order: 3 lines + a PENDING change ────────────────────────────────
+  const adminOrder = await mkOrder([
+    { itemId: itemA, quantity: 10, price: 100 },
+    { itemId: itemB, quantity: 5, price: 200 },
+    { itemId: itemC, quantity: 3, price: 50 },
+  ])
+  const adminOrderId = adminOrder.id as string
+
+  const { data: adminLines } = await query.graph({
+    entity: "inventory_orders",
+    filters: { id: adminOrderId },
+    fields: ["orderlines.id", "orderlines.inventory_items.title"],
+  })
+  const alines = (adminLines?.[0]?.orderlines ?? []) as any[]
+  const byTitle = (title: string) =>
+    alines.find((l: any) =>
+      String(l?.inventory_items?.[0]?.title || "").includes(title)
+    )
+  const adminLineA = byTitle("Linen")
+  const adminLineC = byTitle("Silk")
+
+  await ioService.createOrderChanges({
+    inventory_orders_id: adminOrderId,
+    status: "pending",
+    proposed_lines: [
+      { id: adminLineA.id, quantity: 99, price: 100 },
+      { id: adminLineC.id, remove: true },
+    ],
+    proposed_charges: [{ type: "tax", amount: 50, note: "GST" }],
+    submitted_by: partnerId,
+    submitted_at: new Date().toISOString(),
+  })
+
+  // ── partner order: 1 line, editable, linked to the partner ─────────────────
+  const partnerOrder = await mkOrder([
+    { itemId: itemB, quantity: 4, price: 300 },
+  ])
+  const partnerOrderId = partnerOrder.id as string
+
+  await link.create({
+    partner: { partner_id: partnerId },
+    inventory_orders: { inventory_orders_id: partnerOrderId },
+  })
+
+  const { data: unified } = await query.graph({
+    entity: "inventory_orders",
+    filters: { id: partnerOrderId },
+    fields: ["order.id"],
+  })
+  const partnerUnifiedOrderId = (unified?.[0] as any)?.order?.id as
+    | string
+    | undefined
+  if (!partnerUnifiedOrderId) {
+    throw new Error(
+      "#1752 fixture: partner inventory order did not dual-write a unified order"
+    )
+  }
+
+  await link.create({
+    partner: { partner_id: partnerId },
+    order: { order_id: partnerUnifiedOrderId },
+  })
+
+  return {
+    adminOrderId,
+    adminTaxAmount: 50,
+    adminEditedLineLabel: `E2E Linen ${stamp}`,
+    adminRemovedLineLabel: `E2E Silk ${stamp}`,
+    partnerOrderId,
+    partnerUnifiedOrderId,
+    partnerEmail,
+    partnerPassword: SEED_PASSWORD,
+    partnerId,
+    partnerLineLabel: `E2E Cotton ${stamp}`,
+  }
+}
+
+export default async function e2eSeed({ container }: ExecArgs) {
+  const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
+  const userModule = container.resolve(Modules.USER)
+  const authModule = container.resolve(Modules.AUTH)
+  const websiteService = container.resolve("websites")
+  const socials: any = container.resolve("socials")
+
+  await assertHouseStoreIntact(container, logger, "before")
+
+  logger.info("E2E seed: creating admin user...")
+
+  const email = `e2e-${Date.now()}@jyt.test`
+  const user = await userModule.createUsers({
+    first_name: "E2E",
+    last_name: "Admin",
+    email,
+  })
+
+  const hashConfig = { logN: 15, r: 8, p: 1 }
+  const passwordHash = await Scrypt.kdf(SEED_PASSWORD, hashConfig)
+
+  await authModule.createAuthIdentities({
+    provider_identities: [
+      {
+        provider: "emailpass",
+        entity_id: email,
+        provider_metadata: {
+          password: passwordHash.toString("base64"),
+        },
+      },
+    ],
+    app_metadata: {
+      user_id: user.id,
+    },
+  })
+
+  logger.info("E2E seed: creating website with GSC data...")
+
+  const domain = `e2e-gsc-${Date.now()}.jyt.test`
+  const website = await websiteService.createWebsites({
+    domain,
+    name: "E2E GSC Test",
+    status: "Active",
+    primary_language: "en",
+  })
+
+  const platformId = `e2e-platform-${Date.now()}`
+  await socials.createSocialPlatforms({
+    id: platformId,
+    name: "E2E Google Platform",
+    category: "google",
+    auth_type: "oauth2",
+    status: "active",
+    api_config: { test: true },
+  })
+
+  await socials.createSocialPlatformBindings({
+    platform_id: platformId,
+    service: "search-console",
+    resource_id: `sc-domain:${domain}`,
+    resource_label: domain,
+    status: "active",
+  })
+
+  const bindingsResult = await socials.listSocialPlatformBindings({
+    service: "search-console",
+    platform_id: platformId,
+  })
+  const bindings = bindingsResult.data ?? bindingsResult
+  const binding = Array.isArray(bindings) ? bindings[0] : null
+  if (!binding) throw new Error("No binding found after creation")
+
+  const siteResult = await socials.createGoogleSearchConsoleSites({
+    site_url: `sc-domain:${domain}`,
+    platform_id: platformId,
+    binding_id: binding.id,
+    sync_status: "synced",
+    permission_level: "siteOwner",
+    last_synced_at: new Date(),
+  })
+  const site = Array.isArray(siteResult) ? siteResult[0] : siteResult.data?.[0] ?? siteResult
+  if (!site?.id) throw new Error("No site created")
+
+  const rows: any[] = []
+  const today = new Date()
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(today)
+    d.setDate(d.getDate() - i)
+    const dateStr = d.toISOString().split("T")[0]
+    rows.push(
+      { site_id: site.id, date: dateStr, query: "winter dress", page: "https://example.com/dress", clicks: 10, impressions: 100, ctr: 0.1, position: 4.2, synced_at: new Date() },
+      { site_id: site.id, date: dateStr, query: "summer top", page: "https://example.com/top", clicks: 5, impressions: 80, ctr: 0.0625, position: 6.1, synced_at: new Date() },
+      { site_id: site.id, date: dateStr, query: "summer top", page: "https://example.com/collections/summer", clicks: 3, impressions: 40, ctr: 0.075, position: 5.5, synced_at: new Date() }
+    )
+  }
+  await socials.createGoogleSearchConsoleInsights(rows)
+
+  logger.info("E2E seed: creating retail order with Shiprocket shipment (#1118)...")
+  const shipmentOrderId = await seedShipmentTrackingOrder(container)
+
+  logger.info("E2E seed: creating design-less product + fulfilled order → product-only run (#1112)...")
+  const provenanceProductId = await seedProvenanceProductRun(container)
+
+  logger.info("E2E seed: creating design with a full brief for the designer-invite flow (#1113)...")
+  const inviteDesignId = await seedDesignerInviteDesign(container)
+
+  logger.info("E2E seed: creating the #1195 requires_shipping gate order...")
+  const gate = await seedShipmentGateOrder(container)
+
+  logger.info("E2E seed: creating the #1195 gate partner (partner-UI spec)...")
+  const gatePartner = await seedShipmentGatePartner(container, gate.orderId)
+
+  /**
+   * The carrier modal's own order (#1576) — separate, and SHIPPABLE.
+   *
+   * Two distinct defects made this necessary, and the second hid behind the
+   * first:
+   *
+   * 1. It used to share `gate` with `order-shipment-gate.spec.ts`, which marks
+   *    that fulfillment shipped. A shipment is a once-only act, so one
+   *    fulfillment cannot serve two specs that both ship it — and no Playwright
+   *    RETRY can pass on a fixture the first attempt consumed.
+   *
+   * 2. 🔴 Cloning the gate seeder did not fix it, because the gate fixture is
+   *    `requires_shipping: false` BY CONSTRUCTION — it exists to be the case
+   *    where "Mark as shipped" is suppressed, and core treats such a
+   *    fulfillment as already shipped. Every copy of it is equally unshippable.
+   *
+   * So this is a different seeder, whose whole job is to be shippable, and
+   * which asserts that about itself before the specs ever run.
+   */
+  logger.info("E2E seed: creating the #1576 carrier-modal order (SHIPPABLE, its own fulfillment)...")
+  const carrier = await seedShippablePartnerOrder(container)
+  await (container.resolve(ContainerRegistrationKeys.LINK) as any).create({
+    partner: { partner_id: gatePartner.partnerId },
+    order: { order_id: carrier.orderId },
+  })
+
+  logger.info("E2E seed: creating the HSN-gap product (customs specs)...")
+  const hsnGap = await seedHsCodeGapProduct(container)
+
+  logger.info("E2E seed: creating the #1228 parked production run + partners...")
+  const parkedRun = await seedParkedProductionRun(container)
+
+  logger.info("E2E seed: run transfer carrier fixture (#1553)...")
+  const transferCarrier = await seedRunTransferCarrier(container)
+
+  logger.info("E2E seed: creating the #1363 allocation design (3-item BOM) + approvable run...")
+  const allocation = await seedAllocationDesignRun(container)
+
+  logger.info("E2E seed: creating the gate order's partner fee (payout spec)...")
+  const gateFee = await seedPartnerFeeForGateOrder(
+    container,
+    gate.orderId,
+    gatePartner.partnerId,
+    gate.currencyCode
+  )
+
+  logger.info("E2E seed: creating the #1556 payable production runs + partner...")
+  const payableRuns = await seedPayableProductionRuns(container)
+
+  logger.info("E2E seed: rate-breakdown submission fixture (#1596)...")
+  const rateBreakdown = await seedRateBreakdownSubmission(container)
+
+  logger.info("E2E seed: partner ledger fixture (#1612)...")
+  const partnerLedger = await seedPartnerLedgerFixture(container)
+
+  logger.info("E2E seed: #2018 action-first OFFERED design work-order...")
+  const actionFirst = await seedActionFirstRun(container)
+
+  logger.info("E2E seed: design-detail layout fixture (media strip + photo BOM)...")
+  const designLayout = await seedDesignDetailLayout(container)
+
+  logger.info("E2E seed: #2264 work orders (inventory, one-run design, collated)...")
+  const workOrders = await seedWorkOrdersFixture(container)
+
+  logger.info("E2E seed: #2357 collated order for the all-designs actions...")
+  const collatedActions = await seedCollatedActionsFixture(container)
+  const inbox = await seedInboxEmails(container)
+
+  logger.info("E2E seed: #1752 partner inventory-order change fixtures (admin approve + partner propose)...")
+  const invChange = await seedInventoryOrderChange(container)
+
+  logger.info("E2E seed: creating the #1867 quote region (declares countries)...")
+  const quoteRegion = await seedQuoteRegion(container)
+
+  logger.info("E2E seed: creating the #1439 admin quote fixtures (active + superseded)...")
+  const adminQuotes = await seedAdminQuotes(container)
+
+  /**
+   * ⚠️ The CRM is an OPTIONAL integration and its absence must not take the
+   * whole suite down.
+   *
+   * The module is gated on `CRM_NODE_URL` (proxy mode) or `CRM_HYPERBEE=true`
+   * (embedded); with neither it registers but its repository does not, so the
+   * first write throws `Could not resolve 'crmPersonService'`. On a developer
+   * box with no CRM configured that killed the seed outright — and a seed that
+   * dies takes every spec with it, including the ones that have nothing to do
+   * with the CRM. The failure then reads as "e2e is broken" rather than "one
+   * optional integration is not wired here".
+   *
+   * Skipping is loud, not silent: the warning names the env vars, and the CRM
+   * spec fails on the missing seed keys rather than passing vacuously.
+   */
+  logger.info("E2E seed: creating the CRM contact + one logged activity...")
+  let crmContact: {
+    personId: string
+    personName: string
+    activityBody: string
+  } | null = null
+  try {
+    crmContact = await seedCrmContact(container)
+  } catch (e: any) {
+    logger.warn(
+      `E2E seed: CRM fixtures skipped — ${e?.message ?? e}. ` +
+        `Set CRM_NODE_URL (proxy) or CRM_HYPERBEE=true to seed them; the CRM spec will fail without them.`
+    )
+  }
+
+  logger.info("E2E seed: creating content editor partner + website + page + blocks...")
+  const contentEditor = await seedContentEditorPartner(container)
+
+  logger.info("E2E seed: creating payment-methods partner + two methods (settings/payments spec)...")
+  const paymentMethods = await seedPaymentMethodsPartner(container)
+
+  const seedData = {
+    email,
+    password: SEED_PASSWORD,
+    websiteId: website.id,
+    domain,
+    shipmentOrderId,
+    provenanceProductId,
+    inviteDesignId,
+    // #1195 gate fixture — consumed by order-shipment-gate.spec.ts (admin, CI)
+    // and partner-shipment-gate.spec.ts (@partnerui, local).
+    gateOrderId: gate.orderId,
+    gateFulfillmentId: gate.fulfillmentId,
+    // #1576 — the carrier modal's OWN order, and a SHIPPABLE one: shipping is
+    // once-only, and the #1195 gate fixture cannot be shipped at all.
+    carrierOrderId: carrier.orderId,
+    carrierFulfillmentId: carrier.fulfillmentId,
+    gatePartnerEmail: gatePartner.email,
+    gatePartnerPassword: gatePartner.password,
+    gatePartnerId: gatePartner.partnerId,
+    // HSN-gap fixture — a variant-backed product with no HS code at any level,
+    // consumed by hs-code-bulk-fill.spec.ts.
+    hsnGapProductId: hsnGap.productId,
+    hsnGapVariantId: hsnGap.variantId,
+    // Expected payout arithmetic for partner-order-payout-summary.spec.ts.
+    gateOrderCurrency: gate.currencyCode,
+    gateFee,
+    // #1228 manual-reassignment fixture — consumed by
+    // production-run-reassign.spec.ts (admin, CI).
+    parkedRunId: parkedRun.runId,
+    parkedRunDesignId: parkedRun.designId,
+    parkedRunLapsedPartnerId: parkedRun.lapsedPartnerId,
+    parkedRunLapsedPartnerName: parkedRun.lapsedPartnerName,
+    parkedRunFreshPartnerName: parkedRun.freshPartnerName,
+    // CRM contact fixture — consumed by crm-contact-activity.spec.ts (admin,
+    // CI). Requires CRM_HYPERBEE=true so the embedded store is registered.
+    // Absent when the CRM is not wired in this environment — see the skip
+    // above. The spec asserts on these and fails loudly rather than passing
+    // against an undefined it never noticed.
+    crmPersonId: crmContact?.personId ?? null,
+    crmPersonName: crmContact?.personName ?? null,
+    crmActivityBody: crmContact?.activityBody ?? null,
+    // Visual block editor fixture — consumed by visual-block-editor.spec.ts
+    // (@partnerui, local only).
+    contentEditorEmail: contentEditor.email,
+    contentEditorPassword: contentEditor.password,
+    contentEditorPartnerId: contentEditor.partnerId,
+    contentEditorPageId: contentEditor.pageId,
+    contentEditorWebsiteId: contentEditor.websiteId,
+    // Payment-methods fixture — consumed by partner-payment-methods.spec.ts
+    // (@partnerui). The delete case removes its method; the edit case renames
+    // its own — each is single-use per seed, which `pnpm e2e` refreshes.
+    paymentsPartnerEmail: paymentMethods.email,
+    paymentsPartnerPassword: paymentMethods.password,
+    paymentsEditMethodId: paymentMethods.editMethodId,
+    paymentsEditMethodName: paymentMethods.editMethodName,
+    paymentsDeleteMethodId: paymentMethods.deleteMethodId,
+    paymentsDeleteMethodName: paymentMethods.deleteMethodName,
+    // #1363 per-assignment material allocation — consumed by
+    // production-run-material-allocation.spec.ts (admin, CI). SINGLE-USE like
+    // every other run fixture: the spec approves the run, and an approved run
+    // cannot be approved again.
+    allocationRunId: allocation.runId,
+    allocationDesignId: allocation.designId,
+    allocationDesignName: allocation.designName,
+    allocationPartnerAName: allocation.partnerAName,
+    allocationPartnerBName: allocation.partnerBName,
+    allocationMaterialALabel: allocation.materialALabel,
+    allocationMaterialBLabel: allocation.materialBLabel,
+    allocationMaterialCLabel: allocation.materialCLabel,
+    allocationMaterialAId: allocation.materialAId,
+    allocationMaterialCId: allocation.materialCId,
+    // #1556 payable production runs — consumed by
+    // payment-submission-payable-runs.spec.ts (admin, CI).
+    //
+    // ⚠️ `billableRunId` is SINGLE-USE: the spec creates a real payment
+    // submission against it, and the run-level guard then refuses to bill that
+    // run again — so that one case needs a fresh seed per suite run (which is
+    // what `pnpm e2e` does). `payableRunId` and `unpricedRunId` are never
+    // billed and survive a re-run.
+    payoutPartnerId: payableRuns.partnerId,
+    payoutPartnerName: payableRuns.partnerName,
+    payoutDesignId: payableRuns.designId,
+    payoutDesignName: payableRuns.designName,
+    payableRunId: payableRuns.payableRunId,
+    billableRunId: payableRuns.billableRunId,
+    partnerBillableDesignName: payableRuns.partnerBillableDesignName,
+    unpricedRunId: payableRuns.unpricedRunId,
+    // #1571 B half — the partner UI signs in as this partner.
+    payoutPartnerEmail: payableRuns.partnerEmail,
+    payoutPartnerPassword: SEED_PASSWORD,
+    partnerBillableRunId: payableRuns.partnerBillableRunId,
+    partnerSumRunAId: payableRuns.partnerSumRunAId,
+    partnerSumRunBId: payableRuns.partnerSumRunBId,
+    sumDesignName: payableRuns.sumDesignName,
+    partnerMixedRunAId: payableRuns.partnerMixedRunAId,
+    partnerMixedRunBId: payableRuns.partnerMixedRunBId,
+    mixedDesignName: payableRuns.mixedDesignName,
+    adminMixedRunAId: payableRuns.adminMixedRunAId,
+    adminMixedRunBId: payableRuns.adminMixedRunBId,
+    adminMixedDesignName: payableRuns.adminMixedDesignName,
+    adminPartnerName: payableRuns.partnerName,
+    // #1439 S3/S4 admin quote surface — consumed by admin-quote-surface.spec.ts
+    // (admin, CI). NOT single-use: the spec cancels out of the revoke prompt
+    // rather than confirming it, so a re-run finds the same active quote.
+    quotePartnerId: adminQuotes.partnerId,
+    quotePartnerName: adminQuotes.partnerName,
+    // #1867 — the region the quote-draft spec selects by name; it must declare
+    // countries or the country Select stays empty.
+    quoteRegionId: quoteRegion.id,
+    quoteRegionName: quoteRegion.name,
+    activeQuoteId: adminQuotes.activeQuoteId,
+    activeQuoteCompany: adminQuotes.activeQuoteCompany,
+    supersededQuoteId: adminQuotes.supersededQuoteId,
+    supersededQuoteCompany: adminQuotes.supersededQuoteCompany,
+    // #1439 S11 — an accepted quote with a real payment schedule, and one whose
+    // deposit is deliberately 0 rather than absent.
+    acceptedQuoteId: adminQuotes.acceptedQuoteId,
+    acceptedQuoteCompany: adminQuotes.acceptedQuoteCompany,
+    zeroDepositQuoteId: adminQuotes.zeroDepositQuoteId,
+    zeroDepositQuoteCompany: adminQuotes.zeroDepositQuoteCompany,
+    // #1596 per-piece prices — consumed by submission-rate-breakdown.spec.ts
+    // (admin, CI). NOT single-use: the spec only reads and cancels.
+    rateSubmissionId: rateBreakdown.submissionId,
+    rateMixedDesignName: rateBreakdown.mixedDesignName,
+    rateFlatDesignName: rateBreakdown.flatDesignName,
+    rateMixedBreakdownText: rateBreakdown.mixedBreakdownText,
+    rateMixedAmount: rateBreakdown.mixedAmount,
+    rateFlatUnitAmount: rateBreakdown.flatUnitAmount,
+    // #1553 goods-transfer carrier facts — consumed by
+    // run-transfer-carrier.spec.ts (admin, CI). NOT single-use: the spec reads
+    // the rows and cancels out of the create drawer.
+    transferRunId: transferCarrier.runId,
+    transferDesignName: transferCarrier.designName,
+    transferBookedAwb: transferCarrier.bookedAwb,
+    transferBookedCarrier: transferCarrier.bookedCarrier,
+    transferDanglingShipmentId: transferCarrier.danglingShipmentId,
+    // #1612 merged partner ledger — consumed by partner-ledger-panel.spec.ts
+    // (admin, CI). NOT single-use: the spec only reads the panel.
+    ledgerPartnerId: partnerLedger.partnerId,
+    ledgerPartnerName: partnerLedger.partnerName,
+    ledgerDesignName: partnerLedger.designName,
+    ledgerSubmissionId: partnerLedger.submissionId,
+    ledgerPayoutAmount: partnerLedger.payoutAmount,
+    ledgerPaymentAmount: partnerLedger.paymentAmount,
+    // #2018 action-first work-order — consumed by
+    // partner-run-action-first.spec.ts (@partnerui). NOT single-use: the spec
+    // only reads and expands, never accepts the run — accepting would move it
+    // out of the OFFERED phase the whole spec is about, so a re-run (and every
+    // Playwright RETRY) finds the same fixture.
+    actionFirstPartnerId: actionFirst.partnerId,
+    actionFirstEmail: actionFirst.email,
+    actionFirstPassword: actionFirst.password,
+    actionFirstDesignId: actionFirst.designId,
+    actionFirstDesignName: actionFirst.designName,
+    actionFirstRunId: actionFirst.runId,
+    // #1752 partner inventory-order change — consumed by
+    // inventory-order-change-approval.spec.ts (admin, CI) and
+    // inventory-order-change-propose.spec.ts (@partnerui). The admin order is
+    // SINGLE-USE (approving consumes the pending change); the partner order is
+    // re-proposed per run.
+    invChangeAdminOrderId: invChange.adminOrderId,
+    invChangeAdminTaxAmount: invChange.adminTaxAmount,
+    invChangeAdminEditedLineLabel: invChange.adminEditedLineLabel,
+    invChangeAdminRemovedLineLabel: invChange.adminRemovedLineLabel,
+    invChangePartnerOrderId: invChange.partnerOrderId,
+    invChangePartnerUnifiedOrderId: invChange.partnerUnifiedOrderId,
+    invChangePartnerEmail: invChange.partnerEmail,
+    invChangePartnerPassword: invChange.partnerPassword,
+    invChangePartnerId: invChange.partnerId,
+    invChangePartnerLineLabel: invChange.partnerLineLabel,
+    // Design-detail layout — consumed by partner-design-media-strip.spec.ts
+    // (@partnerui) and admin-design-material-photos.spec.ts. READ-ONLY: neither
+    // spec mutates the design, so re-runs and retries see the same page.
+    layoutPartnerId: designLayout.partnerId,
+    layoutEmail: designLayout.email,
+    layoutPassword: designLayout.password,
+    layoutDesignId: designLayout.designId,
+    layoutDesignName: designLayout.designName,
+    layoutMediaUrl: designLayout.mediaUrl,
+    layoutMaterialTitle: designLayout.materialTitle,
+    layoutMaterialPhotoUrl: designLayout.materialPhotoUrl,
+    // #2264 work orders — consumed by partner-work-orders.spec.ts (@partnerui
+    // + admin). READ-ONLY: the spec opens pages and reads the API only.
+    woPartnerAEmail: workOrders.partnerAEmail,
+    woPartnerBEmail: workOrders.partnerBEmail,
+    woPassword: workOrders.password,
+    woInventoryOrderId: workOrders.inventoryOrderId,
+    woInventoryWorkOrderId: workOrders.inventoryWorkOrderId,
+    woInventoryLineTitle: workOrders.inventoryLineTitle,
+    woRunId: workOrders.runId,
+    woDesignWorkOrderId: workOrders.designWorkOrderId,
+    woDesignName: workOrders.designName,
+    woCollatedWorkOrderId: workOrders.collatedWorkOrderId,
+    woCollatedDesignNames: workOrders.collatedDesignNames,
+    // #2357 — collated all-designs actions
+    caEmail: collatedActions.email,
+    caPassword: collatedActions.password,
+    caWorkOrderId: collatedActions.workOrderId,
+    caDesigns: collatedActions.designs,
+    // #2377 Inbox — consumed by admin-inbox.spec.ts (admin, CI). Re-seeded
+    // every run in fresh folders; the spec ignores the note (single-use).
+    inboxOrdersFolder: inbox.ordersFolder,
+    inboxNotesFolder: inbox.notesFolder,
+    inboxOrderEmailId: inbox.orderEmailId,
+    inboxOrderSubject: inbox.orderSubject,
+    inboxNoteEmailId: inbox.noteEmailId,
+    inboxNoteSubject: inbox.noteSubject,
+  }
+
+  // Last, and before the seed file is written: a run that took the house store
+  // must not hand the suite a seed file that looks healthy.
+  await assertHouseStoreIntact(container, logger, "after")
+
+  fs.writeFileSync(SEED_FILE, JSON.stringify(seedData, null, 2))
+  logger.info(`E2E seed complete. Credentials saved to ${SEED_FILE}`)
+}

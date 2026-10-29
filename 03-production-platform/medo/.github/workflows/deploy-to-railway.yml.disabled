@@ -1,0 +1,193 @@
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'apps/backend/**'
+      - 'pnpm-lock.yaml'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - '.dockerignore'
+      - '.github/workflows/deploy-to-railway.yml'
+  workflow_dispatch:
+
+# Cancel any in-progress deploy on the same branch when a new push arrives
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # Opt into Node.js 24 for JS-based actions (actions/checkout, paths-filter,
+  # etc.). Node 20 runtime is deprecated on GHA runners; forced default
+  # 2026-06-02, removed 2026-09-16.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1. Build & push a single image to GHCR.
+  #    The same image is used for server and worker.
+  #    DB migrations are run manually outside of CI.
+  # ─────────────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      image_ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./apps/backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Baked into the Vite admin bundle at build time — Vite can't
+          # read them at runtime. Public URLs, not secrets. Uses repo
+          # Variables (not Secrets) so values are visible for auditing.
+          build-args: |
+            MEDUSA_BACKEND_URL=${{ vars.MEDUSA_BACKEND_URL }}
+            VITE_MEDUSA_BACKEND_URL=${{ vars.MEDUSA_BACKEND_URL }}
+            VITE_MEDIA_GALLERY_BASE_URL=${{ vars.VITE_MEDIA_GALLERY_BASE_URL }}
+            VITE_STOREFRONT_URL=${{ vars.VITE_STOREFRONT_URL }}
+          # Cache layers in GitHub Actions cache so repeat builds are fast
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build summary
+        run: |
+          echo "### Image" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Tags | \`${{ steps.meta.outputs.tags }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Digest | \`${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2a & 2b. Deploy Server + Worker in parallel.
+  #
+  #    Railway services must already be configured with Source = Docker Image
+  #    pointing at ghcr.io/<repo>:latest (one-time setup in dashboard). Each
+  #    push overwrites :latest and `railway redeploy` triggers a pull+restart.
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy-server:
+    name: Deploy Server
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Redeploy medusa-server
+        uses: docker://ghcr.io/railwayapp/cli:latest
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        with:
+          args: railway redeploy --service=medusa-server --yes
+
+      - name: Deploy summary
+        run: |
+          echo "### Server Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | medusa-server |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ needs.build-and-push.outputs.image_ref }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  deploy-worker:
+    name: Deploy Worker
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Redeploy medusa-worker
+        uses: docker://ghcr.io/railwayapp/cli:latest
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        with:
+          args: railway redeploy --service=medusa-worker --yes
+
+      - name: Deploy summary
+        run: |
+          echo "### Worker Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | medusa-worker |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ needs.build-and-push.outputs.image_ref }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 3. Health-check the server after Railway has had time to pull & boot.
+  #
+  #    Requires repo Variable: MEDUSA_BACKEND_URL  (e.g. https://api.example.com)
+  # ─────────────────────────────────────────────────────────────────────────
+  health-check-server:
+    name: Health Check — Server
+    runs-on: ubuntu-latest
+    needs: deploy-server
+    if: always() && needs.deploy-server.result == 'success'
+    steps:
+      - name: Wait for Railway pull + start
+        run: |
+          echo "Giving Railway 90s to pull the new image and boot..."
+          sleep 90
+
+      - name: Poll /health until ready
+        env:
+          BACKEND_URL: ${{ vars.MEDUSA_BACKEND_URL }}
+        run: |
+          MAX_ATTEMPTS=30
+          INTERVAL=30
+          ATTEMPT=0
+          HEALTH_URL="${BACKEND_URL%/}/health"
+
+          echo "Polling ${HEALTH_URL} (max ${MAX_ATTEMPTS} × ${INTERVAL}s = $((MAX_ATTEMPTS * INTERVAL))s)"
+
+          until [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL" || echo "000")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Server healthy (attempt ${ATTEMPT}, HTTP ${HTTP_CODE})"
+              exit 0
+            fi
+
+            echo "⏳ Attempt ${ATTEMPT}/${MAX_ATTEMPTS} — HTTP ${HTTP_CODE}. Retrying in ${INTERVAL}s..."
+            sleep "$INTERVAL"
+          done
+
+          echo "❌ Server did not become healthy after $((MAX_ATTEMPTS * INTERVAL + 90))s"
+          exit 1
+
+      - name: Health check summary
+        if: always()
+        run: |
+          echo "### Server Health Check" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | \`${{ vars.MEDUSA_BACKEND_URL }}/health\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Result | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY

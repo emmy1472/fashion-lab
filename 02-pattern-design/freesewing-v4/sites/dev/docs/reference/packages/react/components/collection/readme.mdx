@@ -1,0 +1,29 @@
+---
+title: Collection
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import { jsdocCollection, jsdocDesignInfo } from '@site/prebuild/jsdoc/components.collection.mjs'
+import { CollectionExample, DesignInfoExample } from './_examples.js'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Collection** component family provides the following components:
+
+- [Collection](#collection)
+- [DesignInfo](#designinfo)
+
+### Collection
+
+<ComponentDocs docs={jsdocCollection} example={CollectionExample} />
+
+### DesignInfo
+
+<ComponentDocs docs={jsdocDesignInfo} example={DesignInfoExample} />
+
+</DocusaurusDoc>

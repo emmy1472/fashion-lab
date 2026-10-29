@@ -1,0 +1,769 @@
+import { MedusaContainer } from "@medusajs/framework"
+import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils"
+import partnerOrderLink from "../../links/partner-order"
+import { PARTNER_WORK_ORDERS_CHANNEL } from "../../workflows/inventory_orders/dual-write-unified-order"
+import { pickPartnerShipFromLocation } from "./lib/ship-from-location"
+
+export const refetchPartner = async (
+    partnerId: string,
+    container: MedusaContainer,
+) => {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const result = await query.graph({
+        entity: "partners",
+        filters: {
+            id: partnerId
+        },
+        fields: ["*", "admins.id", "admins.first_name", "admins.last_name", "admins.email",
+            "admins.phone", "admins.role", "admins.permissions", "admins.metadata",
+            "admins.preferred_language",
+            "admins.created_at", "admins.updated_at"
+        ]
+    })
+    const data = result.data || []
+    return data[0]
+}
+
+export const getPartnerFromAuthContext = async (
+    authContext: { actor_id?: string | null } | undefined,
+    container: MedusaContainer,
+): Promise<any | null> => {
+    const partnerId = authContext?.actor_id
+    if (!partnerId) {
+        return null
+    }
+
+    const partner = await refetchPartner(partnerId, container)
+    return partner || null
+}
+
+export const validatePartnerStoreAccess = async (
+    authContext: { actor_id?: string | null } | undefined,
+    storeId: string,
+    container: MedusaContainer,
+): Promise<{ partner: any; store: any }> => {
+    const partner = await getPartnerFromAuthContext(authContext, container)
+    if (!partner) {
+        throw new MedusaError(
+            MedusaError.Types.UNAUTHORIZED,
+            "No partner associated with this account"
+        )
+    }
+
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+        entity: "partners",
+        // `stores.supported_currencies.*` MUST be expanded — partner
+        // routes that mutate regions / payments rely on the live
+        // supported_currencies array on the returned store to compute
+        // whether they need to expand currencies on the fly. Without
+        // the expansion the array comes back undefined, the helper
+        // treats it as empty, and an updateStores call writes a
+        // single-entry array stripping the default-currency flag —
+        // which then breaks every subsequent createRegionsWorkflow
+        // with "There should be a default currency set for the store".
+        fields: ["id", "stores.*", "stores.supported_currencies.*"],
+        filters: { id: partner.id },
+    })
+
+    const stores = (data?.[0]?.stores || []) as any[]
+    const store = stores.find((s: any) => s.id === storeId)
+
+    if (!store) {
+        throw new MedusaError(
+            MedusaError.Types.UNAUTHORIZED,
+            `Store ${storeId} is not associated with this partner`
+        )
+    }
+
+    return { partner, store }
+}
+
+/**
+ * The stock locations a partner store owns: its default location plus every
+ * location linked to its default sales channel (extra warehouses, #2061).
+ */
+export const partnerStoreLocationIds = async (
+    store: { default_location_id?: string | null; default_sales_channel_id?: string | null },
+    container: MedusaContainer,
+): Promise<Set<string>> => {
+    const ids = new Set<string>()
+    if (store.default_location_id) ids.add(store.default_location_id)
+    if (store.default_sales_channel_id) {
+        const query = container.resolve(ContainerRegistrationKeys.QUERY)
+        const { data } = await query.graph({
+            entity: "sales_channels",
+            fields: ["id", "stock_locations.id"],
+            filters: { id: store.default_sales_channel_id },
+        })
+        for (const loc of ((data?.[0] as any)?.stock_locations || []) as any[]) {
+            if (loc?.id) ids.add(loc.id)
+        }
+    }
+    return ids
+}
+
+/**
+ * 🔴 A shipping option or service zone id in a partner URL/body must belong to
+ * THAT partner's store. `validatePartnerStoreAccess` only proves the caller
+ * owns the store named in the path — it says nothing about the option id next
+ * to it. Without this, any partner could read, re-price or DELETE another
+ * partner's (or the house's) shipping options by id, or create an option in
+ * someone else's service zone.
+ *
+ * Answers NOT_FOUND rather than UNAUTHORIZED, so the response does not confirm
+ * that the id exists elsewhere.
+ */
+export const assertStoreOwnsShippingTarget = async (
+    store: { default_location_id?: string | null; default_sales_channel_id?: string | null },
+    target: { shippingOptionId?: string; serviceZoneId?: string },
+    container: MedusaContainer,
+): Promise<void> => {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    let locationId: string | undefined
+    if (target.shippingOptionId) {
+        const { data } = await query.graph({
+            entity: "shipping_options",
+            fields: ["id", "service_zone.fulfillment_set.location.id"],
+            filters: { id: target.shippingOptionId },
+        })
+        locationId = (data?.[0] as any)?.service_zone?.fulfillment_set?.location?.id
+    } else if (target.serviceZoneId) {
+        const { data } = await query.graph({
+            entity: "service_zones",
+            fields: ["id", "fulfillment_set.location.id"],
+            filters: { id: target.serviceZoneId },
+        })
+        locationId = (data?.[0] as any)?.fulfillment_set?.location?.id
+    }
+
+    const owned = await partnerStoreLocationIds(store, container)
+    if (!locationId || !owned.has(locationId)) {
+        throw new MedusaError(
+            MedusaError.Types.NOT_FOUND,
+            target.shippingOptionId
+                ? "Shipping option not found for this store"
+                : "Service zone not found for this store"
+        )
+    }
+}
+
+export const getPartnerStore = async (
+    authContext: { actor_id?: string | null } | undefined,
+    container: MedusaContainer,
+): Promise<{ partner: any; store: any }> => {
+    const partner = await getPartnerFromAuthContext(authContext, container)
+    if (!partner) {
+        throw new MedusaError(
+            MedusaError.Types.UNAUTHORIZED,
+            "No partner associated with this account"
+        )
+    }
+
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+        entity: "partners",
+        // `stores.supported_currencies.*` MUST be expanded — partner
+        // routes that mutate regions / payments rely on the live
+        // supported_currencies array on the returned store to compute
+        // whether they need to expand currencies on the fly. Without
+        // the expansion the array comes back undefined, the helper
+        // treats it as empty, and an updateStores call writes a
+        // single-entry array stripping the default-currency flag —
+        // which then breaks every subsequent createRegionsWorkflow
+        // with "There should be a default currency set for the store".
+        fields: ["id", "stores.*", "stores.supported_currencies.*"],
+        filters: { id: partner.id },
+    })
+
+    const stores = (data?.[0]?.stores || []) as any[]
+    if (!stores.length) {
+        throw new MedusaError(
+            MedusaError.Types.NOT_FOUND,
+            "No store configured for this partner"
+        )
+    }
+
+    return { partner, store: stores[0] }
+}
+
+/**
+ * Non-throwing variant of getPartnerStore.
+ * Returns { partner, store: null } when the partner has no store linked.
+ */
+export const tryGetPartnerStore = async (
+    authContext: { actor_id?: string | null } | undefined,
+    container: MedusaContainer,
+): Promise<{ partner: any; store: any | null }> => {
+    const partner = await getPartnerFromAuthContext(authContext, container)
+    if (!partner) {
+        throw new MedusaError(
+            MedusaError.Types.UNAUTHORIZED,
+            "No partner associated with this account"
+        )
+    }
+
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+        entity: "partners",
+        // `stores.supported_currencies.*` MUST be expanded — partner
+        // routes that mutate regions / payments rely on the live
+        // supported_currencies array on the returned store to compute
+        // whether they need to expand currencies on the fly. Without
+        // the expansion the array comes back undefined, the helper
+        // treats it as empty, and an updateStores call writes a
+        // single-entry array stripping the default-currency flag —
+        // which then breaks every subsequent createRegionsWorkflow
+        // with "There should be a default currency set for the store".
+        fields: ["id", "stores.*", "stores.supported_currencies.*"],
+        filters: { id: partner.id },
+    })
+
+    const stores = (data?.[0]?.stores || []) as any[]
+    return { partner, store: stores[0] || null }
+}
+
+/**
+ * Non-throwing variant of getPartnerSalesChannelId.
+ * Returns { partner, store, salesChannelId: null } when no store or no sales channel.
+ */
+export const tryGetPartnerSalesChannelId = async (
+    authContext: { actor_id?: string | null } | undefined,
+    container: MedusaContainer,
+): Promise<{ partner: any; store: any | null; salesChannelId: string | null }> => {
+    const { partner, store } = await tryGetPartnerStore(authContext, container)
+    if (!store || !store.default_sales_channel_id) {
+        return { partner, store, salesChannelId: null }
+    }
+    return { partner, store, salesChannelId: store.default_sales_channel_id }
+}
+
+/**
+ * Resolve the stock location a partner ships their CORE orders from (#772
+ * core-order half): the locations linked to the partner's default sales
+ * channel, picked by `pickPartnerShipFromLocation` (registered-pickup
+ * nickname → registerable address → first). Returns null when the partner
+ * has no store/channel or no linked location — callers turn that into an
+ * actionable 400 rather than shipping from someone else's warehouse.
+ */
+export const resolvePartnerShipFromLocation = async (
+    authContext: { actor_id?: string | null } | undefined,
+    container: MedusaContainer,
+): Promise<{ partner: any; locationId: string | null }> => {
+    const { partner, salesChannelId } = await tryGetPartnerSalesChannelId(
+        authContext,
+        container,
+    )
+    if (!salesChannelId) return { partner, locationId: null }
+
+    const query = container.resolve(ContainerRegistrationKeys.QUERY) as any
+    const { data: channels } = await query.graph({
+        entity: "sales_channels",
+        fields: [
+            "stock_locations.id",
+            "stock_locations.metadata",
+            "stock_locations.address.phone",
+            "stock_locations.address.postal_code",
+        ],
+        filters: { id: salesChannelId },
+    })
+    const candidates = ((channels?.[0]?.stock_locations || []) as any[]).map(
+        (loc) => ({
+            id: loc?.id,
+            pickup_nickname:
+                (loc?.metadata as any)?.shiprocket_pickup_location ?? null,
+            phone: loc?.address?.phone ?? null,
+            postal_code: loc?.address?.postal_code ?? null,
+        }),
+    )
+    const picked = pickPartnerShipFromLocation(candidates)
+    return { partner, locationId: picked?.id ?? null }
+}
+
+/**
+ * Every core entity a partner can own, keyed by the `field` its store link
+ * declares in `src/links/`. Deliberately a closed union: an entity type only
+ * belongs here once a `store ↔ …` link exists, because both guards below ask
+ * the store for `${entityType}.id` and a missing link resolves to an empty
+ * list — which reads as "you own nothing" and 404s every legitimate request.
+ */
+export type PartnerScopedEntity =
+    | "product_categories"
+    | "product_collections"
+    | "customers"
+    | "customer_groups"
+    | "price_lists"
+
+export const validatePartnerEntityOwnership = async (
+    authContext: { actor_id?: string | null } | undefined,
+    entityType: PartnerScopedEntity,
+    entityId: string,
+    container: MedusaContainer,
+): Promise<{ partner: any; store: any }> => {
+    const { partner, store } = await getPartnerStore(authContext, container)
+
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+        entity: "stores",
+        fields: [`${entityType}.id`],
+        filters: { id: store.id },
+    })
+
+    const entities = (data?.[0] as any)?.[entityType] || []
+    const found = entities.some((e: any) => e.id === entityId)
+
+    if (!found) {
+        throw new MedusaError(
+            MedusaError.Types.NOT_FOUND,
+            `${entityType.replace("_", " ")} not found`
+        )
+    }
+
+    return { partner, store }
+}
+
+/**
+ * PURE: which of `ids` are missing from the set the partner owns.
+ *
+ * Split out so the "both ends" rule is testable without a database, and so the
+ * two callers cannot drift — an ownership rule that exists in two copies is one
+ * edit away from disagreeing with itself.
+ */
+export const missingOwnedIds = (
+    ownedIds: Array<string | null | undefined>,
+    ids: Array<string | null | undefined>,
+): string[] => {
+    const owned = new Set(ownedIds.filter(Boolean) as string[])
+    const missing = new Set<string>()
+    for (const id of ids) {
+        if (id && !owned.has(id)) missing.add(id)
+    }
+    return [...missing]
+}
+
+/**
+ * Assert the partner owns EVERY id in the list, else throw NOT_FOUND.
+ *
+ * 🔴 The rule this exists to enforce: **validate both ends of any request that
+ * names an id.** Owning the resource in the URL says nothing about owning the
+ * ids in the body. Two partner routes proved that — one let a partner add
+ * arbitrary customers to their own group, the other let them add their own
+ * customer to ANOTHER partner's group — and once customer groups carry
+ * negotiated B2B price lists, that second one hands a partner someone else's
+ * pricing.
+ *
+ * NOT_FOUND rather than NOT_ALLOWED, matching every other guard here: a partner
+ * probing ids must not be able to tell "exists but not yours" from "no such
+ * thing".
+ */
+export const validatePartnerOwnsEntities = async (
+    authContext: { actor_id?: string | null } | undefined,
+    entityType: PartnerScopedEntity,
+    entityIds: string[],
+    container: MedusaContainer,
+): Promise<{ partner: any; store: any }> => {
+    const { partner, store } = await getPartnerStore(authContext, container)
+
+    const ids = (entityIds || []).filter(Boolean)
+    if (!ids.length) {
+        return { partner, store }
+    }
+
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+        entity: "stores",
+        fields: [`${entityType}.id`],
+        filters: { id: store.id },
+    })
+
+    const owned = ((data?.[0] as any)?.[entityType] || []).map((e: any) => e?.id)
+    const missing = missingOwnedIds(owned, ids)
+
+    if (missing.length) {
+        throw new MedusaError(
+            MedusaError.Types.NOT_FOUND,
+            `${entityType.replace("_", " ")} not found: ${missing.join(", ")}`
+        )
+    }
+
+    return { partner, store }
+}
+
+/**
+ * Pure ownership predicate (#778 C1): does this inventory order's linked partner
+ * match the acting partner? Exported for unit testing.
+ */
+export const inventoryOrderOwnedByPartner = (
+    orderPartner: { id?: string | null } | null | undefined,
+    partnerId: string | null | undefined,
+): boolean => Boolean(orderPartner?.id && partnerId && orderPartner.id === partnerId)
+
+/**
+ * Assert the acting partner owns the inventory order, else throw NOT_FOUND.
+ *
+ * Closes the IDOR on the partner mutation routes (start / complete /
+ * submit-payment, #778 C1): they previously fetched the order by bare id and
+ * never checked it belonged to the caller, so any authenticated partner could
+ * mutate any order. Mirrors the GET-detail ownership rule (`inventory_orders.partner`),
+ * but throws NOT_FOUND rather than NOT_ALLOWED so we don't leak the existence of
+ * other partners' orders.
+ */
+export const assertPartnerOwnsInventoryOrder = async (
+    container: MedusaContainer,
+    orderId: string,
+    partnerId: string,
+): Promise<void> => {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data } = await query.graph({
+        entity: "inventory_orders",
+        fields: ["id", "partner.id"],
+        filters: { id: orderId },
+    })
+    const order = data?.[0] as any
+    if (!order || !inventoryOrderOwnedByPartner(order.partner, partnerId)) {
+        throw new MedusaError(
+            MedusaError.Types.NOT_FOUND,
+            `Inventory order ${orderId} not found`,
+        )
+    }
+}
+
+/**
+ * Validates that an order belongs to the partner — by the SAME two scoping rules
+ * the partner orders LIST uses (`list-partner-orders` workflow), so the detail +
+ * its 27 sibling action routes accept exactly the orders the list shows:
+ *
+ *   - retail → the order lives in the partner's store sales channel.
+ *   - work (#342 design | inventory) → a D3 `partner ↔ order` link exists.
+ *
+ * Work-orders live in the shared internal PARTNER_WORK_ORDERS_CHANNEL (NOT the
+ * store channel), so sales-channel scoping alone can never see them — and that
+ * channel is one row shared by every partner, so it can't tell partners apart.
+ * The explicit link is the ownership primitive for work; the channel is for
+ * retail. (Before this, the channel-only check 404'd every work-order detail.)
+ */
+export const validatePartnerOrderOwnership = async (
+    authContext: { actor_id?: string | null } | undefined,
+    orderId: string,
+    container: MedusaContainer,
+): Promise<{ partner: any; store: any | null }> => {
+    // A partner can own an order two ways: retail (it's in their store's sales
+    // channel) OR work (the D3 partner↔order link, for design/inventory work
+    // orders). The work path needs NO store — a designer/producer partner may
+    // have no store at all. Use the NON-throwing store lookup so a storeless
+    // partner still reaches the work-ownership check instead of being 404'd by
+    // "No store configured for this partner" before we ever look at the link.
+    const { partner, store } = await tryGetPartnerStore(authContext, container)
+
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const { data: orders } = await query.graph({
+        entity: "orders",
+        fields: ["id", "sales_channel_id"],
+        filters: { id: orderId },
+    })
+
+    const order = orders?.[0] as any
+    if (!order) {
+        throw new MedusaError(MedusaError.Types.NOT_FOUND, "Order not found")
+    }
+
+    // Retail ownership: order is in the partner's store sales channel.
+    const ownsRetail =
+        !!store?.default_sales_channel_id &&
+        order.sales_channel_id === store.default_sales_channel_id
+
+    // Work ownership: the D3 partner↔order link (read by entryPoint, the source
+    // of truth — same as resolvePartnerWorkOrderIdsStep). Only checked when the
+    // retail rule didn't already grant, to save a query on the common path.
+    let ownsWork = false
+    if (!ownsRetail) {
+        const { data: links } = await query.graph({
+            entity: partnerOrderLink.entryPoint,
+            fields: ["order_id"],
+            filters: { partner_id: partner.id, order_id: orderId },
+        })
+        ownsWork = (links?.length ?? 0) > 0
+    }
+
+    if (!ownsRetail && !ownsWork) {
+        throw new MedusaError(MedusaError.Types.NOT_FOUND, "Order not found")
+    }
+
+    return { partner, store }
+}
+
+/**
+ * Refuses a RETAIL-only action on a work order (#2265 S3a).
+ *
+ * `validatePartnerOrderOwnership` deliberately admits work orders (the D3 link
+ * is how a partner owns one), so on its own it lets a partner run core order
+ * machinery on a design or inventory work order: `cancelOrderWorkflow` fires
+ * `order.canceled` (partner email, fee reversal, provenance runs), and the
+ * fulfillment / transfer / credit-line / balance routes write core rows a work
+ * order must never have. partner-ui already hides these actions for work
+ * orders; this closes the API behind them.
+ *
+ * A work order is EITHER a `work_order` row OR a core order in the internal
+ * work-orders channel. Both, because the S1 shadow write is best-effort: a
+ * mirror whose shadow sync failed still has no `work_order` row.
+ */
+export const assertNotWorkOrder = async (
+    orderId: string,
+    container: MedusaContainer,
+): Promise<void> => {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+
+    const { data: workOrders } = await query.graph({
+        entity: "work_order",
+        fields: ["id"],
+        filters: { id: orderId },
+    })
+    let isWorkOrder = (workOrders?.length ?? 0) > 0
+
+    if (!isWorkOrder) {
+        const salesChannels = container.resolve(Modules.SALES_CHANNEL)
+        const [channel] = await salesChannels.listSalesChannels({
+            name: PARTNER_WORK_ORDERS_CHANNEL,
+        })
+        if (channel) {
+            const { data: orders } = await query.graph({
+                entity: "orders",
+                fields: ["id"],
+                filters: { id: orderId, sales_channel_id: channel.id },
+            })
+            isWorkOrder = (orders?.length ?? 0) > 0
+        }
+    }
+
+    if (isWorkOrder) {
+        throw new MedusaError(
+            MedusaError.Types.NOT_ALLOWED,
+            "This is a work order. Retail order actions (cancel, fulfill, transfer, credit, balance request, shipping labels) do not apply to it; use the production run or inventory order instead."
+        )
+    }
+}
+
+/**
+ * Validates that a return/exchange/claim belongs to the partner's store via its order.
+ * Looks up the entity by ID, gets its order_id, then checks the order's sales channel.
+ */
+export const validatePartnerOrderEntityOwnership = async (
+    authContext: { actor_id?: string | null } | undefined,
+    entityType: "return" | "exchange" | "claim",
+    entityId: string,
+    container: MedusaContainer,
+): Promise<{ partner: any; store: any; orderId: string }> => {
+    const query = container.resolve(ContainerRegistrationKeys.QUERY)
+    const entityName = entityType === "return" ? "return" : entityType === "exchange" ? "order_exchange" : "order_claim"
+    const { data } = await query.graph({
+        entity: entityName,
+        fields: ["id", "order_id"],
+        filters: { id: entityId },
+    } as any)
+
+    const entity = data?.[0] as any
+    if (!entity?.order_id) {
+        throw new MedusaError(MedusaError.Types.NOT_FOUND, `${entityType} not found`)
+    }
+
+    const { partner, store } = await validatePartnerOrderOwnership(authContext, entity.order_id, container)
+    return { partner, store, orderId: entity.order_id }
+}
+
+/**
+ * Scopes each variant's inventory to the partner's location and populates
+ * aggregate fields that Medusa's `query.graph` does not auto-compute:
+ *   - inventory.stocked_quantity / reserved_quantity / incoming_quantity
+ *   - variant.inventory_quantity (kit-aware: min floor((stocked-reserved)/required))
+ *
+ * Without this, partner product/variant responses come back with those
+ * fields as `null` and the UI's "X in stock" widgets render blank.
+ *
+ * Mutates `variants` in place for ergonomics; also returns it.
+ */
+export const scopeAndAggregateVariantInventory = <T extends any>(
+    variants: T[],
+    locationId: string | null | undefined,
+): T[] => {
+    if (!Array.isArray(variants)) return variants
+    for (const variant of variants as any[]) {
+        const items = Array.isArray(variant?.inventory_items) ? variant.inventory_items : []
+        let variantQty: number | null = null
+        for (const pivot of items) {
+            const inv = pivot?.inventory
+            if (!inv) continue
+            const allLevels = Array.isArray(inv.location_levels) ? inv.location_levels : []
+            const levels = locationId
+                ? allLevels.filter((l: any) => l?.location_id === locationId)
+                : allLevels
+            inv.location_levels = levels
+            const stocked = levels.reduce((a: number, l: any) => a + (Number(l?.stocked_quantity) || 0), 0)
+            const reserved = levels.reduce((a: number, l: any) => a + (Number(l?.reserved_quantity) || 0), 0)
+            const incoming = levels.reduce((a: number, l: any) => a + (Number(l?.incoming_quantity) || 0), 0)
+            inv.stocked_quantity = stocked
+            inv.reserved_quantity = reserved
+            inv.incoming_quantity = incoming
+            const required = Number(pivot?.required_quantity) || 1
+            const available = Math.max(0, stocked - reserved)
+            const perItem = required > 0 ? Math.floor(available / required) : available
+            variantQty = variantQty === null ? perItem : Math.min(variantQty, perItem)
+        }
+        if (variant) {
+            variant.inventory_quantity = variantQty ?? 0
+        }
+    }
+    return variants
+}
+
+/**
+ * Auto-create inventory_level rows at the partner's stock location(s) for
+ * any inventory items linked to the given variants (only those with
+ * `manage_inventory: true`).
+ *
+ * Why this exists: `createProductVariantsWorkflow` creates inventory items
+ * for managed variants and links variant ↔ inventory_item, but it does NOT
+ * create the inventory_level row that ties the item to a specific stock
+ * location. The partner-ui's inventory detail route
+ * (`partners/inventory-items/:id`) then 404s because its access check
+ * requires a level at `store.default_location_id`.
+ *
+ * Used by the product POST and the variant single-POST / batch-POST routes
+ * to keep all three create paths consistent. Idempotent: pre-existing
+ * levels are skipped, so it's safe to call on already-linked variants.
+ *
+ * Non-fatal by design — the variant/product was already created. We log
+ * and swallow so an inventory-link blip can't unwind the create.
+ */
+export const ensureInventoryLevelsForVariants = async (
+    container: MedusaContainer,
+    store: { id?: string; default_sales_channel_id?: string | null },
+    variantIds: string[],
+): Promise<void> => {
+    if (!variantIds.length) return
+    if (!store?.default_sales_channel_id) return
+
+    try {
+        const query = container.resolve(ContainerRegistrationKeys.QUERY) as any
+        const inventoryService = container.resolve(Modules.INVENTORY) as any
+
+        // Resolve the partner's stock locations via the store's default
+        // sales channel. Same query the product POST uses, so multi-location
+        // partners get a level at every linked location.
+        const { data: channels } = await query.graph({
+            entity: "sales_channels",
+            fields: ["stock_locations.id"],
+            filters: { id: store.default_sales_channel_id },
+        })
+        const locationIds: string[] = []
+        for (const loc of channels?.[0]?.stock_locations || []) {
+            if (loc?.id) locationIds.push(loc.id)
+        }
+        if (!locationIds.length) return
+
+        // Pull inventory_item ids from the newly created variants
+        // (skip non-managed variants — they have no inventory items).
+        const { data: variants } = await query.graph({
+            entity: "product_variants",
+            fields: ["manage_inventory", "inventory_items.inventory.id"],
+            filters: { id: variantIds },
+        })
+
+        const inventoryItemIds: string[] = []
+        for (const v of (variants as any[]) || []) {
+            if (!v.manage_inventory) continue
+            for (const ii of v.inventory_items || []) {
+                if (ii?.inventory?.id) inventoryItemIds.push(ii.inventory.id)
+            }
+        }
+        if (!inventoryItemIds.length) return
+
+        const levelsToCreate: Array<{
+            inventory_item_id: string
+            location_id: string
+            stocked_quantity?: number
+        }> = []
+
+        // ONE query for every item, not one per item. This used to loop
+        // `listInventoryLevels({ inventory_item_id: itemId })` sequentially, so
+        // a partner saving N variants paid N round trips before a single level
+        // was written — and the create-product path calls this with every
+        // variant on the product at once. The filter takes an array; nothing
+        // about the per-item shape was required.
+        const existing = await inventoryService.listInventoryLevels({
+            inventory_item_id: inventoryItemIds,
+        })
+
+        // item id -> locations it already has a level at.
+        const existingByItem = new Map<string, Set<string>>()
+        for (const level of (existing as any[]) || []) {
+            const itemId = level?.inventory_item_id
+            if (!itemId) continue
+            if (!existingByItem.has(itemId)) existingByItem.set(itemId, new Set())
+            existingByItem.get(itemId)!.add(level.location_id)
+        }
+
+        for (const itemId of inventoryItemIds) {
+            const existingLocationIds =
+                existingByItem.get(itemId) ?? new Set<string>()
+            for (const locId of locationIds) {
+                if (!existingLocationIds.has(locId)) {
+                    levelsToCreate.push({
+                        inventory_item_id: itemId,
+                        location_id: locId,
+                        stocked_quantity: 0,
+                    })
+                }
+            }
+        }
+
+        if (levelsToCreate.length) {
+            await inventoryService.createInventoryLevels(levelsToCreate)
+        }
+    } catch (e: any) {
+        // Non-fatal: the variant/product was created successfully; we just
+        // couldn't seed inventory levels. Log so we notice in CI / prod.
+        console.error(
+            "[partner-helpers/ensureInventoryLevelsForVariants] failed:",
+            e?.message ?? e,
+        )
+    }
+}
+
+/**
+ * Gets the partner's sales channel ID for order scoping.
+ */
+export const getPartnerSalesChannelId = async (
+    authContext: { actor_id?: string | null } | undefined,
+    container: MedusaContainer,
+): Promise<{ partner: any; store: any; salesChannelId: string }> => {
+    const { partner, store } = await getPartnerStore(authContext, container)
+
+    if (!store.default_sales_channel_id) {
+        throw new MedusaError(
+            MedusaError.Types.NOT_FOUND,
+            "Store has no sales channel configured"
+        )
+    }
+
+    return { partner, store, salesChannelId: store.default_sales_channel_id }
+}
+/**
+ * Log the phase map a workflow returns as one `logger.info` line —
+ * `[label] requestId total=<N>ms <phase>=<v>ms <phase>=<v> …` — so the existing
+ * CloudWatch filter (`'"[partners/'`) keeps working now that the post-create
+ * work lives in `create-partner-product` rather than in the routes.
+ *
+ * A branch that did not run reports `skipped`, never `0ms`.
+ */
+export const logWorkflowPhases = (
+    logger: any,
+    label: string,
+    requestId: string,
+    totalMs: number,
+    phases: Record<string, unknown>,
+): void => {
+    const parts = Object.entries(phases).map(([k, v]) =>
+        typeof v === "number" ? `${k}=${v}ms` : `${k}=${v}`
+    )
+    logger?.info?.(`[${label}] ${requestId} total=${totalMs}ms ${parts.join(" ")}`)
+}

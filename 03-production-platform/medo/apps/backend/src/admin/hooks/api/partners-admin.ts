@@ -1,0 +1,380 @@
+import { FetchError } from "@medusajs/js-sdk"
+import { useQuery, UseQueryOptions, QueryKey, useMutation, UseMutationOptions, useQueryClient } from "@tanstack/react-query"
+import { sdk } from "../../lib/config"
+import { queryKeysFactory } from "../../lib/query-key-factory"
+
+export type AdminPartnerAdmin = {
+  id: string
+  email: string
+  first_name?: string
+  last_name?: string
+  phone?: string
+  role?: "owner" | "admin" | "manager"
+  preferred_language?: string | null
+  is_active?: boolean
+}
+
+export interface AdminPartner {
+  id: string
+  name: string
+  handle: string
+  logo?: string | null
+  status: "active" | "inactive" | "pending"
+  is_verified: boolean
+  workspace_type?: "seller" | "manufacturer" | "individual" | "designer"
+  whatsapp_number?: string | null
+  whatsapp_verified?: boolean
+  metadata?: Record<string, any> | null
+  created_at: string
+  updated_at: string
+  admins?: AdminPartnerAdmin[]
+}
+
+export interface AdminPartnersResponse {
+  partners: AdminPartner[]
+  count: number
+  offset: number
+  limit: number
+}
+
+export interface AdminPartnersQuery {
+  offset?: number
+  limit?: number
+  q?: string
+  order?: string
+  name?: string
+  handle?: string
+  status?: "active" | "inactive" | "pending"
+  is_verified?: boolean
+  fields?: string[]
+}
+
+const PARTNERS_QUERY_KEY = "admin_partners" as const
+export const partnersQueryKeys = queryKeysFactory(PARTNERS_QUERY_KEY)
+
+export const usePartners = (
+  query?: AdminPartnersQuery,
+  options?: Omit<
+    UseQueryOptions<AdminPartnersResponse, FetchError, AdminPartnersResponse, QueryKey>,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: async () =>
+      sdk.client.fetch<AdminPartnersResponse>(`/admin/partners`, {
+        method: "GET",
+        query: {
+          ...query,
+          fields: query?.fields ? query.fields.join(",") : undefined,
+        },
+      }) as Promise<AdminPartnersResponse>,
+    queryKey: partnersQueryKeys.list(query),
+    ...options,
+  })
+  return { ...data, ...rest }
+}
+
+export const usePartner = (
+  id: string,
+  fields?: string[],
+  options?: Omit<UseQueryOptions<{ partner: AdminPartner }, FetchError, { partner: AdminPartner }, QueryKey>, "queryFn" | "queryKey">,
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: async () =>
+      sdk.client.fetch<{ partner: AdminPartner }>(`/admin/partners/${id}`, {
+        method: "GET",
+        query: {
+          fields: fields?.length ? fields.join(",") : undefined,
+        },
+      }) as Promise<{ partner: AdminPartner }>,
+    queryKey: partnersQueryKeys.detail(id, { fields }),
+    enabled: !!id,
+    ...options,
+  })
+  return { ...data, ...rest }
+}
+
+export const useUpdatePartner = () => {
+  return useMutation({
+    mutationFn: async ({ id, data }: { id: string; data: Partial<AdminPartner> }) => {
+      return sdk.client.fetch<{ partner: AdminPartner }>(`/admin/partners/${id}`, {
+        method: "PUT",
+        body: data,
+      })
+    },
+  })
+}
+
+export const useDeletePartner = (
+  id: string,
+  options?: UseMutationOptions<{ id: string; object: string; deleted: boolean }, FetchError, void>
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async () =>
+      sdk.client.fetch<{ id: string; object: string; deleted: boolean }>(`/admin/partners/${id}`, {
+        method: "DELETE",
+      }),
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.lists() })
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.detail(id) })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+// Create partner with admin
+export type CreatePartnerWithAdminPayload = {
+  partner: {
+    name: string
+    handle?: string
+    logo?: string
+    status?: "active" | "inactive" | "pending"
+    is_verified?: boolean
+  }
+  admin: {
+    email: string
+    first_name?: string
+    last_name?: string
+    phone?: string
+    role?: "owner" | "admin" | "manager"
+  }
+  auth_identity_id?: string
+}
+
+export type CreatePartnerWithAdminResponse = {
+  partner: AdminPartner
+  partner_admin: AdminPartnerAdmin
+}
+
+export const useCreatePartnerWithAdmin = (
+  options?: UseMutationOptions<CreatePartnerWithAdminResponse, FetchError, CreatePartnerWithAdminPayload>
+) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: CreatePartnerWithAdminPayload) =>
+      sdk.client.fetch<CreatePartnerWithAdminResponse>(`/admin/partners`, {
+        method: "POST",
+        body: payload,
+      }) as Promise<CreatePartnerWithAdminResponse>,
+    ...options,
+    onSuccess: (data, variables, _mutateResult, context) => {
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.lists() })
+      options?.onSuccess?.(data, variables, _mutateResult, context)
+    },
+  })
+}
+
+export type AddPartnerAdminPayload = {
+  email: string
+  first_name?: string
+  last_name?: string
+  phone?: string
+  role?: "owner" | "admin" | "manager"
+  password?: string
+}
+
+export type AddPartnerAdminResponse = {
+  admin: AdminPartnerAdmin
+  temp_password: string
+}
+
+export const useAddPartnerAdmin = (partnerId: string) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: AddPartnerAdminPayload) =>
+      sdk.client.fetch<AddPartnerAdminResponse>(
+        `/admin/partners/${partnerId}/admins`,
+        { method: "POST", body: payload }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.details() })
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.lists() })
+    },
+  })
+}
+
+export type UpdatePartnerAdminPayload = {
+  first_name?: string | null
+  last_name?: string | null
+  phone?: string | null
+  role?: "owner" | "admin" | "manager"
+  preferred_language?: string | null
+  is_active?: boolean
+}
+
+export type UpdatePartnerAdminResponse = {
+  admin: AdminPartnerAdmin
+}
+
+export const useUpdatePartnerAdmin = (partnerId: string) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({
+      adminId,
+      data,
+    }: {
+      adminId: string
+      data: UpdatePartnerAdminPayload
+    }) =>
+      sdk.client.fetch<UpdatePartnerAdminResponse>(
+        `/admin/partners/${partnerId}/admins/${adminId}`,
+        { method: "PATCH", body: data }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.details() })
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.lists() })
+    },
+  })
+}
+
+// ─── Partner Subscription (Admin) ───────────────────────────────────────────
+
+export type AdminPartnerSubscription = {
+  id: string
+  partner_id: string
+  status: "active" | "canceled" | "expired" | "past_due"
+  payment_provider: string
+  current_period_start: string
+  current_period_end?: string
+  canceled_at?: string
+  plan?: {
+    id: string
+    name: string
+    slug: string
+    price: number
+    currency_code: string
+    interval: string
+  }
+  payments?: Array<{
+    id: string
+    amount: number
+    currency_code: string
+    status: string
+    provider: string
+    paid_at?: string
+    failed_at?: string
+  }>
+  created_at: string
+}
+
+export type AdminPartnerPlan = {
+  id: string
+  name: string
+  slug: string
+  price: number
+  currency_code: string
+  interval: string
+  is_active: boolean
+}
+
+export const usePartnerSubscriptions = (partnerId: string) => {
+  const { data, ...rest } = useQuery({
+    queryKey: ["partner-subscriptions", partnerId],
+    queryFn: () =>
+      sdk.client.fetch<{
+        subscriptions: AdminPartnerSubscription[]
+        plans: AdminPartnerPlan[]
+      }>(`/admin/partners/${partnerId}/subscription`, { method: "GET" }),
+    enabled: !!partnerId,
+  })
+  return {
+    subscriptions: data?.subscriptions || [],
+    plans: data?.plans || [],
+    ...rest,
+  }
+}
+
+export const useAdminAssignSubscription = (partnerId: string) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: {
+      plan_id: string
+      skip_payment?: boolean
+      notes?: string
+    }) =>
+      sdk.client.fetch(`/admin/partners/${partnerId}/subscription`, {
+        method: "POST",
+        body: payload,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["partner-subscriptions", partnerId] })
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.details() })
+    },
+  })
+}
+
+export const useAdminCancelSubscription = (partnerId: string) => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      sdk.client.fetch(`/admin/partners/${partnerId}/subscription`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["partner-subscriptions", partnerId] })
+      queryClient.invalidateQueries({ queryKey: partnersQueryKeys.details() })
+    },
+  })
+}
+
+// --- #336 / #541: partner transaction-fee (commission) ledger -----------------
+
+export type AdminPartnerFee = {
+  id: string
+  partner_id: string
+  order_id: string
+  order_total: number | string
+  currency_code: string
+  fee_basis: "percentage" | "flat"
+  fee_rate: number
+  fee_amount: number | string
+  status: "accrued" | "invoiced" | "waived" | "reversed"
+  accrued_at?: string | null
+}
+
+export type AdminPartnerFeeSummary = {
+  count: number
+  total_fee_amount: number
+  net_fee_amount: number
+  by_status: Record<string, { count: number; fee_amount: number }>
+  by_currency: Record<
+    string,
+    { count: number; total_amount: number; net_amount: number }
+  >
+}
+
+export interface AdminPartnerFeesResponse {
+  partner_id: string
+  fees: AdminPartnerFee[]
+  count: number
+  offset: number
+  limit: number
+  summary: AdminPartnerFeeSummary
+}
+
+/**
+ * Reads a partner's accrued transaction-fee (commission) ledger from the
+ * Slice-4 read API (`GET /admin/partners/:id/fees`). Read-only — fees are
+ * accrued/reversed by the order.placed / order.canceled subscribers.
+ */
+export const usePartnerFees = (
+  partnerId: string,
+  query?: { status?: string; offset?: number; limit?: number },
+  options?: Omit<
+    UseQueryOptions<AdminPartnerFeesResponse, FetchError, AdminPartnerFeesResponse, QueryKey>,
+    "queryFn" | "queryKey"
+  >,
+) => {
+  const { data, ...rest } = useQuery({
+    queryFn: () =>
+      sdk.client.fetch<AdminPartnerFeesResponse>(`/admin/partners/${partnerId}/fees`, {
+        method: "GET",
+        query,
+      }),
+    queryKey: ["admin_partner_fees", partnerId, query],
+    ...options,
+  })
+  return { ...data, ...rest }
+}

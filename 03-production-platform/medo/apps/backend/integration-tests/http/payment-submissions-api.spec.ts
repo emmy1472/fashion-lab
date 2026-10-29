@@ -1,0 +1,5863 @@
+/**
+ * Integration tests for Design Payment Submissions & Reconciliation
+ *
+ * Covers:
+ *   POST   /partners/payment-submissions              — create payment submission
+ *   GET    /partners/payment-submissions              — list own submissions
+ *   GET    /partners/payment-submissions/:submissionId — get detail
+ *   GET    /admin/payment-submissions                  — admin list all
+ *   GET    /admin/payment-submissions/:id              — admin detail
+ *   POST   /admin/payment-submissions/:id/review       — approve / reject
+ *   GET    /admin/payment_reports/reconciliation        — list reconciliations
+ *   POST   /admin/payment_reports/reconciliation        — manual reconciliation
+ *   GET    /admin/payment_reports/reconciliation/:id    — get reconciliation
+ *   PATCH  /admin/payment_reports/reconciliation/:id    — update reconciliation
+ *   POST   /admin/payment_reports/reconciliation/:id/settle — settle reconciliation
+ *   GET    /admin/payment_reports/summary?include_reconciliation=true — reconciliation in summary
+ */
+
+import { createAdminUser, getAuthHeaders } from "../helpers/create-admin-user"
+import { getSharedTestEnv, setupSharedTestSuite } from "./shared-test-setup"
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { PRODUCTION_RUNS_MODULE } from "../../src/modules/production_runs"
+
+jest.setTimeout(60000)
+
+setupSharedTestSuite(() => {
+  let adminHeaders: any
+  let partnerId: string
+  let partnerHeaders: any
+  let paidToId: string
+
+  const { api, getContainer } = getSharedTestEnv()
+
+  // ─── Setup ────────────────────────────────────────────────────────────────
+
+  async function createPartnerWithAuth(unique: number) {
+    const email = `ps-partner-${unique}-${Date.now()}@jyt.test`
+    const pw = "supersecret"
+
+    await api.post("/auth/partner/emailpass/register", { email, password: pw })
+    let lr = await api.post("/auth/partner/emailpass", { email, password: pw })
+    let h = { Authorization: `Bearer ${lr.data.token}` }
+
+    const res = await api.post(
+      "/partners",
+      {
+        name: `PS Partner ${unique}`,
+        handle: `ps-partner-${unique}-${Date.now()}`,
+        admin: { email, first_name: "Test", last_name: "Partner" },
+      },
+      { headers: h }
+    )
+    expect(res.status).toBe(200)
+
+    // Re-login to get updated token with partner entity
+    lr = await api.post("/auth/partner/emailpass", { email, password: pw })
+    h = { Authorization: `Bearer ${lr.data.token}` }
+
+    return { partnerId: res.data.partner.id, partnerHeaders: h }
+  }
+
+  async function createDesign(
+    name: string,
+    overrides: Record<string, any> = {}
+  ) {
+    const res = await api.post(
+      "/admin/designs",
+      {
+        name,
+        description: `Test design ${name}`,
+        design_type: "Original",
+        status: "Commerce_Ready",
+        priority: "Medium",
+        estimated_cost: 5000,
+        cost_currency: "inr",
+        ...overrides,
+      },
+      adminHeaders
+    )
+    expect(res.status).toBe(201)
+    return res.data.design.id as string
+  }
+
+  async function linkDesignToPartner(designId: string, pId: string) {
+    const container = getContainer()
+    const remoteLink = container.resolve(
+      ContainerRegistrationKeys.LINK
+    ) as any
+    await remoteLink.create({
+      design: { design_id: designId },
+      partner: { partner_id: pId },
+    })
+  }
+
+  beforeEach(async () => {
+    const container = getContainer()
+    await createAdminUser(container)
+    adminHeaders = await getAuthHeaders(api)
+
+    const result = await createPartnerWithAuth(
+      Math.floor(Math.random() * 100000)
+    )
+    partnerId = result.partnerId
+    partnerHeaders = result.partnerHeaders
+
+    // Create a payment method for the partner (needed for approval flow)
+    const methodRes = await api.post(
+      `/admin/payments/partners/${partnerId}/methods`,
+      {
+        type: "bank_account",
+        account_name: "Test Bank Account",
+        bank_name: "Test Bank",
+      },
+      adminHeaders
+    )
+    paidToId = methodRes.data.paymentMethod.id
+  })
+
+  // ─── Partner: Create Payment Submission ───────────────────────────────────
+
+  describe("POST /partners/payment-submissions", () => {
+    it("should create a payment submission for eligible designs", async () => {
+      const d1 = await createDesign("PS Design 1")
+      const d2 = await createDesign("PS Design 2", { estimated_cost: 3000 })
+      await linkDesignToPartner(d1, partnerId)
+      await linkDesignToPartner(d2, partnerId)
+
+      const res = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1, d2], notes: "Monthly batch" },
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(201)
+      const { payment_submission } = res.data
+      expect(payment_submission).toBeDefined()
+      expect(payment_submission.id).toBeDefined()
+      expect(payment_submission.status).toBe("Pending")
+      expect(payment_submission.partner_id).toBe(partnerId)
+      expect(Number(payment_submission.total_amount)).toBe(8000) // 5000 + 3000
+      expect(payment_submission.notes).toBe("Monthly batch")
+      expect(payment_submission.submitted_at).toBeDefined()
+    })
+
+    it("should reject designs not in eligible status", async () => {
+      const d1 = await createDesign("Ineligible Design", {
+        status: "Conceptual",
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/partners/payment-submissions",
+          { design_ids: [d1] },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(res.data.message || res.data.error || "").toMatch(
+        /not eligible|status must be/i
+      )
+    })
+
+    it("should reject designs not assigned to the partner", async () => {
+      const d1 = await createDesign("Unowned Design")
+      // Intentionally NOT linking to the partner
+
+      const res = await api
+        .post(
+          "/partners/payment-submissions",
+          { design_ids: [d1] },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBeGreaterThanOrEqual(400)
+      expect(res.data.message || res.data.error || "").toMatch(
+        /not assigned|not.*partner/i
+      )
+    })
+
+    it("should reject designs missing estimated_cost", async () => {
+      const d1 = await createDesign("No Cost Design", {
+        estimated_cost: undefined,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/partners/payment-submissions",
+          { design_ids: [d1] },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBeGreaterThanOrEqual(400)
+      expect(res.data.message || res.data.error || "").toMatch(
+        /missing cost/i
+      )
+    })
+
+    it("should honor a partner-entered cost override for a design missing cost", async () => {
+      const d1 = await createDesign("Override No Cost Design", {
+        estimated_cost: undefined,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d1],
+          metadata: { design_cost_overrides: { [d1]: 4200 } },
+        },
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(4200)
+    })
+
+    it("should prefer the cost override over the stored design cost", async () => {
+      const d1 = await createDesign("Override Stored Cost Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d1],
+          metadata: { design_cost_overrides: { [d1]: 6500 } },
+        },
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(6500)
+    })
+
+    it("should honor a partner-entered cost override for a completed task missing cost", async () => {
+      const container = getContainer()
+      const taskService = container.resolve("tasks") as any
+      const task = await taskService.createTasks({
+        title: "No Cost Completed Task",
+        status: "completed",
+        start_date: new Date(),
+      })
+      const remoteLink = container.resolve(
+        ContainerRegistrationKeys.LINK
+      ) as any
+      await remoteLink.create({
+        partner: { partner_id: partnerId },
+        tasks: { task_id: task.id },
+      })
+
+      // Without an override the submission is rejected for missing cost
+      const rejected = await api
+        .post(
+          "/partners/payment-submissions",
+          { task_ids: [task.id] },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+      expect(rejected.status).toBeGreaterThanOrEqual(400)
+      // The shared payable rule (lib/task-payable.ts) words it for the partner.
+      expect(rejected.data.message || rejected.data.error || "").toMatch(
+        /no cost agreed/i
+      )
+
+      // With the override the submission succeeds using the entered amount
+      const res = await api.post(
+        "/partners/payment-submissions",
+        {
+          task_ids: [task.id],
+          metadata: { task_cost_overrides: { [task.id]: 1500 } },
+        },
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(1500)
+    })
+
+    it("should reject designs already in an active submission", async () => {
+      const d1 = await createDesign("Duplicate Sub Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      // First submission — should succeed
+      const first = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+      expect(first.status).toBe(201)
+
+      // Second submission with same design — should fail
+      const second = await api
+        .post(
+          "/partners/payment-submissions",
+          { design_ids: [d1] },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(second.status).toBeGreaterThanOrEqual(400)
+      expect(second.data.message || second.data.error || "").toMatch(
+        /already in.*submission/i
+      )
+    })
+
+    it("should reject empty design_ids", async () => {
+      const res = await api
+        .post(
+          "/partners/payment-submissions",
+          { design_ids: [] },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+    })
+
+    it("should reject unauthenticated requests", async () => {
+      const res = await api
+        .post("/partners/payment-submissions", { design_ids: ["fake"] })
+        .catch((e: any) => e.response)
+
+      expect([401, 403]).toContain(res.status)
+    })
+  })
+
+  // ─── Partner: List Submissions ────────────────────────────────────────────
+
+  describe("GET /partners/payment-submissions", () => {
+    it("should list submissions for the authenticated partner", async () => {
+      const d1 = await createDesign("List Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+
+      const res = await api.get("/partners/payment-submissions", {
+        headers: partnerHeaders,
+      })
+
+      expect(res.status).toBe(200)
+      expect(Array.isArray(res.data.payment_submissions)).toBe(true)
+      expect(res.data.count).toBeGreaterThanOrEqual(1)
+      expect(res.data.payment_submissions[0].partner_id).toBe(partnerId)
+    })
+
+    it("should filter by status", async () => {
+      const d1 = await createDesign("Filter Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+
+      const res = await api.get("/partners/payment-submissions", {
+        headers: partnerHeaders,
+        params: { status: "Pending" },
+      })
+
+      expect(res.status).toBe(200)
+      res.data.payment_submissions.forEach((s: any) => {
+        expect(s.status).toBe("Pending")
+      })
+    })
+  })
+
+  // ─── Partner: Get Submission Detail ───────────────────────────────────────
+
+  describe("GET /partners/payment-submissions/:submissionId", () => {
+    it("should return submission with items", async () => {
+      const d1 = await createDesign("Detail Design 1", { estimated_cost: 7000 })
+      const d2 = await createDesign("Detail Design 2", { estimated_cost: 3000 })
+      await linkDesignToPartner(d1, partnerId)
+      await linkDesignToPartner(d2, partnerId)
+
+      const createRes = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1, d2] },
+        { headers: partnerHeaders }
+      )
+      const submissionId = createRes.data.payment_submission.id
+
+      const res = await api.get(
+        `/partners/payment-submissions/${submissionId}`,
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(200)
+      const { payment_submission } = res.data
+      expect(payment_submission.id).toBe(submissionId)
+      expect(payment_submission.items).toBeDefined()
+      expect(payment_submission.items.length).toBe(2)
+
+      const amounts = payment_submission.items.map((i: any) =>
+        Number(i.amount)
+      )
+      expect(amounts).toContain(7000)
+      expect(amounts).toContain(3000)
+    })
+  })
+
+  // ─── Admin: Create Submission (typed money fields) ────────────────────────
+
+  /**
+   * The money contract as REQUEST FIELDS rather than `metadata` keys.
+   *
+   * Every one of these used to travel inside `metadata`, which each route
+   * validates as `z.record(z.string(), z.any())` — a shape that accepts
+   * anything. `design_quantities` and `design_quantites` both validated, and
+   * the typo fell through to the workflow's documented "absent means 1"
+   * default and billed a per-unit rate once (#1554). Nothing could catch that:
+   * not tsc, not a unit test, not a reviewer reading the diff.
+   *
+   * These tests are written against the HTTP surface on purpose. The unit tests
+   * cover the folding function; only an integration test proves the field
+   * survives the validator, the route and the workflow and lands on the money.
+   */
+  describe("POST /admin/payment-submissions — typed money fields", () => {
+    it("bills quantity x unit rate and records the breakdown", async () => {
+      // The live case: a design costed per-unit, produced nine times. Before
+      // the fix this billed 850.
+      const d1 = await createDesign("Admin Qty Design", {
+        estimated_cost: 1281.2,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 9 },
+          unit_amounts: { [d1]: 850 },
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(7650)
+
+      const detail = await api.get(
+        `/admin/payment-submissions/${res.data.payment_submission.id}`,
+        adminHeaders
+      )
+      const item = detail.data.payment_submission.items[0]
+      // The rate must survive as its own field. A reader wanting "9 x 850"
+      // must not have to divide the total by the quantity and hope.
+      expect(Number(item.quantity)).toBe(9)
+      expect(Number(item.unit_amount)).toBe(850)
+    })
+
+    it("prefers the supplied rate over the design's stored cost", async () => {
+      // `partner_cost_estimate` on the run is what was AGREED; the design's
+      // stored estimate routinely disagrees with it. Pricing off the design
+      // would have billed 1281.2 x 9 here instead of 850 x 9.
+      const d1 = await createDesign("Admin Rate Beats Stored", {
+        estimated_cost: 1281.2,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 2 },
+          unit_amounts: { [d1]: 1150 },
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(2300)
+    })
+
+    it("bills a design with no stored cost at all from the supplied rate", async () => {
+      // Denim Trouser on prod: no estimated_cost, no production_cost, and a
+      // real agreed rate on the run. Without a supplied rate this is a
+      // "Designs missing cost" 400.
+      const d1 = await createDesign("Admin No Stored Cost", {
+        estimated_cost: undefined,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 2 },
+          unit_amounts: { [d1]: 1150 },
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(2300)
+    })
+
+    it("leaves the amount unchanged when no quantity is supplied", async () => {
+      // 🔴 The guard against re-pricing live callers. With nothing supplied the
+      // amount must be byte-for-byte what it was before any of this existed.
+      const d1 = await createDesign("Admin No Qty Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        { partner_id: partnerId, design_ids: [d1] },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(5000)
+    })
+
+    it("still honours the legacy metadata channel", async () => {
+      // The partner form posts through metadata. This must keep working or the
+      // fix breaks the very callers it is protecting.
+      const d1 = await createDesign("Admin Legacy Metadata", {
+        estimated_cost: 300,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          metadata: { design_quantities: { [d1]: 4 } },
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(1200)
+    })
+
+    it("lets the typed field win over a conflicting metadata key", async () => {
+      const d1 = await createDesign("Admin Precedence Design", {
+        estimated_cost: 100,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 3 },
+          metadata: { design_quantities: { [d1]: 9 } },
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      // 3, not 9 — the caller that speaks the typed field owns the map.
+      expect(Number(res.data.payment_submission.total_amount)).toBe(300)
+    })
+
+    it("rejects a non-positive quantity at the boundary", async () => {
+      // The workflow's sanitizer DROPS a zero rather than clamping it, so
+      // accepting one here would produce a request that validates and then
+      // quietly bills x1. Refusing it makes the mistake visible to the caller.
+      const d1 = await createDesign("Admin Zero Qty Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/admin/payment-submissions",
+          {
+            partner_id: partnerId,
+            design_ids: [d1],
+            quantities: { [d1]: 0 },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+    })
+
+    it("can land a submission as Draft", async () => {
+      // 🔴 Fails on the old route, which never forwarded `status` — an
+      // admin-created submission could ONLY ever be Pending.
+      const d1 = await createDesign("Admin Draft Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        { partner_id: partnerId, design_ids: [d1], status: "Draft" },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(res.data.payment_submission.status).toBe("Draft")
+    })
+
+    it("still defaults to Pending when no status is given", async () => {
+      const d1 = await createDesign("Admin Default Status Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        { partner_id: partnerId, design_ids: [d1] },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(res.data.payment_submission.status).toBe("Pending")
+    })
+
+    it("refuses an ineligible design by default", async () => {
+      const d1 = await createDesign("Admin Gate Design", {
+        status: "Technical_Review",
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/admin/payment-submissions",
+          { partner_id: partnerId, design_ids: [d1] },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain("not eligible for payment")
+    })
+
+    it("pays out an ineligible design when the gate is explicitly waived", async () => {
+      // The real fix for the live case: a COMPLETED run on a design still in
+      // Technical_Review. The only previous way through was to edit the
+      // design's status — changing what the record asserts about technical
+      // review in order to release a payment.
+      const d1 = await createDesign("Admin Waived Gate Design", {
+        status: "Technical_Review",
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 4 },
+          require_design_status: false,
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(4800)
+    })
+  })
+
+  // ─── Partner: typed money fields ──────────────────────────────────────────
+
+  describe("POST /partners/payment-submissions — typed money fields", () => {
+    it("honours a typed cost override", async () => {
+      const d1 = await createDesign("Partner Typed Override", {
+        estimated_cost: undefined,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1], cost_overrides: { [d1]: 4200 } },
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(4200)
+    })
+
+    it("refuses to let a partner choose the submission's status", async () => {
+      // 🔑 A partner may not decide which review state their own claim lands
+      // in. The field is absent from the partner schema, and the validator is
+      // strict, so this is a rejection rather than a silently ignored field.
+      const d1 = await createDesign("Partner Status Attempt")
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/partners/payment-submissions",
+          { design_ids: [d1], status: "Approved" },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+    })
+
+    it("refuses to let a partner waive the design-eligibility gate", async () => {
+      const d1 = await createDesign("Partner Gate Attempt", {
+        status: "Technical_Review",
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/partners/payment-submissions",
+          { design_ids: [d1], require_design_status: false },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+    })
+  })
+
+  // ─── Admin: List Submissions ──────────────────────────────────────────────
+
+  /**
+   * A COMPLETED production run for this partner, written straight through the
+   * module service.
+   *
+   * The fixture only needs the end state, and driving a real dispatch →
+   * accept → complete cycle would drag partner auth and the whole run lifecycle
+   * into a test about payment. Mirrors the shape completion leaves behind,
+   * including the parent/child convention: the partner and the money live on
+   * the CHILD run, and a parent carries `partner_id: null`.
+   */
+  async function createCompletedRun(
+    designId: string,
+    designName: string,
+    overrides: Record<string, any> = {}
+  ) {
+    const container = getContainer()
+    const runService: any = container.resolve("production_runs")
+    const run = await runService.createProductionRuns({
+      design_id: designId,
+      partner_id: partnerId,
+      quantity: 9,
+      produced_quantity: 4,
+      partner_cost_estimate: 1200,
+      cost_type: "per_unit",
+      run_type: "production",
+      status: "completed",
+      completed_at: new Date(),
+      snapshot: { design: { id: designId, name: designName } },
+      captured_at: new Date(),
+      ...overrides,
+    })
+    return (Array.isArray(run) ? run[0] : run).id as string
+  }
+
+  // ─── Payable runs (#1556) ─────────────────────────────────────────────────
+
+  describe("A stored cost of 0 is not a cost (#1563)", () => {
+    it("refuses a design whose stored cost is 0 rather than billing nothing", async () => {
+      // 🔴 `recalculate-cost` writes `total_estimated: 0` with
+      // `confidence: "estimated"` when the estimator finds no BOM and no
+      // inventory history — it reports "I found nothing" as "this costs
+      // nothing". Four prod designs were flipped from null to 0 that way.
+      //
+      // The old guard asked `=== null || === undefined`, so 0 passed it and the
+      // workflow produced a payment line billing 0 that looked like a real
+      // claim. "No cost recorded" must refuse, exactly as it did before anyone
+      // pressed recalculate.
+      const d1 = await createDesign("Zero Cost Design", { estimated_cost: 0 })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/admin/payment-submissions",
+          { partner_id: partnerId, design_ids: [d1] },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain("Designs missing cost")
+    })
+
+    it("still bills a 0-cost design when a real rate is supplied", async () => {
+      // The refusal is about the absence of a figure, not a ban on the design.
+      // An admin who knows the agreed rate types it and the payout goes through
+      // — which is the whole point of the run-sourced screen.
+      const d1 = await createDesign("Zero Cost But Priced", {
+        estimated_cost: 0,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 3 },
+          unit_amounts: { [d1]: 250 },
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(750)
+    })
+  })
+
+  describe("GET /admin/payment-submissions/payable-runs", () => {
+    it("requires partner_id rather than listing every completed run", async () => {
+      // An unfiltered variant would return every partner's runs. That exact
+      // shape — a missing filter reading as "no filter" rather than "no rows" —
+      // is how one dangling key produced unfiltered cross-tenant results.
+      const res = await api
+        .get("/admin/payment-submissions/payable-runs", adminHeaders)
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+    })
+
+    it("prices a run from the run, and bills the PRODUCED quantity", async () => {
+      // The design says 5000/unit; the run says 1200/unit and 4 pieces made.
+      // Pricing off the design here would bill 5000 x 9 = 45,000 for work worth
+      // 4,800 — the two figures are not close, and the run is the agreed one.
+      const d1 = await createDesign("Payable Run Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Payable Run Design")
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+
+      expect(res.status).toBe(200)
+      const row = res.data.payable_runs.find((r: any) => r.run_id === runId)
+      expect(row).toBeDefined()
+      expect(row.ordered_quantity).toBe(9)
+      expect(row.produced_quantity).toBe(4)
+      // 🔑 The founder rule: pay for what was MADE, not what was ordered.
+      expect(row.payable_quantity).toBe(4)
+      expect(row.quantity_basis).toBe("produced")
+      expect(row.unit_amount).toBe(1200)
+      expect(row.amount).toBe(4800)
+      expect(row.payable).toBe(true)
+      expect(row.billed).toBeNull()
+    })
+
+    it("divides a 'total' cost_type back out to a per-unit rate", async () => {
+      // `partner_cost_estimate` is stored verbatim and paired with `cost_type`;
+      // a "total" of 3600 across 3 ordered pieces is 1200/unit. Reading it as
+      // per-unit would bill 3600 x 3.
+      const d1 = await createDesign("Total Cost Run", { estimated_cost: 100 })
+      await linkDesignToPartner(d1, partnerId)
+      await createCompletedRun(d1, "Total Cost Run", {
+        quantity: 3,
+        produced_quantity: 3,
+        partner_cost_estimate: 3600,
+        cost_type: "total",
+      })
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const row = res.data.payable_runs[0]
+      expect(row.unit_amount).toBe(1200)
+      expect(row.amount).toBe(3600)
+    })
+
+    it("falls back to the ordered quantity and SAYS SO when output was never recorded", async () => {
+      // "We never recorded output" and "they made zero" must not look alike.
+      const d1 = await createDesign("No Output Run", { estimated_cost: 100 })
+      await linkDesignToPartner(d1, partnerId)
+      await createCompletedRun(d1, "No Output Run", {
+        quantity: 5,
+        produced_quantity: null,
+      })
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const row = res.data.payable_runs[0]
+      expect(row.produced_quantity).toBeNull()
+      expect(row.payable_quantity).toBe(5)
+      expect(row.quantity_basis).toBe("ordered")
+    })
+
+    /**
+     * #1596 — the ROW says it is closed, not just the arithmetic.
+     *
+     * `short_closed_at` is fetched by this route to compute the ceiling, and it
+     * would have been easy to leave it there. But the picker prints "Produced 4
+     * of 9 ordered" either way, and the offer it acts on has quietly dropped
+     * from 9 to 4 — an unexplained reduction unless the row can say why. A
+     * screen branching on a field the API stopped sending renders "not closed"
+     * forever, in silence, which is the whole failure this asserts against.
+     */
+    it("says on the row that a run was short-closed, not just in the offer (#1596)", async () => {
+      const d1 = await createDesign("Closed Row Design", { estimated_cost: 100 })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Closed Row Design", {
+        quantity: 9,
+        produced_quantity: 4,
+        partner_cost_estimate: 1200,
+        cost_type: "per_unit",
+      })
+
+      const before = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const openRow = before.data.payable_runs.find((r: any) => r.run_id === runId)
+      // Present and null — an absent key and "not closed" must not look alike
+      // to a screen reading it.
+      expect(openRow).toBeDefined()
+      expect(openRow.short_closed_at).toBeNull()
+
+      await api.post(
+        `/admin/production-runs/${runId}/short-close`,
+        { reason: "Partner confirmed no more will be made" },
+        adminHeaders
+      )
+
+      const after = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const closedRow = after.data.payable_runs.find((r: any) => r.run_id === runId)
+      expect(closedRow).toBeDefined()
+      expect(closedRow.short_closed_at).toBeTruthy()
+      // The ordered figure is still reported as ordered — the row shows what
+      // was agreed AND what is now offered, rather than rewriting history.
+      expect(closedRow.ordered_quantity).toBe(9)
+      expect(closedRow.produced_quantity).toBe(4)
+      expect(closedRow.payable_quantity).toBe(4)
+    })
+
+    /**
+     * #1676 — an open-ended run keeps being offered.
+     *
+     * 🔴 Its `billable_remaining` is null because there is no ceiling to
+     * subtract from, and everywhere else null means "no arithmetic available",
+     * which a screen reads as nothing left. Without `open_ended` on the row the
+     * status folds to `billed` after the FIRST claim and no screen ever offers
+     * the run again — repeated billing is the entire point of the opt-out.
+     */
+    it("keeps offering a run with no agreed quantity after it has been billed (#1676)", async () => {
+      const d1 = await createDesign("Open Ended Row Design", {
+        estimated_cost: 100,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Open Ended Row Design", {
+        quantity: null,
+        produced_quantity: 40,
+        partner_cost_estimate: 100,
+        cost_type: "per_unit",
+      })
+
+      const before = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const row = before.data.payable_runs.find((r: any) => r.run_id === runId)
+      expect(row).toBeDefined()
+      expect(row.open_ended).toBe(true)
+      // Null, not 0. `Number(null)` is 0, and "ordered for nothing" is a very
+      // different statement from "no amount was agreed".
+      expect(row.ordered_quantity).toBeNull()
+      expect(row.payable_quantity).toBe(40)
+      expect(row.billing_status).toBe("clear")
+
+      const first = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 10 },
+          unit_amounts: { [d1]: 100 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+      expect(first.status).toBe(201)
+      await api.post(
+        `/admin/payment-submissions/${first.data.payment_submission.id}/review`,
+        { action: "approve", paid_to_id: paidToId },
+        adminHeaders
+      )
+
+      const after = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const billedRow = after.data.payable_runs.find(
+        (r: any) => r.run_id === runId
+      )
+      expect(billedRow).toBeDefined()
+      expect(billedRow.open_ended).toBe(true)
+      expect(billedRow.billing_status).toBe("partly_billed")
+      // Null means NO CEILING here, and the row says which of the two it is.
+      expect(billedRow.billable_remaining).toBeNull()
+    })
+
+    it("marks a run with no agreed rate unpayable instead of billing zero", async () => {
+      // A run with no cost is not a zero-value payout — it is a run whose price
+      // has not been settled. Surfaced, not silently dropped.
+      const d1 = await createDesign("Unpriced Run", { estimated_cost: 100 })
+      await linkDesignToPartner(d1, partnerId)
+      await createCompletedRun(d1, "Unpriced Run", {
+        partner_cost_estimate: null,
+      })
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const row = res.data.payable_runs[0]
+      expect(row.payable).toBe(false)
+      expect(row.unit_amount).toBe(0)
+    })
+
+    it("never returns another partner's runs, nor an unfinished one", async () => {
+      const other = await createPartnerWithAuth(
+        Math.floor(Math.random() * 100000)
+      )
+      const d1 = await createDesign("Other Partner Run", {
+        estimated_cost: 100,
+      })
+      await linkDesignToPartner(d1, other.partnerId)
+      const otherRunId = await createCompletedRun(d1, "Other Partner Run", {
+        partner_id: other.partnerId,
+      })
+
+      const d2 = await createDesign("In Progress Run", { estimated_cost: 100 })
+      await linkDesignToPartner(d2, partnerId)
+      const inProgressId = await createCompletedRun(d2, "In Progress Run", {
+        status: "in_progress",
+      })
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+
+      const ids = res.data.payable_runs.map((r: any) => r.run_id)
+      expect(ids).not.toContain(otherRunId)
+      expect(ids).not.toContain(inProgressId)
+    })
+
+    /**
+     * #2026 — a run whose work moved to another run is not payable.
+     *
+     * This has to be an INTEGRATION test. The whole defect lives in what the
+     * order↔production_run LINK returns: a superseded run carries no marker of
+     * its own (`status` stays `completed`, `cancelled_at` stays null), so the
+     * only evidence is its mirror order being canceled. A unit test with a
+     * stubbed query proves the arithmetic and nothing about the link — and
+     * `defineLink().entryPoint` is empty in unit tests anyway.
+     *
+     * Sharlho drew three ₹1,200 payouts for two garments exactly this way.
+     */
+    describe("a superseded run (#2026)", () => {
+      async function mirrorOrderFor(
+        runId: string,
+        opts: { status: string; metadata?: Record<string, any>; link?: boolean }
+      ) {
+        const container = getContainer()
+        const orderService: any = container.resolve(Modules.ORDER)
+        const remoteLink: any = container.resolve(ContainerRegistrationKeys.LINK)
+
+        const order = await orderService.createOrders({
+          region_id: null,
+          currency_code: "inr",
+          items: [],
+          metadata: opts.metadata ?? {},
+        })
+        const orderId = (Array.isArray(order) ? order[0] : order).id as string
+
+        // `createOrders` will not take a canceled status, so set it after.
+        await orderService.updateOrders([{ id: orderId, status: opts.status }])
+
+        if (opts.link !== false) {
+          await remoteLink.create({
+            [Modules.ORDER]: { order_id: orderId },
+            // 🔑 `production_runs_id`, PLURAL — the link's own key name, as
+            // `linkUnifiedOrderOrRollback` writes it. The singular spelling
+            // throws "Module to type order and production_runs by keys … was
+            // not found", which reads like a missing link rather than a typo.
+            [PRODUCTION_RUNS_MODULE]: { production_runs_id: runId },
+          })
+        }
+        return orderId
+      }
+
+      it("EXCLUDES a run whose mirror order is canceled as superseded, and says by which run", async () => {
+        const d1 = await createDesign("Superseded Parent", { estimated_cost: 100 })
+        await linkDesignToPartner(d1, partnerId)
+        const childId = await createCompletedRun(d1, "Superseded Parent")
+        const parentId = await createCompletedRun(d1, "Superseded Parent")
+
+        await mirrorOrderFor(childId, { status: "completed" })
+        const parentOrderId = await mirrorOrderFor(parentId, {
+          status: "canceled",
+          metadata: { superseded_by_run_ids: [childId] },
+        })
+
+        const res = await api.get(
+          `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+          adminHeaders
+        )
+        expect(res.status).toBe(200)
+
+        const payableIds = res.data.payable_runs.map((r: any) => r.run_id)
+        // The child carries the work and still bills…
+        expect(payableIds).toContain(childId)
+        // …the parent does not. This is the ₹1,200.
+        expect(payableIds).not.toContain(parentId)
+
+        // 🔑 Held back and REPORTED, never silently dropped — and the row says
+        // where the work went, so the reader can go and look.
+        const excluded = res.data.excluded_runs.find(
+          (r: any) => r.run_id === parentId
+        )
+        expect(excluded).toBeDefined()
+        expect(excluded.excluded_reason).toBe("superseded_run")
+        expect(excluded.superseded_by_run_ids).toEqual([childId])
+        expect(excluded.mirror_order_id).toBe(parentOrderId)
+      })
+
+      it("still bills a run whose mirror order is ALIVE", async () => {
+        const d1 = await createDesign("Live Mirror", { estimated_cost: 100 })
+        await linkDesignToPartner(d1, partnerId)
+        const runId = await createCompletedRun(d1, "Live Mirror")
+        await mirrorOrderFor(runId, {
+          status: "completed",
+          // Present but the order is not canceled — a half-applied write must
+          // not cost a partner their money.
+          metadata: { superseded_by_run_ids: ["prod_run_whatever"] },
+        })
+
+        const res = await api.get(
+          `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+          adminHeaders
+        )
+        expect(res.data.payable_runs.map((r: any) => r.run_id)).toContain(runId)
+      })
+
+      it("still bills a run with NO mirror order — a missing link is not evidence", async () => {
+        const d1 = await createDesign("No Mirror", { estimated_cost: 100 })
+        await linkDesignToPartner(d1, partnerId)
+        const runId = await createCompletedRun(d1, "No Mirror")
+
+        const res = await api.get(
+          `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+          adminHeaders
+        )
+        expect(res.data.payable_runs.map((r: any) => r.run_id)).toContain(runId)
+      })
+
+      /**
+       * 🔴 This test pinned the OPPOSITE contract until #2029 item 5, and the
+       * rewrite is the point rather than a formality.
+       *
+       * `metadata.unified_order_id` was a fallback pointer for runs predating
+       * the D5 link. `cb18a12f6` deleted it after re-measuring prod: every run
+       * carries the link or carries NEITHER, so the fallback answered for
+       * nobody. Its unit spec was updated in that commit; this integration one
+       * was not, and it has been red on `main` ever since — invisible, because
+       * CI runs only the specs a PR changed.
+       *
+       * 🔑 What must stay true is that the deletion is NOISY. A superseded run
+       * with no resolvable mirror order BILLS, which is the #2026 overpayment
+       * shape, so the endpoint warns by name rather than dropping the row
+       * quietly. Billing here is the deliberate conservative default — this
+       * module never guesses at a partner's money — and the warn is what makes
+       * a human able to see it.
+       */
+      it("BILLS a superseded run whose only pointer is metadata, and does not hide it", async () => {
+        const d1 = await createDesign("Unlinked Superseded", { estimated_cost: 100 })
+        await linkDesignToPartner(d1, partnerId)
+        const runId = await createCompletedRun(d1, "Unlinked Superseded")
+
+        const orderId = await mirrorOrderFor(runId, {
+          status: "canceled",
+          metadata: { superseded_by_run_ids: ["prod_run_other"] },
+          link: false,
+        })
+
+        const container = getContainer()
+        const runService: any = container.resolve("production_runs")
+        await runService.updateProductionRuns({
+          id: runId,
+          metadata: { unified_order_id: orderId },
+        })
+
+        const res = await api.get(
+          `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+          adminHeaders
+        )
+        // The link is the only pointer now, and this run has none.
+        expect(res.data.payable_runs.map((r: any) => r.run_id)).toContain(runId)
+        // Not silently excluded either — an unexplained absence is the thing
+        // this endpoint exists to refuse.
+        expect(
+          res.data.excluded_runs.find((r: any) => r.run_id === runId)
+        ).toBeUndefined()
+      })
+
+      it("hides the superseded run from the PARTNER's own billing screen too", async () => {
+        // This is the screen a partner bills FROM. A superseded parent listed
+        // beside its child has them asking for the same garment twice.
+        const d1 = await createDesign("Partner Superseded", { estimated_cost: 100 })
+        await linkDesignToPartner(d1, partnerId)
+        const parentId = await createCompletedRun(d1, "Partner Superseded")
+        await mirrorOrderFor(parentId, {
+          status: "canceled",
+          metadata: { superseded_by_run_ids: ["prod_run_child"] },
+        })
+
+        const res = await api.get(
+          "/partners/payment-submissions/payable-runs",
+          // `partnerHeaders` is a bare header map, unlike `adminHeaders` which
+          // is already an axios config — passing it raw sends no Authorization
+          // and 401s.
+          { headers: partnerHeaders }
+        )
+        expect(res.status).toBe(200)
+        expect(res.data.payable_runs.map((r: any) => r.run_id)).not.toContain(parentId)
+        expect(
+          res.data.excluded_runs.find((r: any) => r.run_id === parentId)?.excluded_reason
+        ).toBe("superseded_run")
+      })
+    })
+  })
+
+  /**
+   * "We can't tell" must not be spelled the same way as "no" (#1565).
+   *
+   * Every payment line on production recorded no run at all, so the #1556 guard
+   * returned `billed: null` for all 13 submissions — and the screen sorted those
+   * runs to the top as clean, payable work. Absence read as permission.
+   */
+  describe("GET payable-runs — an unrecorded payout is UNKNOWN, not clear (#1565)", () => {
+    it("reports a run as unknown when a live payout for its design names no run", async () => {
+      const d1 = await createDesign("Unrecorded Claim Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Unrecorded Claim Design")
+
+      // A payout for the DESIGN with no `production_run_ids` — the shape every
+      // pre-#1556 submission has, and the shape the auto-draft subscriber wrote
+      // for months.
+      const sub = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+        },
+        adminHeaders
+      )
+      expect(sub.status).toBe(201)
+      const submissionId = sub.data.payment_submission.id
+
+      // The line says so about itself rather than leaving a NULL to be
+      // interpreted — three different situations produce that NULL.
+      const detail = await api.get(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      expect(detail.data.payment_submission.items[0].run_provenance).toBe(
+        "not_recorded"
+      )
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const row = res.data.payable_runs.find((r: any) => r.run_id === runId)
+
+      // 🔴 The assertion that fails on the old code: `billed` is still null —
+      // no line NAMES this run — but that null is ignorance, not innocence.
+      // This payout may already have covered these very garments.
+      expect(row.billed).toBeNull()
+      expect(row.billing_status).toBe("unknown")
+      expect(row.unrecorded_claims).toHaveLength(1)
+      expect(row.unrecorded_claims[0].submission_id).toBe(submissionId)
+    })
+
+    it("leaves other runs of the design CLEAR when the payout did name its run", async () => {
+      // The counter-case. A `recorded` line is not a source of doubt: it says
+      // exactly what it covered, so the design's OTHER completed run is safe to
+      // bill. Without this, "unknown" would swallow the whole screen and the
+      // guard would be useless in the other direction.
+      const d1 = await createDesign("Recorded Claim Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const paidRun = await createCompletedRun(d1, "Recorded Claim Design")
+      const freshRun = await createCompletedRun(d1, "Recorded Claim Design")
+
+      await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [paidRun] },
+        },
+        adminHeaders
+      )
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const paid = res.data.payable_runs.find((r: any) => r.run_id === paidRun)
+      const fresh = res.data.payable_runs.find((r: any) => r.run_id === freshRun)
+
+      /**
+       * ⚠️ `partly_billed`, not `billed` — 4 of the 9 this run was ordered for
+       * (#1596). It is not `clear`, which is what this case is about: a
+       * recorded claim is never doubt. And the remainder is stated, because
+       * the write guard will accept it.
+       */
+      expect(paid.billing_status).toBe("partly_billed")
+      expect(paid.billable_remaining).toBe(5)
+      expect(fresh.billing_status).toBe("clear")
+      expect(fresh.billable_remaining).toBeNull()
+      expect(fresh.unrecorded_claims).toHaveLength(0)
+    })
+
+    it("does not rank an unknown run above genuinely clear work", async () => {
+      // Sorting an unverifiable run alongside unpaid work is precisely how a
+      // second payout for the same garments gets made — the reviewer sees two
+      // rows that look identical and pays both.
+      // 🔴 The clean run is deliberately the OLDER of the two. The tie-break
+      // below `billing_status` is newest-completion-first, so a doubtful run
+      // completed later would sort above it on the old code — which is exactly
+      // the arrangement this test has to rule out. Build the fixture the other
+      // way round and it passes without the fix, proving nothing.
+      const clean = await createDesign("Clean Design", { estimated_cost: 1200 })
+      await linkDesignToPartner(clean, partnerId)
+      const cleanRun = await createCompletedRun(clean, "Clean Design")
+
+      const doubtful = await createDesign("Doubtful Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(doubtful, partnerId)
+      const doubtfulRun = await createCompletedRun(doubtful, "Doubtful Design", {
+        completed_at: new Date(Date.now() + 60_000),
+      })
+      await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [doubtful],
+          quantities: { [doubtful]: 4 },
+          unit_amounts: { [doubtful]: 1200 },
+        },
+        adminHeaders
+      )
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const order = res.data.payable_runs.map((r: any) => r.run_id)
+      expect(order.indexOf(cleanRun)).toBeLessThan(order.indexOf(doubtfulRun))
+    })
+
+    it("a task payout casts no doubt — a task never had a run to record", async () => {
+      // `no_run` is the one case where a missing run is an ANSWER. If this
+      // read as "not recorded" too, every partner who was ever paid for a task
+      // would have all of their production runs stuck at `unknown` forever.
+      const d1 = await createDesign("Task Payout Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Task Payout Design")
+
+      // A REAL task payout for this partner, not an absent one — otherwise
+      // this test asserts `clear` about a partner with no payouts at all and
+      // would pass just as happily on code that got `no_run` wrong.
+      const container = getContainer()
+      const taskService = container.resolve("tasks") as any
+      const task = await taskService.createTasks({
+        title: "Paid Task Beside A Run",
+        status: "completed",
+        start_date: new Date(),
+      })
+      const remoteLink = container.resolve(
+        ContainerRegistrationKeys.LINK
+      ) as any
+      await remoteLink.create({
+        partner: { partner_id: partnerId },
+        tasks: { task_id: task.id },
+      })
+      const taskSub = await api.post(
+        "/partners/payment-submissions",
+        {
+          task_ids: [task.id],
+          metadata: { task_cost_overrides: { [task.id]: 1500 } },
+        },
+        { headers: partnerHeaders }
+      )
+      expect(taskSub.status).toBe(201)
+      // The partner create response carries no line items, so read the line
+      // back from the admin detail route rather than asserting on undefined.
+      const taskDetail = await api.get(
+        `/admin/payment-submissions/${taskSub.data.payment_submission.id}`,
+        adminHeaders
+      )
+      const taskItem = taskDetail.data.payment_submission.items[0]
+      expect(taskItem.source_type).toBe("task")
+      expect(taskItem.run_provenance).toBe("no_run")
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const row = res.data.payable_runs.find((r: any) => r.run_id === runId)
+      expect(row.billing_status).toBe("clear")
+    })
+  })
+
+  /**
+   * Correcting a payment line's provenance by hand (#1565).
+   *
+   * 🔴 `/admin/payment-submissions/:id` exposes GET and `review` and nothing
+   * else — no route updates a submission or its items. For a line whose run is
+   * named only in free-text notes (which the backfill job refuses to parse),
+   * this job is the ONLY remedy short of rejecting a live payout and recreating
+   * it.
+   */
+  describe("record-payment-line-run maintenance job (#1565)", () => {
+    const RUN = "/admin/ops/maintenance-jobs/record-payment-line-run/run"
+
+    /** A design-sourced line with no run recorded, plus a run it could name. */
+    async function unrecordedLine(designName: string) {
+      const designId = await createDesign(designName, { estimated_cost: 1200 })
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, designName)
+
+      const sub = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          quantities: { [designId]: 4 },
+          unit_amounts: { [designId]: 1200 },
+        },
+        adminHeaders
+      )
+      expect(sub.status).toBe(201)
+      const detail = await api.get(
+        `/admin/payment-submissions/${sub.data.payment_submission.id}`,
+        adminHeaders
+      )
+      return {
+        designId,
+        runId,
+        itemId: detail.data.payment_submission.items[0].id,
+        submissionId: sub.data.payment_submission.id,
+      }
+    }
+
+    it("records the run an operator supplies, and the line then guards", async () => {
+      const { runId, itemId } = await unrecordedLine("Notes Only Payout")
+
+      const dry = await api.post(
+        RUN,
+        { dry_run: true, params: { payment_submission_item_id: itemId, production_run_id: runId } },
+        adminHeaders
+      )
+      expect(dry.status).toBe(200)
+      expect(dry.data.result.applied).toBe(false)
+      expect(dry.data.result.changes[0].after).toEqual([runId])
+
+      const applied = await api.post(
+        RUN,
+        { dry_run: false, params: { payment_submission_item_id: itemId, production_run_id: runId } },
+        adminHeaders
+      )
+      expect(applied.status).toBe(200)
+      expect(applied.data.result.applied).toBe(true)
+
+      // The EFFECT, not the summary: the run now reads as claimed rather than
+      // unknown, which is the whole point of recording it. Which of the two
+      // claimed statuses it is depends on how much of the run the line covers
+      // (#1596); what matters here is that the doubt is gone.
+      const runs = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const row = runs.data.payable_runs.find((r: any) => r.run_id === runId)
+      expect(["billed", "partly_billed"]).toContain(row.billing_status)
+      expect(row.billing_status).not.toBe("unknown")
+      expect(row.billed).not.toBeNull()
+    })
+
+    it("refuses a run already recorded on another live payout", async () => {
+      // 🔴 Without this the job would be a hole straight through the double-pay
+      // guard it exists to arm: two lines could both claim the same garments.
+      const first = await unrecordedLine("Double Claim Design")
+      await api.post(
+        RUN,
+        {
+          dry_run: false,
+          params: { payment_submission_item_id: first.itemId, production_run_id: first.runId },
+        },
+        adminHeaders
+      )
+
+      // Close the first payout so the design-level "already in an open
+      // submission" guard is out of the way and ONLY the run-level guard is
+      // under test. This is also the realistic case: the run-level guard exists
+      // precisely because the design-level one goes false once a payout closes.
+      const approved = await api.post(
+        `/admin/payment-submissions/${first.submissionId}/review`,
+        { action: "approve", paid_to_id: paidToId },
+        adminHeaders
+      )
+      expect(approved.status).toBe(200)
+
+      /**
+       * A second payout for the same design, with an unrecorded line — the
+       * only shape this job acts on (it refuses to overwrite a line that
+       * already records runs).
+       *
+       * 🔴 Written through the module rather than the create route, and that is
+       * not a convenience. #1602 closed the runless re-bill hole, so creating a
+       * second submission for an already-billed design while naming no runs is
+       * now correctly REFUSED at the door — which is what turned this test red
+       * on main. The line still has to exist to test the JOB's guard, and lines
+       * in exactly this state exist on production, written before that guard
+       * did. So the fixture is built the way reality built them.
+       */
+      const container = getContainer()
+      const submissionService: any = container.resolve("payment_submissions")
+      const secondSubmission = await submissionService.createPaymentSubmissions({
+        partner_id: partnerId,
+        status: "Pending",
+        total_amount: 4800,
+        currency: "inr",
+        submitted_at: new Date(),
+      })
+      const secondItem = await submissionService.createPaymentSubmissionItems({
+        source_type: "design",
+        design_id: first.designId,
+        design_name: "Double Claim Design",
+        amount: 4800,
+        quantity: 4,
+        unit_amount: 1200,
+        run_provenance: "not_recorded",
+        submission_id: secondSubmission.id,
+      })
+      const secondItemId = secondItem.id
+
+      const res = await api
+        .post(
+          RUN,
+          {
+            dry_run: false,
+            params: {
+              payment_submission_item_id: secondItemId,
+              production_run_id: first.runId,
+            },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBeGreaterThanOrEqual(400)
+      expect(String(res.data?.message || "")).toMatch(/already recorded/i)
+    })
+
+    it("refuses a run belonging to a different design", async () => {
+      // An operator-supplied id is a claim, not a fact. A run belongs to exactly
+      // one design, so this one is describing different work entirely.
+      const target = await unrecordedLine("Wrong Design Target")
+      const otherDesign = await createDesign("Unrelated Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(otherDesign, partnerId)
+      const otherRun = await createCompletedRun(otherDesign, "Unrelated Design")
+
+      const res = await api
+        .post(
+          RUN,
+          {
+            dry_run: false,
+            params: {
+              payment_submission_item_id: target.itemId,
+              production_run_id: otherRun,
+            },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBeGreaterThanOrEqual(400)
+      expect(String(res.data?.message || "")).toMatch(/is a run of design/i)
+    })
+
+    it("refuses to overwrite a line that already records its run", async () => {
+      // Provenance written by a real submission path is better evidence than
+      // anything typed afterwards; correcting it is a different decision.
+      const d1 = await createDesign("Already Recorded", { estimated_cost: 1200 })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Already Recorded")
+      const sub = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+      const detail = await api.get(
+        `/admin/payment-submissions/${sub.data.payment_submission.id}`,
+        adminHeaders
+      )
+      const itemId = detail.data.payment_submission.items[0].id
+
+      const res = await api
+        .post(
+          RUN,
+          {
+            dry_run: false,
+            params: { payment_submission_item_id: itemId, production_run_id: runId },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBeGreaterThanOrEqual(400)
+      expect(String(res.data?.message || "")).toMatch(/already records/i)
+    })
+  })
+
+  /**
+   * The typed money fields are the contract; `metadata` is a fallback (#1571).
+   *
+   * 🔴 The workflow used to read the money ONLY off `metadata`, so the typed
+   * fields were a validation façade over an untyped contract — post the blob
+   * directly and every typed guarantee was bypassed.
+   */
+  describe("money travels typed, not through metadata (#1571)", () => {
+    /**
+     * ⚠️ REGRESSION LOCK, not proof of the fix. This already passed before
+     * #1571, because the route's `foldMoneyFieldsIntoMetadata` overwrites the
+     * blob with the typed values on the way in. The workflow-level precedence
+     * added in #1571 is what makes it true for callers that reach the workflow
+     * DIRECTLY — the auto-draft subscriber — where no fold runs.
+     */
+    it("the typed field WINS over a conflicting metadata blob", async () => {
+      const d1 = await createDesign("Typed Wins Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+          // A stale blob claiming something different. The typed field is the
+          // caller's stated intent; an untyped channel must not overrule it.
+          metadata: {
+            design_quantities: { [d1]: 99 },
+            design_unit_amounts: { [d1]: 5 },
+          },
+        },
+        adminHeaders
+      )
+      expect(res.status).toBe(201)
+
+      const detail = await api.get(
+        `/admin/payment-submissions/${res.data.payment_submission.id}`,
+        adminHeaders
+      )
+      const item = detail.data.payment_submission.items[0]
+      expect(Number(item.quantity)).toBe(4)
+      expect(Number(item.unit_amount)).toBe(1200)
+      expect(Number(item.amount)).toBe(4800)
+    })
+
+    /** Also a regression lock: the legacy path must not change at all. */
+    it("still honours a caller that only posts metadata", async () => {
+      // 🔴 The legacy channel is deliberately kept. Dropping it would silently
+      // re-price such a caller's line off the design's stored cost — a money
+      // change nobody asked for is worse than the channel being untyped.
+      const d1 = await createDesign("Legacy Metadata Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          metadata: {
+            design_quantities: { [d1]: 3 },
+            design_unit_amounts: { [d1]: 700 },
+          },
+        },
+        adminHeaders
+      )
+      expect(res.status).toBe(201)
+
+      const detail = await api.get(
+        `/admin/payment-submissions/${res.data.payment_submission.id}`,
+        adminHeaders
+      )
+      const item = detail.data.payment_submission.items[0]
+      expect(Number(item.quantity)).toBe(3)
+      expect(Number(item.amount)).toBe(2100)
+    })
+
+    it("REFUSES a misspelt money key instead of ignoring it", async () => {
+      // The #1554 defect, reachable by one letter: `design_quantites` validates
+      // cleanly, is read by nothing, and the line falls through to "absent
+      // means 1" — a per-unit rate billed once. There is no bad VALUE to
+      // reject, only a fact that never arrived, so the boundary is the only
+      // place it can be seen.
+      const d1 = await createDesign("Typo Key Design", { estimated_cost: 1200 })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/admin/payment-submissions",
+          {
+            partner_id: partnerId,
+            design_ids: [d1],
+            metadata: { design_quantites: { [d1]: 9 } },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(String(res.data?.message || "")).toMatch(/design_quantities/)
+    })
+
+    it("refuses the same typo on the partner route", async () => {
+      const d1 = await createDesign("Partner Typo Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/partners/payment-submissions",
+          {
+            design_ids: [d1],
+            metadata: { design_cost_override: { [d1]: 900 } },
+          },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(String(res.data?.message || "")).toMatch(/design_cost_overrides/)
+    })
+  })
+
+  /**
+   * Pricing a completed run that never had a price must DRAFT its payout.
+   *
+   * 🔴 `auto-draft-payment-submission` fires on `production_run.completed`, and
+   * a run completed with no agreed rate is skipped as `no_cost` — after which
+   * nothing ever looked at it again. 97 of 215 completed runs on the local
+   * database carry no cost: the partner finished the job and no price was
+   * recorded. Setting that price afterwards through the cost drawer is the
+   * documented fix, and it produced no draft, so the work stayed unpaid unless
+   * somebody remembered to raise a submission by hand.
+   *
+   * `refreshUnclaimedDraftPayouts` already ran on this exact correction and
+   * re-priced a Draft that EXISTED. This is its missing other half.
+   */
+  describe("pricing an uncosted completed run drafts its payout (#1596)", () => {
+    /**
+     * Which submissions name this run, at any status.
+     *
+     * ⚠️ Listed by PARTNER, not by design — `zodValidator` forces `.strict()`
+     * on the list query, so an undeclared `design_id` param is a 400 rather
+     * than an ignored filter. Each submission is then re-read for its items,
+     * because the list does not expand them.
+     */
+    const submissionsNaming = async (_designId: string, runId: string) => {
+      const list = await api.get(
+        `/admin/payment-submissions?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const found: any[] = []
+      for (const summary of list.data.payment_submissions || []) {
+        const detail = await api.get(
+          `/admin/payment-submissions/${summary.id}`,
+          adminHeaders
+        )
+        const sub = detail.data.payment_submission
+        const names = (sub.items || []).some((item: any) =>
+          (item.production_run_ids || []).includes(runId)
+        )
+        if (names) {
+          found.push(sub)
+        }
+      }
+      return found
+    }
+
+    it("drafts one when the rate is recorded after completion", async () => {
+      const designId = await createDesign("Late Priced Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(designId, partnerId)
+
+      // Finished, and nobody said what it cost. The state 97 of 215 completed
+      // runs are actually in.
+      const runId = await createCompletedRun(designId, "Late Priced Design", {
+        quantity: 5,
+        produced_quantity: 5,
+        partner_cost_estimate: null,
+        cost_type: null,
+      })
+
+      expect(await submissionsNaming(designId, runId)).toHaveLength(0)
+
+      const priced = await api.post(
+        `/admin/production-runs/${runId}`,
+        { partner_cost_estimate: 900, cost_type: "per_unit" },
+        adminHeaders
+      )
+      expect(priced.status).toBe(200)
+      // Reported on the response, so the caller can see the money followed the
+      // run rather than having to go and look.
+      expect(priced.data.auto_drafted_submission_id).toBeTruthy()
+
+      // 🔑 The EFFECT, re-read rather than taken from the write's own response.
+      const drafted = await submissionsNaming(designId, runId)
+      expect(drafted).toHaveLength(1)
+      expect(drafted[0].status).toBe("Draft")
+      // 5 ordered x 900. `runPayableAmount` bills the ORDERED quantity (#456).
+      expect(Number(drafted[0].total_amount)).toBe(4500)
+    })
+
+    it("does not draft a SECOND time when the price is corrected again", async () => {
+      const designId = await createDesign("Twice Priced Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Twice Priced Design", {
+        quantity: 5,
+        produced_quantity: 5,
+        partner_cost_estimate: null,
+        cost_type: null,
+      })
+
+      await api.post(
+        `/admin/production-runs/${runId}`,
+        { partner_cost_estimate: 900, cost_type: "per_unit" },
+        adminHeaders
+      )
+      const second = await api.post(
+        `/admin/production-runs/${runId}`,
+        { partner_cost_estimate: 950, cost_type: "per_unit" },
+        adminHeaders
+      )
+      expect(second.status).toBe(200)
+      expect(second.data.auto_drafted_submission_id).toBeNull()
+
+      // One draft, re-priced by `refreshUnclaimedDraftPayouts` — never two.
+      // Two pre-fills for one run is two answers to one question.
+      const subs = await submissionsNaming(designId, runId)
+      expect(subs).toHaveLength(1)
+      expect(Number(subs[0].total_amount)).toBe(4750)
+    })
+
+    /**
+     * ⚠️ The deliberate NON-trigger. `runPayableAmount` bills the ORDERED
+     * quantity (#456), so correcting what was produced does not change what is
+     * owed — and a correction that does not move the money must not manufacture
+     * a payout out of a run nobody has priced.
+     */
+    it("does not draft on an output correction alone", async () => {
+      const designId = await createDesign("Output Only Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Output Only Design", {
+        quantity: 5,
+        produced_quantity: 5,
+        partner_cost_estimate: null,
+        cost_type: null,
+      })
+
+      const corrected = await api.post(
+        `/admin/production-runs/${runId}`,
+        { produced_quantity: 3 },
+        adminHeaders
+      )
+      expect(corrected.status).toBe(200)
+      expect(corrected.data.auto_drafted_submission_id).toBeNull()
+      expect(await submissionsNaming(designId, runId)).toHaveLength(0)
+    })
+  })
+
+  /**
+   * Correcting a run must re-price the Draft it pre-filled (#1571).
+   *
+   * 🔴 `auto-draft-payment-submission` writes a Draft at completion using the
+   * figures of that moment. Correcting the run afterwards changed nothing about
+   * it — and no route could fix it either, since `review` refuses anything that
+   * is not Pending or Under_Review. A reviewer would approve a figure that no
+   * longer matches the run it came from. This happened on prod:
+   * `prod_run_01KZWX801S8HBNZ8DYBVNJK5GZ` drafted at 1190 and corrected to 840.
+   */
+  describe("a run correction re-prices its unclaimed Draft", () => {
+    /** A completed run plus the Draft payout the subscriber pre-filled from it. */
+    async function runWithDraft(name: string) {
+      const designId = await createDesign(name, { estimated_cost: 1200 })
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, name, {
+        quantity: 1,
+        produced_quantity: 3,
+        partner_cost_estimate: 1190,
+        cost_type: "per_unit",
+      })
+
+      const sub = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          quantities: { [designId]: 1 },
+          unit_amounts: { [designId]: 1190 },
+          production_run_ids: { [designId]: [runId] },
+          status: "Draft",
+        },
+        adminHeaders
+      )
+      expect(sub.status).toBe(201)
+      return { designId, runId, submissionId: sub.data.payment_submission.id }
+    }
+
+    it("re-prices the Draft when the run's rate is corrected", async () => {
+      const { runId, submissionId } = await runWithDraft("Stale Draft Design")
+
+      const before = await api.get(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      expect(Number(before.data.payment_submission.total_amount)).toBe(1190)
+
+      // The correction that used to leave the Draft stale.
+      const corrected = await api.post(
+        `/admin/production-runs/${runId}`,
+        { partner_cost_estimate: 840, cost_type: "total", produced_quantity: 1 },
+        adminHeaders
+      )
+      expect(corrected.status).toBe(200)
+
+      // The EFFECT, re-read rather than taken from the correction's response.
+      const after = await api.get(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      expect(Number(after.data.payment_submission.total_amount)).toBe(840)
+      expect(Number(after.data.payment_submission.items[0].amount)).toBe(840)
+    })
+
+    /**
+     * ⚠️ Passes on the old code too — it never touched anything. Kept as the
+     * guard that stops this fix over-reaching: the refresh must never widen
+     * from Draft to a live claim.
+     */
+    it("REFUSES to touch a payout somebody has already claimed", async () => {
+      // 🔴 The guard that keeps this from being dangerous. A Pending submission
+      // is a partner saying "pay me this"; silently rewriting it would change
+      // what they are owed without them ever seeing it.
+      const designId = await createDesign("Claimed Payout Design", {
+        estimated_cost: 1200,
+      })
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Claimed Payout Design", {
+        quantity: 1,
+        produced_quantity: 3,
+        partner_cost_estimate: 1190,
+        cost_type: "per_unit",
+      })
+
+      const sub = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          quantities: { [designId]: 1 },
+          unit_amounts: { [designId]: 1190 },
+          production_run_ids: { [designId]: [runId] },
+          // Pending, not Draft — a live claim.
+        },
+        adminHeaders
+      )
+      const submissionId = sub.data.payment_submission.id
+
+      await api.post(
+        `/admin/production-runs/${runId}`,
+        { partner_cost_estimate: 840, cost_type: "total", produced_quantity: 1 },
+        adminHeaders
+      )
+
+      const after = await api.get(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      expect(Number(after.data.payment_submission.total_amount)).toBe(1190)
+    })
+  })
+
+  /**
+   * #1616 — `payable-runs` offered ₹810 and `create` wrote ₹1,056.40, the
+   * DESIGN's `estimated_cost`, for the same run. Both halves of that fix are
+   * asserted here at the HTTP boundary:
+   *
+   *  1. what the offer screen shows is what `create` writes; and
+   *  2. `create` RETURNS the line it wrote.
+   *
+   * 🔴 The second matters as much as the first. `create` used to return
+   * `items: []`, so the amount could not be seen until the submission was
+   * fetched again — the overbill was found only because a handoff had named the
+   * expected figure. The read-back exists in the workflow but nothing at this
+   * boundary held it, so deleting it would have left every test green.
+   */
+  describe("POST /admin/payment-submissions — the offer is what gets written (#1616)", () => {
+    it("prices from the RUN, and returns the line it wrote", async () => {
+      // The shape of the prod row: a `total` run worth far less than the
+      // design's per-unit estimate.
+      const designId = await createDesign("Princess Highway", {
+        estimated_cost: 1056.4,
+      })
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Princess Highway", {
+        quantity: 1,
+        produced_quantity: 1,
+        partner_cost_estimate: 810,
+        cost_type: "total",
+      })
+
+      // What the operator is offered.
+      const offers = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      expect(offers.status).toBe(200)
+      const offered = (offers.data.runs || offers.data.payable_runs || []).find(
+        (r: any) => r.id === runId || r.run_id === runId
+      )
+      expect(offered).toBeDefined()
+      expect(Number(offered.amount)).toBe(810)
+
+      // What acting on it actually writes — no explicit amount, so the pricer
+      // decides.
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          production_run_ids: { [designId]: [runId] },
+        },
+        adminHeaders
+      )
+      expect(res.status).toBe(201)
+
+      // 🔴 Asserted on the CREATE response, not on a follow-up GET. That the
+      // amount is visible at the moment it is written is the fix.
+      const created = res.data.payment_submission
+      expect(Array.isArray(created.items)).toBe(true)
+      expect(created.items.length).toBe(1)
+      expect(Number(created.items[0].amount)).toBe(810)
+      // The exact overbill the issue reports.
+      expect(Number(created.items[0].amount)).not.toBe(1056.4)
+
+      // And the two agree, which is the contract.
+      expect(Number(created.items[0].amount)).toBe(Number(offered.amount))
+    })
+  })
+
+  describe("POST /admin/payment-submissions — run provenance (#1556)", () => {
+    it("records which runs a line paid for, and reports them as billed", async () => {
+      const d1 = await createDesign("Provenance Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Provenance Design")
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+      expect(res.status).toBe(201)
+      const submissionId = res.data.payment_submission.id
+
+      const detail = await api.get(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      const item = detail.data.payment_submission.items[0]
+      // A real column, not a metadata key — this is what the double-pay guard
+      // reads, and a guard reading an untyped blob reads nothing when the key
+      // is misspelt.
+      expect(item.production_run_ids).toEqual([runId])
+
+      const runs = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      const row = runs.data.payable_runs.find((r: any) => r.run_id === runId)
+      expect(row.billed).not.toBeNull()
+      expect(row.billed.submission_id).toBe(submissionId)
+      expect(Number(row.billed.quantity)).toBe(4)
+    })
+
+    it("refuses to pay for the same run twice, even after the first payout closed", async () => {
+      // 🔴 The case the design-level guard cannot catch. "Is this design in an
+      // OPEN submission" stops being true the moment the first submission is
+      // Approved or Paid — after which the same finished run can be claimed
+      // again and the second claim looks exactly as legitimate as the first.
+      const d1 = await createDesign("Double Pay Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Double Pay Design")
+
+      const first = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+      expect(first.status).toBe(201)
+
+      // Close the first payout so the design-level guard is out of the way and
+      // ONLY the run-level guard is under test.
+      const approved = await api.post(
+        `/admin/payment-submissions/${first.data.payment_submission.id}/review`,
+        { action: "approve", paid_to_id: paidToId },
+        adminHeaders
+      )
+      expect(approved.status).toBe(200)
+
+      /**
+       * ⚠️ 7 more, not another 4. Since #1596 a run is claimed by QUANTITY:
+       * 4 + 4 of a run ordered for 9 is legitimate tranche billing, and the
+       * ceiling is what stands between the partner and a second payment for
+       * the same work. 4 + 7 = 11 asks for more than was ever ordered, which
+       * is the double pay this case has always been about — and it still has
+       * to be refused with the first payout Approved and the design-level
+       * guard therefore out of the way.
+       */
+      const second = await api
+        .post(
+          "/admin/payment-submissions",
+          {
+            partner_id: partnerId,
+            design_ids: [d1],
+            quantities: { [d1]: 7 },
+            unit_amounts: { [d1]: 1200 },
+            production_run_ids: { [d1]: [runId] },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(second.status).toBe(400)
+      expect(second.data.message).toContain("already paid for")
+      expect(second.data.message).toContain(runId)
+      expect(second.data.message).toContain("5 remaining")
+    })
+
+    it("releases a run when its submission was rejected", async () => {
+      // A Rejected submission never paid anyone. The exact situation the
+      // Shramdaan correction hit: a payout billed the wrong quantity, was
+      // rejected, and the replacement has to be allowed to bill the same run.
+      const d1 = await createDesign("Rejected Release Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Rejected Release Design")
+
+      const first = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+      await api.post(
+        `/admin/payment-submissions/${first.data.payment_submission.id}/review`,
+        { action: "reject", rejection_reason: "Quantity corrected 4 -> 7" },
+        adminHeaders
+      )
+
+      const replacement = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 7 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+
+      expect(replacement.status).toBe(201)
+      expect(Number(replacement.data.payment_submission.total_amount)).toBe(8400)
+    })
+
+    it("bills 1 of 10 now and the other 9 later, at a different rate (#1596)", async () => {
+      /**
+       * The founder's case, and the whole reason the whole-run claim had to
+       * go: a partner finishes 1 of 10, submits, then submits the remaining 9
+       * at a DIFFERENT price. Under the old boolean claim the second submission
+       * was refused outright — the run had been "paid for" — which is what made
+       * reject-and-replace the only way to correct anything, and it only ever
+       * worked because the rates happened to match.
+       */
+      const d1 = await createDesign("Partial Claim Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Partial Claim Design", {
+        quantity: 10,
+        produced_quantity: 1,
+      })
+
+      const first = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 1 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+      expect(first.status).toBe(201)
+      expect(Number(first.data.payment_submission.total_amount)).toBe(1200)
+
+      /**
+       * ⚠️ The first payout has to be CLOSED before the second is offered.
+       * Step 5 refuses a design that is already in an active submission, and
+       * that guard is about designs, not runs — it is not quantity-aware and
+       * fires first. So two OPEN claims on one design still cannot coexist;
+       * what #1596 unlocks is billing the rest once the first has been
+       * reviewed, which is the flow an operator actually follows.
+       */
+      const approved = await api.post(
+        `/admin/payment-submissions/${first.data.payment_submission.id}/review`,
+        { action: "approve", paid_to_id: paidToId },
+        adminHeaders
+      )
+      expect(approved.status).toBe(200)
+
+      // The rest, later, at a different rate — and crucially WITHOUT
+      // rejecting the first, which was the only way to do this before.
+      const second = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 9 },
+          unit_amounts: { [d1]: 1400 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+      expect(second.status).toBe(201)
+      expect(Number(second.data.payment_submission.total_amount)).toBe(12600)
+    })
+
+    it("refuses the piece that would take a run past what was ordered (#1596)", async () => {
+      // Partial claims are headroom, not a licence. 1 + 9 fills a run ordered
+      // for 10; the eleventh piece has nothing behind it.
+      const d1 = await createDesign("Overclaim Design", { estimated_cost: 5000 })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Overclaim Design", {
+        quantity: 10,
+      })
+
+      const first = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 9 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+      await api.post(
+        `/admin/payment-submissions/${first.data.payment_submission.id}/review`,
+        { action: "approve", paid_to_id: paidToId },
+        adminHeaders
+      )
+
+      const over = await api
+        .post(
+          "/admin/payment-submissions",
+          {
+            partner_id: partnerId,
+            design_ids: [d1],
+            quantities: { [d1]: 2 },
+            unit_amounts: { [d1]: 1200 },
+            production_run_ids: { [d1]: [runId] },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(over.status).toBe(400)
+      expect(over.data.message).toContain("already paid for")
+      expect(over.data.message).toContain("1 remaining")
+    })
+
+    /**
+     * #1676 — the FIRST claim was never checked against the run at all.
+     *
+     * `assessRunClaims` diffs against a tally of PRIOR claims, and a run nobody
+     * had billed yet has no tally, so it was skipped entirely: a run ordered
+     * for 9 could be billed at 100 and nothing refused it. Only a short-closed
+     * run was checked, because otherwise the close would have meant nothing.
+     */
+    it("refuses a FIRST claim for more than the run was ordered for (#1676)", async () => {
+      const d1 = await createDesign("First Claim Ceiling Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "First Claim Ceiling Design", {
+        quantity: 9,
+        produced_quantity: 9,
+      })
+
+      const over = await api
+        .post(
+          "/admin/payment-submissions",
+          {
+            partner_id: partnerId,
+            design_ids: [d1],
+            quantities: { [d1]: 100 },
+            unit_amounts: { [d1]: 1200 },
+            production_run_ids: { [d1]: [runId] },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(over.status).toBe(400)
+      expect(over.data.message).toContain("already paid for")
+      expect(over.data.message).toContain("ordered 9")
+      expect(over.data.message).toContain("asks for 100")
+    })
+
+    it("still allows a first claim within the ordered quantity (#1676)", async () => {
+      // The bound is the agreed amount, not a ban on billing a whole run.
+      const d1 = await createDesign("First Claim Within Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "First Claim Within Design", {
+        quantity: 9,
+        produced_quantity: 9,
+      })
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 9 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(10800)
+    })
+
+    /**
+     * #1676 — the opt-out that makes the ceiling safe to impose.
+     *
+     * A run created with NO agreed quantity is open-ended: ongoing work with no
+     * fixed order, billed as it comes. `quantity` defaulted to 1 and was NOT
+     * NULL until this issue, so "no agreed amount" was unrepresentable — an
+     * unset quantity read as a run ordered for one piece, the tightest possible
+     * ceiling rather than the absence of one.
+     */
+    it("does not cap a run created with NO agreed quantity (#1676)", async () => {
+      const d1 = await createDesign("Open Ended Run Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Open Ended Run Design", {
+        quantity: null,
+        produced_quantity: 40,
+      })
+
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 40 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(48000)
+    })
+
+    it("still refuses a second claim that states no quantity (#1596)", async () => {
+      // Saying nothing claims the WHOLE run, exactly as it always did — the
+      // partial path is opt-in, so nothing previously refused slips through.
+      const d1 = await createDesign("Silent Claim Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Silent Claim Design", {
+        quantity: 10,
+      })
+
+      const first = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [d1],
+          quantities: { [d1]: 1 },
+          unit_amounts: { [d1]: 1200 },
+          production_run_ids: { [d1]: [runId] },
+        },
+        adminHeaders
+      )
+      await api.post(
+        `/admin/payment-submissions/${first.data.payment_submission.id}/review`,
+        { action: "approve", paid_to_id: paidToId },
+        adminHeaders
+      )
+
+      const second = await api
+        .post(
+          "/admin/payment-submissions",
+          {
+            partner_id: partnerId,
+            design_ids: [d1],
+            unit_amounts: { [d1]: 1200 },
+            production_run_ids: { [d1]: [runId] },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(second.status).toBe(400)
+      expect(second.data.message).toContain("already paid for")
+    })
+
+    it("refuses a run that belongs to another partner", async () => {
+      const other = await createPartnerWithAuth(
+        Math.floor(Math.random() * 100000)
+      )
+      const d1 = await createDesign("Cross Partner Design", {
+        estimated_cost: 5000,
+      })
+      // Linked to BOTH so the ownership check under test is the RUN's, not the
+      // design's — otherwise this passes for the wrong reason.
+      await linkDesignToPartner(d1, partnerId)
+      await linkDesignToPartner(d1, other.partnerId)
+      const foreignRun = await createCompletedRun(d1, "Cross Partner Design", {
+        partner_id: other.partnerId,
+      })
+
+      const res = await api
+        .post(
+          "/admin/payment-submissions",
+          {
+            partner_id: partnerId,
+            design_ids: [d1],
+            quantities: { [d1]: 4 },
+            unit_amounts: { [d1]: 1200 },
+            production_run_ids: { [d1]: [foreignRun] },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      // 400, not 403 — MedusaError.Types.NOT_ALLOWED maps to a 400 here, the
+      // same as the existing "Designs not assigned to this partner" check.
+      // The MESSAGE is what distinguishes the two refusals.
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain("does not belong to this partner")
+    })
+
+    it("refuses a run that is not completed", async () => {
+      const d1 = await createDesign("Unfinished Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Unfinished Design", {
+        status: "in_progress",
+      })
+
+      const res = await api
+        .post(
+          "/admin/payment-submissions",
+          {
+            partner_id: partnerId,
+            design_ids: [d1],
+            quantities: { [d1]: 4 },
+            unit_amounts: { [d1]: 1200 },
+            production_run_ids: { [d1]: [runId] },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain("not completed")
+    })
+
+    it("refuses a run that belongs to a different design", async () => {
+      const d1 = await createDesign("Claim Design", { estimated_cost: 5000 })
+      const d2 = await createDesign("Actual Design", { estimated_cost: 5000 })
+      await linkDesignToPartner(d1, partnerId)
+      await linkDesignToPartner(d2, partnerId)
+      const runOfD2 = await createCompletedRun(d2, "Actual Design")
+
+      const res = await api
+        .post(
+          "/admin/payment-submissions",
+          {
+            partner_id: partnerId,
+            design_ids: [d1],
+            quantities: { [d1]: 4 },
+            unit_amounts: { [d1]: 1200 },
+            production_run_ids: { [d1]: [runOfD2] },
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain("is not a run of design")
+    })
+  })
+
+  describe("GET /admin/payment-submissions", () => {
+    it("should list all submissions", async () => {
+      const d1 = await createDesign("Admin List Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+
+      const res = await api.get("/admin/payment-submissions", adminHeaders)
+
+      expect(res.status).toBe(200)
+      expect(Array.isArray(res.data.payment_submissions)).toBe(true)
+      expect(res.data.count).toBeGreaterThanOrEqual(1)
+    })
+
+    it("should filter by partner_id", async () => {
+      const d1 = await createDesign("Partner Filter Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+
+      const res = await api.get("/admin/payment-submissions", {
+        ...adminHeaders,
+        params: { partner_id: partnerId },
+      })
+
+      expect(res.status).toBe(200)
+      res.data.payment_submissions.forEach((s: any) => {
+        expect(s.partner_id).toBe(partnerId)
+      })
+    })
+  })
+
+  // ─── Admin: Approve Submission ────────────────────────────────────────────
+
+  describe("POST /admin/payment-submissions/:id/review", () => {
+    it("should approve a submission into a payout on the submission itself, creating NO internal payment (#1636)", async () => {
+      const d1 = await createDesign("Approve Design", { estimated_cost: 10000 })
+      await linkDesignToPartner(d1, partnerId)
+
+      const createRes = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+      const submissionId = createRes.data.payment_submission.id
+
+      const reviewRes = await api.post(
+        `/admin/payment-submissions/${submissionId}/review`,
+        {
+          action: "approve",
+          payment_type: "Bank",
+          paid_to_id: paidToId,
+        },
+        adminHeaders
+      )
+
+      expect(reviewRes.status).toBe(200)
+      expect(reviewRes.data.payment_submission).toBeDefined()
+
+      /**
+       * 🔴 The assertion this replaces required `reviewRes.data.payment.id` and
+       * a `Pending` payment of 10000. That payment row was the second of the
+       * three records one payout used to exist as, and nothing ever moved it
+       * off Pending — the submission said Paid at the same moment. Approval no
+       * longer creates it (#1636).
+       */
+      expect(reviewRes.data.payment).toBeNull()
+      expect(reviewRes.data.paid_to).toBeDefined()
+      expect(reviewRes.data.paid_to.id).toBe(paidToId)
+
+      /**
+       * 🔴 Approval stops at `Approved` (#1639). The assertion this replaces
+       * demanded `Paid` here. In production the gap between approval and the
+       * money actually moving was 13 seconds, 8 minutes, 2 days, 6 days and
+       * 34 days — for 34 days a payout read `Paid` and the partner had been
+       * told so, while nothing had been sent.
+       */
+      const detail = await api.get(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      expect(detail.data.payment_submission.status).toBe("Approved")
+      expect(detail.data.payment_submission.reviewed_at).toBeDefined()
+      expect(detail.data.payment_submission.reviewed_by).toBeDefined()
+      // Nothing has moved yet, so nothing claims it has.
+      expect(detail.data.payment_submission.paid_at).toBeFalsy()
+
+      /**
+       * And no `internal_payments` row appeared for it. Asserted by COUNT
+       * across the whole list rather than by absence of a key: a wrong response
+       * key reads as a confident nothing, and this is exactly the claim the
+       * issue was opened about.
+       */
+      const paymentsAfter = await api.get("/admin/payments?limit=100", adminHeaders)
+      expect(paymentsAfter.status).toBe(200)
+      const matching = (paymentsAfter.data.payments || []).filter(
+        (pmt: any) => Number(pmt.amount) === 10000 && pmt.status === "Pending"
+      )
+      expect(matching).toHaveLength(0)
+
+      // Verify reconciliation record was created
+      const reconRes = await api.get(
+        "/admin/payment_reports/reconciliation",
+        adminHeaders
+      )
+      expect(reconRes.status).toBe(200)
+      const recon = reconRes.data.reconciliations.find(
+        (r: any) => r.reference_id === submissionId
+      )
+      expect(recon).toBeDefined()
+      expect(recon.reference_type).toBe("payment_submission")
+      expect(recon.partner_id).toBe(partnerId)
+      expect(recon.status).toBe("Matched") // No override, amounts match
+      expect(Number(recon.expected_amount)).toBe(10000)
+      expect(Number(recon.actual_amount)).toBe(10000)
+      expect(Number(recon.discrepancy)).toBe(0)
+
+      /**
+       * Settling is the moment money is recorded as having moved, and it
+       * carries the submission with it — one action, both records, so the two
+       * cannot drift into the disagreement #1636 was opened about.
+       */
+      const settled = await api.post(
+        `/admin/payment_reports/reconciliation/${recon.id}/settle`,
+        {},
+        adminHeaders
+      )
+      expect(settled.status).toBe(200)
+      expect(settled.data.reconciliation.status).toBe("Settled")
+      expect(settled.data.reconciliation.settled_at).toBeTruthy()
+
+      const afterSettle = await api.get(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      expect(afterSettle.data.payment_submission.status).toBe("Paid")
+      expect(afterSettle.data.payment_submission.paid_at).toBeTruthy()
+    })
+
+    /**
+     * 🔴 The four-branch method resolution (#1636).
+     *
+     * Production motivated every branch: Sharlho has FOUR bank accounts under
+     * one partner, one per employee, and three of them have been paid at
+     * different times. The code this replaces took `methods[0]` — whichever row
+     * the link query returned first — so approving without naming a method did
+     * not risk the wrong account, it risked the wrong PERSON.
+     */
+    it("should REFUSE approval when a partner has several methods and none is default", async () => {
+      // A second method, so the partner now has two and neither is default.
+      const second = await api.post(
+        `/admin/payments/partners/${partnerId}/methods`,
+        {
+          type: "bank_account",
+          account_name: "Second Employee Account",
+          bank_name: "Other Bank",
+        },
+        adminHeaders
+      )
+      const secondId = second.data.paymentMethod.id
+
+      const d1 = await createDesign("Ambiguous Method Design", {
+        estimated_cost: 4000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const createRes = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+      const submissionId = createRes.data.payment_submission.id
+
+      // No paid_to_id, no default → must refuse rather than pick.
+      const refused = await api
+        .post(
+          `/admin/payment-submissions/${submissionId}/review`,
+          { action: "approve" },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(refused.status).toBe(400)
+      expect(String(refused.data?.message)).toContain("none is marked default")
+
+      // The refusal must not have half-approved it.
+      const stillPending = await api.get(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      expect(stillPending.data.payment_submission.status).not.toBe("Paid")
+      expect(stillPending.data.payment_submission.paid_at).toBeFalsy()
+
+      // Mark one default → the same approval now resolves to THAT method.
+      await api.post(
+        `/partners/${partnerId}/payments/methods/${secondId}`,
+        { is_default: true },
+        { headers: partnerHeaders }
+      )
+
+      const approved = await api.post(
+        `/admin/payment-submissions/${submissionId}/review`,
+        { action: "approve" },
+        adminHeaders
+      )
+      expect(approved.status).toBe(200)
+      expect(approved.data.paid_to.id).toBe(secondId)
+
+      // Exclusive: promoting the second must have demoted the first.
+      const methods = await api.get(
+        `/admin/payments/partners/${partnerId}/methods`,
+        adminHeaders
+      )
+      const first = methods.data.paymentMethods.find((m: any) => m.id === paidToId)
+      expect(first.is_default).toBe(false)
+    })
+
+    it("should reject a paid_to_id that belongs to a different partner", async () => {
+      const d1 = await createDesign("Foreign Method Design", {
+        estimated_cost: 1500,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const createRes = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+
+      const refused = await api
+        .post(
+          `/admin/payment-submissions/${createRes.data.payment_submission.id}/review`,
+          { action: "approve", paid_to_id: "ipd_not_this_partners_method" },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(refused.status).toBe(400)
+      expect(String(refused.data?.message)).toContain("not one of this partner")
+    })
+
+    it("should create a discrepant reconciliation when amount_override differs", async () => {
+      const d1 = await createDesign("Override Design", { estimated_cost: 8000 })
+      await linkDesignToPartner(d1, partnerId)
+
+      const createRes = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+      const submissionId = createRes.data.payment_submission.id
+
+      const reviewRes = await api.post(
+        `/admin/payment-submissions/${submissionId}/review`,
+        {
+          action: "approve",
+          amount_override: 7000,
+          payment_type: "Bank",
+          paid_to_id: paidToId,
+        },
+        adminHeaders
+      )
+
+      expect(reviewRes.status).toBe(200)
+      /**
+       * The overridden amount used to be read off the created payment row.
+       * There is no payment row now (#1636) — reconciliation's `actual_amount`
+       * below is where the override lands, and it is asserted there.
+       */
+      expect(reviewRes.data.payment).toBeNull()
+
+      // Verify reconciliation shows discrepancy
+      const reconRes = await api.get(
+        "/admin/payment_reports/reconciliation",
+        adminHeaders
+      )
+      const recon = reconRes.data.reconciliations.find(
+        (r: any) => r.reference_id === submissionId
+      )
+      expect(recon).toBeDefined()
+      expect(recon.status).toBe("Discrepant")
+      expect(Number(recon.expected_amount)).toBe(8000)
+      expect(Number(recon.actual_amount)).toBe(7000)
+      expect(Number(recon.discrepancy)).toBe(-1000)
+    })
+
+    it("should reject a submission with reason", async () => {
+      const d1 = await createDesign("Reject Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      const createRes = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+      const submissionId = createRes.data.payment_submission.id
+
+      const reviewRes = await api.post(
+        `/admin/payment-submissions/${submissionId}/review`,
+        {
+          action: "reject",
+          rejection_reason: "Incomplete documentation",
+        },
+        adminHeaders
+      )
+
+      expect(reviewRes.status).toBe(200)
+      expect(reviewRes.data.payment).toBeNull()
+
+      // Verify status is Rejected
+      const detail = await api.get(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      expect(detail.data.payment_submission.status).toBe("Rejected")
+      expect(detail.data.payment_submission.rejection_reason).toBe(
+        "Incomplete documentation"
+      )
+    })
+
+    it("should not allow reviewing an already approved submission", async () => {
+      const d1 = await createDesign("Already Approved Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      const createRes = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+      const submissionId = createRes.data.payment_submission.id
+
+      // First review: approve
+      await api.post(
+        `/admin/payment-submissions/${submissionId}/review`,
+        { action: "approve", payment_type: "Bank", paid_to_id: paidToId },
+        adminHeaders
+      )
+
+      // Second review: should fail
+      const secondReview = await api
+        .post(
+          `/admin/payment-submissions/${submissionId}/review`,
+          { action: "approve", payment_type: "Bank", paid_to_id: paidToId },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(secondReview.status).toBeGreaterThanOrEqual(400)
+      expect(secondReview.data.message || secondReview.data.error || "").toMatch(
+        /cannot be reviewed|must be Pending/i
+      )
+    })
+
+    it("should allow re-submission after rejection", async () => {
+      const d1 = await createDesign("Resubmit Design")
+      await linkDesignToPartner(d1, partnerId)
+
+      // Create and reject first submission
+      const first = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+      await api.post(
+        `/admin/payment-submissions/${first.data.payment_submission.id}/review`,
+        { action: "reject", rejection_reason: "Needs fixes" },
+        adminHeaders
+      )
+
+      // Second submission with same design should succeed (rejected ≠ active)
+      const second = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1], notes: "Fixed and resubmitted" },
+        { headers: partnerHeaders }
+      )
+
+      expect(second.status).toBe(201)
+      expect(second.data.payment_submission.status).toBe("Pending")
+    })
+  })
+
+  // ─── Admin: Reconciliation CRUD ───────────────────────────────────────────
+
+  describe("Reconciliation API", () => {
+    it("should create a manual reconciliation record", async () => {
+      const res = await api.post(
+        "/admin/payment_reports/reconciliation",
+        {
+          reference_type: "manual",
+          partner_id: partnerId,
+          expected_amount: 5000,
+          actual_amount: 5000,
+          notes: "Manual reconciliation",
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(res.data.reconciliation).toBeDefined()
+      expect(res.data.reconciliation.status).toBe("Matched")
+      expect(Number(res.data.reconciliation.discrepancy)).toBe(0)
+    })
+
+    it("should create a discrepant manual reconciliation", async () => {
+      const res = await api.post(
+        "/admin/payment_reports/reconciliation",
+        {
+          reference_type: "manual",
+          expected_amount: 10000,
+          actual_amount: 9500,
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(res.data.reconciliation.status).toBe("Discrepant")
+      expect(Number(res.data.reconciliation.discrepancy)).toBe(-500)
+    })
+
+    it("should create a Pending reconciliation when actual_amount is missing", async () => {
+      const res = await api.post(
+        "/admin/payment_reports/reconciliation",
+        {
+          reference_type: "manual",
+          expected_amount: 3000,
+        },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(201)
+      expect(res.data.reconciliation.status).toBe("Pending")
+    })
+
+    it("should get a reconciliation by ID", async () => {
+      const created = await api.post(
+        "/admin/payment_reports/reconciliation",
+        {
+          reference_type: "manual",
+          expected_amount: 1000,
+          actual_amount: 1000,
+        },
+        adminHeaders
+      )
+      const reconId = created.data.reconciliation.id
+
+      const res = await api.get(
+        `/admin/payment_reports/reconciliation/${reconId}`,
+        adminHeaders
+      )
+
+      expect(res.status).toBe(200)
+      expect(res.data.reconciliation.id).toBe(reconId)
+    })
+
+    it("should update a reconciliation's actual_amount and recompute status", async () => {
+      const created = await api.post(
+        "/admin/payment_reports/reconciliation",
+        {
+          reference_type: "manual",
+          expected_amount: 5000,
+        },
+        adminHeaders
+      )
+      const reconId = created.data.reconciliation.id
+
+      const res = await api.patch(
+        `/admin/payment_reports/reconciliation/${reconId}`,
+        { actual_amount: 4500 },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(200)
+      expect(res.data.reconciliation.status).toBe("Discrepant")
+      expect(Number(res.data.reconciliation.discrepancy)).toBe(-500)
+    })
+
+    it("should settle a reconciliation record", async () => {
+      const created = await api.post(
+        "/admin/payment_reports/reconciliation",
+        {
+          reference_type: "manual",
+          expected_amount: 5000,
+          actual_amount: 4800,
+        },
+        adminHeaders
+      )
+      const reconId = created.data.reconciliation.id
+
+      const res = await api.post(
+        `/admin/payment_reports/reconciliation/${reconId}/settle`,
+        { notes: "Difference waived by finance" },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(200)
+      expect(res.data.reconciliation.status).toBe("Settled")
+      expect(res.data.reconciliation.settled_at).toBeDefined()
+      expect(res.data.reconciliation.settled_by).toBeDefined()
+    })
+
+    it("should not settle an already settled reconciliation", async () => {
+      const created = await api.post(
+        "/admin/payment_reports/reconciliation",
+        {
+          reference_type: "manual",
+          expected_amount: 1000,
+          actual_amount: 1000,
+        },
+        adminHeaders
+      )
+      const reconId = created.data.reconciliation.id
+
+      // First settle
+      await api.post(
+        `/admin/payment_reports/reconciliation/${reconId}/settle`,
+        {},
+        adminHeaders
+      )
+
+      // Second settle — should fail
+      const res = await api
+        .post(
+          `/admin/payment_reports/reconciliation/${reconId}/settle`,
+          {},
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBeGreaterThanOrEqual(400)
+      expect(res.data.message || res.data.error || "").toMatch(
+        /already settled/i
+      )
+    })
+
+    it("should filter reconciliations by status", async () => {
+      // Create matched and discrepant records
+      await api.post(
+        "/admin/payment_reports/reconciliation",
+        { reference_type: "manual", expected_amount: 100, actual_amount: 100 },
+        adminHeaders
+      )
+      await api.post(
+        "/admin/payment_reports/reconciliation",
+        { reference_type: "manual", expected_amount: 200, actual_amount: 150 },
+        adminHeaders
+      )
+
+      const res = await api.get("/admin/payment_reports/reconciliation", {
+        ...adminHeaders,
+        params: { status: "Matched" },
+      })
+
+      expect(res.status).toBe(200)
+      res.data.reconciliations.forEach((r: any) => {
+        expect(r.status).toBe("Matched")
+      })
+    })
+  })
+
+  // ─── Report Integration ───────────────────────────────────────────────────
+
+  describe("GET /admin/payment_reports/summary with reconciliation", () => {
+    it("should include reconciliation_summary when include_reconciliation=true", async () => {
+      // Create a reconciliation record first
+      await api.post(
+        "/admin/payment_reports/reconciliation",
+        {
+          reference_type: "manual",
+          expected_amount: 5000,
+          actual_amount: 4500,
+        },
+        adminHeaders
+      )
+
+      const res = await api.get("/admin/payment_reports/summary", {
+        ...adminHeaders,
+        params: { include_reconciliation: "true" },
+      })
+
+      expect(res.status).toBe(200)
+      expect(res.data.reconciliation_summary).toBeDefined()
+      expect(
+        typeof res.data.reconciliation_summary.total_expected
+      ).toBe("number")
+      expect(typeof res.data.reconciliation_summary.total_actual).toBe(
+        "number"
+      )
+      expect(
+        typeof res.data.reconciliation_summary.total_discrepancy
+      ).toBe("number")
+      expect(
+        typeof res.data.reconciliation_summary.record_count
+      ).toBe("number")
+      expect(res.data.reconciliation_summary.by_status).toBeDefined()
+    })
+
+    it("should return null reconciliation_summary when flag is not set", async () => {
+      const res = await api.get(
+        "/admin/payment_reports/summary",
+        adminHeaders
+      )
+
+      expect(res.status).toBe(200)
+      expect(res.data.reconciliation_summary).toBeNull()
+    })
+  })
+
+  // ─── Partner payable runs (#1571 B half) ──────────────────────────────────
+
+  /**
+   * The partner submission screen used to list DESIGNS, so every
+   * partner-created payout recorded no run and the double-pay guard was
+   * structurally blind to it. These exercise the partner-side mirror of
+   * `/admin/payment-submissions/payable-runs` that the rewritten screen reads.
+   *
+   * 🔑 The first test is the one that matters most, and not for its assertions:
+   * it is the only thing in this suite that calls the partner route AT ALL. The
+   * route shipped with no entry in `middlewares.ts`, and since the `/partners*`
+   * wildcard supplies only CORS and locale, `authenticate("partner", …)` never
+   * ran — `req.auth_context` was undefined and every request 401'd. The route
+   * file looked entirely correct. Nothing else in the suite touched it, so a
+   * fully green run said nothing about it.
+   */
+  describe("GET /partners/payment-submissions/payable-runs", () => {
+    it("returns this partner's completed runs, priced from the run and billing PRODUCED", async () => {
+      const d1 = await createDesign("Partner Payable Run Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Partner Payable Run Design")
+
+      const res = await api.get(
+        "/partners/payment-submissions/payable-runs",
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(200)
+      const row = res.data.payable_runs.find((r: any) => r.run_id === runId)
+      expect(row).toBeDefined()
+      // The design says 5000/unit; the run says 1200/unit for 4 pieces made.
+      // Pricing off the design would bill 45,000 for work worth 4,800 (#1554).
+      expect(row.unit_amount).toBe(1200)
+      expect(row.ordered_quantity).toBe(9)
+      expect(row.produced_quantity).toBe(4)
+      expect(row.payable_quantity).toBe(4)
+      expect(row.quantity_basis).toBe("produced")
+      expect(row.amount).toBe(4800)
+      expect(row.billing_status).toBe("clear")
+    })
+
+    /**
+     * 🔴 A `total` is the price for the JOB, on this screen too.
+     *
+     * This route priced with its own arithmetic — `runUnitCost(run) ×
+     * payable_quantity`, i.e. the derived rate re-multiplied — which is the
+     * defect #1679 removed from the admin side. On this run the two screens
+     * disagreed by 22% on the same day: ₹10,000 offered to the admin, and
+     * ₹7,777.77 offered to the partner whose work it was. Both now price
+     * through `runPayableOffer`.
+     */
+    it("offers the agreed TOTAL verbatim, not the derived rate × quantity (#1679)", async () => {
+      const d1 = await createDesign("Partner Total Priced Design", {
+        estimated_cost: 5000,
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Partner Total Priced Design", {
+        quantity: 9,
+        produced_quantity: 7,
+        partner_cost_estimate: 10000,
+        cost_type: "total",
+      })
+
+      const res = await api.get("/partners/payment-submissions/payable-runs", {
+        headers: partnerHeaders,
+      })
+
+      const row = res.data.payable_runs.find((r: any) => r.run_id === runId)
+      expect(row).toBeDefined()
+      expect(row.amount).toBe(10000)
+      // The old arithmetic, named so the case cannot pass for the wrong reason.
+      expect(row.amount).not.toBe(7777.77)
+      // The rate is DERIVED — display only, and the row has to say so or a
+      // screen multiplies it and re-prices the job.
+      expect(row.unit_is_derived).toBe(true)
+      expect(row.payable_quantity).toBe(7)
+    })
+
+    it("never shows one partner the runs of another", async () => {
+      const other = await createPartnerWithAuth(
+        Math.floor(Math.random() * 100000)
+      )
+      const d1 = await createDesign("Cross Tenant Run Design")
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Cross Tenant Run Design")
+
+      // The OTHER partner asks. The run belongs to `partnerId`.
+      const res = await api.get(
+        "/partners/payment-submissions/payable-runs",
+        { headers: other.partnerHeaders }
+      )
+
+      expect(res.status).toBe(200)
+      expect(
+        res.data.payable_runs.find((r: any) => r.run_id === runId)
+      ).toBeUndefined()
+    })
+
+    it("reports a run already recorded on a live payout as billed, not clear", async () => {
+      const d1 = await createDesign("Partner Billed Run Design")
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Partner Billed Run Design")
+
+      await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d1],
+          production_run_ids: { [d1]: [runId] },
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+        },
+        { headers: partnerHeaders }
+      )
+
+      const res = await api.get(
+        "/partners/payment-submissions/payable-runs",
+        { headers: partnerHeaders }
+      )
+
+      const row = res.data.payable_runs.find((r: any) => r.run_id === runId)
+      expect(row).toBeDefined()
+      // ⚠️ `partly_billed` since #1596 — the line covers some of what the run
+      // was ordered for, and the rest is still billable. The point of the case
+      // is that it is NOT `clear`.
+      expect(row.billing_status).toBe("partly_billed")
+      expect(row.billing_status).not.toBe("clear")
+      expect(row.billed).not.toBeNull()
+      expect(row.billable_remaining).toBeGreaterThan(0)
+    })
+  })
+
+  /**
+   * The screen's whole purpose: a partner billing for nine garments must not
+   * be able to state one number and have it read as the line total.
+   *
+   * ⚠️ Both of these PASS on the pre-#1571-B tree. The partner POST route has
+   * accepted `production_run_ids` / `quantities` / `unit_amounts` since the A
+   * half shipped — what changed here is that the SCREEN now sends them. These
+   * are regression LOCKS on the contract the screen depends on, not coverage
+   * of the change. The coverage lives in the `payable-runs` block above, which
+   * 401'd on the old tree.
+   */
+  describe("a partner submission states its runs (#1571 B half)", () => {
+    it("records run provenance, so the double-pay guard can see it", async () => {
+      const d1 = await createDesign("Partner Provenance Design")
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Partner Provenance Design")
+
+      const res = await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d1],
+          production_run_ids: { [d1]: [runId] },
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+        },
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(201)
+      // 4 x 1200 — the quantity is applied. Before this change the screen sent
+      // a single `cost_override`, so a claim for four pieces billed one.
+      expect(Number(res.data.payment_submission.total_amount)).toBe(4800)
+
+      const detail = await api.get(
+        `/partners/payment-submissions/${res.data.payment_submission.id}`,
+        { headers: partnerHeaders }
+      )
+      const line = detail.data.payment_submission.items.find(
+        (i: any) => i.design_id === d1
+      )
+      expect(line.run_provenance).toBe("recorded")
+      expect(line.production_run_ids).toEqual([runId])
+    })
+
+    it("accepts a design in Technical_Review when a verified run backs the claim", async () => {
+      // 🔴 `complete-production-run` sets the design to Technical_Review, which
+      // is NOT one of the statuses the hand-submission gate accepts. So the
+      // design a partner has just finished producing is never Approved at the
+      // moment they bill for it, and the gate rejected precisely the claims it
+      // should wave through — the runs screen could not submit anything.
+      //
+      // The completed run is the proof of finished work, and it is verified
+      // (exists, completed, this partner, this design) before it counts.
+      const d1 = await createDesign("Technical Review Design", {
+        status: "Technical_Review",
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Technical Review Design")
+
+      const res = await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d1],
+          production_run_ids: { [d1]: [runId] },
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+        },
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(4800)
+    })
+
+    it("still refuses an ineligible design when NO run backs the claim", async () => {
+      // ⚠️ A regression LOCK — this passes on the pre-fix tree too. The waiver
+      // is per-design and only where a run replaces the check, so a hand-picked
+      // design line with no run stays gated exactly as before. Without this,
+      // the exemption above could quietly widen into a blanket waiver.
+      const d1 = await createDesign("Technical Review No Run", {
+        status: "Technical_Review",
+      })
+      await linkDesignToPartner(d1, partnerId)
+
+      const res = await api
+        .post(
+          "/partners/payment-submissions",
+          { design_ids: [d1] },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(String(res.data?.message || "")).toContain("not eligible")
+    })
+
+    it("accepts a Superseded design when a verified run backs the claim", async () => {
+      // A design revised AFTER the partner finished producing it goes
+      // Superseded, and the partner is still owed for the work. 8 such rows
+      // exist on prod; without this they are unpayable through the runs screen.
+      const d1 = await createDesign("Superseded Produced Design", {
+        status: "Superseded",
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Superseded Produced Design")
+
+      const res = await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d1],
+          production_run_ids: { [d1]: [runId] },
+          quantities: { [d1]: 3 },
+          unit_amounts: { [d1]: 500 },
+        },
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(201)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(1500)
+    })
+
+    it("still refuses a Conceptual design even with a run behind it", async () => {
+      // 🔴 A design that never left the concept stage cannot legitimately have
+      // a completed run — that pairing is data drift, and paying it out
+      // silently is how drift survives. The run-backed waiver is an ALLOWLIST;
+      // Conceptual is outside it, so this 400s and an admin can still waive it
+      // deliberately with `require_design_status: false`.
+      const d1 = await createDesign("Conceptual With Run", {
+        status: "Conceptual",
+      })
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Conceptual With Run")
+
+      const res = await api
+        .post(
+          "/partners/payment-submissions",
+          {
+            design_ids: [d1],
+            production_run_ids: { [d1]: [runId] },
+            quantities: { [d1]: 3 },
+            unit_amounts: { [d1]: 500 },
+          },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(String(res.data?.message || "")).toContain("not eligible")
+    })
+
+    /**
+     * ⚠️ Re-expressed, not relaxed. This case used to bill 4 then 4 of a run
+     * ORDERED FOR 9 and expect a refusal — and it got one, but from the
+     * design-level guard, which refused any second submission on a design
+     * whether or not the money overlapped. #1596 made 4-then-4-of-9 legitimate
+     * tranche billing, so the design guard now stands down where the run guard
+     * has the arithmetic (see `designsBlockedByOpenClaims`), and this case
+     * would have started passing for a reason it never meant.
+     *
+     * The intent — an overclaim is refused — is kept by asking for MORE than
+     * the run is worth. The sibling case below pins the half that is now
+     * allowed, so the loosening is stated rather than merely un-caught.
+     *
+     * This is the third test of this family; #1665 re-expressed two others the
+     * same way, at 4 + 7 = 11.
+     */
+    it("refuses to claim a run past what a live payout leaves of it", async () => {
+      const d1 = await createDesign("Partner Double Claim Design")
+      await linkDesignToPartner(d1, partnerId)
+      // Ordered for 9.
+      const runId = await createCompletedRun(d1, "Partner Double Claim Design")
+
+      const first = await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d1],
+          production_run_ids: { [d1]: [runId] },
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+        },
+        { headers: partnerHeaders }
+      )
+      expect(first.status).toBe(201)
+
+      const second = await api
+        .post(
+          "/partners/payment-submissions",
+          {
+            design_ids: [d1],
+            production_run_ids: { [d1]: [runId] },
+            // 4 + 7 = 11 against a ceiling of 9.
+            quantities: { [d1]: 7 },
+            unit_amounts: { [d1]: 1200 },
+          },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(second.status).toBe(400)
+    })
+
+    /**
+     * #1596 SHORT CLOSE. Until a run is closed, its ceiling is the ORDERED
+     * quantity on purpose — output is captured at completion and more can
+     * legitimately follow. Closing says no more will be made, and the ceiling
+     * becomes what was produced.
+     */
+    it("short-closing a run drops its ceiling from ordered to produced (#1596)", async () => {
+      const d1 = await createDesign("Short Close Design")
+      await linkDesignToPartner(d1, partnerId)
+      // Ordered 9, produced 4.
+      const runId = await createCompletedRun(d1, "Short Close Design")
+
+      // Before closing: the 5 unmade units are still billable.
+      const open = await api
+        .post(
+          "/partners/payment-submissions",
+          {
+            design_ids: [d1],
+            production_run_ids: { [d1]: [runId] },
+            quantities: { [d1]: 9 },
+            unit_amounts: { [d1]: 1200 },
+          },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+      expect(open.status).toBe(201)
+
+      // A fresh run, this time closed before anyone bills it.
+      const d2 = await createDesign("Short Closed Design")
+      await linkDesignToPartner(d2, partnerId)
+      const closedRunId = await createCompletedRun(d2, "Short Closed Design")
+
+      const closeRes = await api.post(
+        `/admin/production-runs/${closedRunId}/short-close`,
+        { reason: "Partner confirmed no more will be made" },
+        adminHeaders
+      )
+      expect(closeRes.status).toBe(200)
+      expect(closeRes.data.short_closed).toBe(true)
+
+      // 5 is now over the ceiling of 4, though well under the ordered 9.
+      const over = await api
+        .post(
+          "/partners/payment-submissions",
+          {
+            design_ids: [d2],
+            production_run_ids: { [d2]: [closedRunId] },
+            quantities: { [d2]: 5 },
+            unit_amounts: { [d2]: 1200 },
+          },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+      expect(over.status).toBe(400)
+
+      // And exactly the produced quantity still goes through.
+      const exact = await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d2],
+          production_run_ids: { [d2]: [closedRunId] },
+          quantities: { [d2]: 4 },
+          unit_amounts: { [d2]: 1200 },
+        },
+        { headers: partnerHeaders }
+      )
+      expect(exact.status).toBe(201)
+    })
+
+    it("reopening a short-closed run restores the ordered ceiling (#1596)", async () => {
+      const d1 = await createDesign("Reopened Run Design")
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Reopened Run Design")
+
+      await api.post(
+        `/admin/production-runs/${runId}/short-close`,
+        {},
+        adminHeaders
+      )
+
+      const refused = await api
+        .post(
+          "/partners/payment-submissions",
+          {
+            design_ids: [d1],
+            production_run_ids: { [d1]: [runId] },
+            quantities: { [d1]: 9 },
+            unit_amounts: { [d1]: 1200 },
+          },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+      expect(refused.status).toBe(400)
+
+      const reopen = await api.delete(
+        `/admin/production-runs/${runId}/short-close`,
+        adminHeaders
+      )
+      expect(reopen.status).toBe(200)
+      expect(reopen.data.reopened).toBe(true)
+
+      const allowed = await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d1],
+          production_run_ids: { [d1]: [runId] },
+          quantities: { [d1]: 9 },
+          unit_amounts: { [d1]: 1200 },
+        },
+        { headers: partnerHeaders }
+      )
+      expect(allowed.status).toBe(201)
+    })
+
+    it("refuses to close a run that recorded no output, rather than pretending to (#1596)", async () => {
+      const d1 = await createDesign("No Output Design")
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "No Output Design", {
+        produced_quantity: null,
+      })
+
+      const res = await api
+        .post(`/admin/production-runs/${runId}/short-close`, {}, adminHeaders)
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(String(res.data?.message || "")).toContain("no recorded output")
+    })
+
+    /**
+     * 🔴 The loosening, stated. The design-level guard used to refuse this
+     * outright; now the run's ORDERED quantity is the only thing standing
+     * between a partner and a second claim, and the guard cannot tell "the next
+     * 4" from "the same 4" — nothing in the data ever could. Recorded here so
+     * the change is visible rather than inferred from an absent refusal.
+     */
+    it("allows a second tranche of the same run while the first is still open (#1596)", async () => {
+      const d1 = await createDesign("Partner Tranche Design")
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Partner Tranche Design")
+
+      const first = await api.post(
+        "/partners/payment-submissions",
+        {
+          design_ids: [d1],
+          production_run_ids: { [d1]: [runId] },
+          quantities: { [d1]: 4 },
+          unit_amounts: { [d1]: 1200 },
+        },
+        { headers: partnerHeaders }
+      )
+      expect(first.status).toBe(201)
+
+      const second = await api
+        .post(
+          "/partners/payment-submissions",
+          {
+            design_ids: [d1],
+            production_run_ids: { [d1]: [runId] },
+            // 4 + 4 = 8, inside the run's ordered 9.
+            quantities: { [d1]: 4 },
+            unit_amounts: { [d1]: 1200 },
+          },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(second.status).toBe(201)
+    })
+
+    /**
+     * And the half that must NOT loosen: an open prior that does not say which
+     * runs it paid for is invisible to the run guard, so the design-level
+     * refusal is still the only thing that can catch it.
+     */
+    it("still refuses when the open prior names no runs to diff against (#1596)", async () => {
+      const d1 = await createDesign("Partner Opaque Prior Design")
+      await linkDesignToPartner(d1, partnerId)
+      const runId = await createCompletedRun(d1, "Partner Opaque Prior Design")
+
+      // A claim that records no run evidence at all.
+      const first = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [d1] },
+        { headers: partnerHeaders }
+      )
+      expect(first.status).toBe(201)
+
+      const second = await api
+        .post(
+          "/partners/payment-submissions",
+          {
+            design_ids: [d1],
+            production_run_ids: { [d1]: [runId] },
+            quantities: { [d1]: 1 },
+            unit_amounts: { [d1]: 1200 },
+          },
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(second.status).toBe(400)
+      expect(String(second.data?.message || "")).toContain(
+        "already in an active payment submission"
+      )
+    })
+  })
+
+  // ─── Auth Guards ──────────────────────────────────────────────────────────
+
+  /**
+   * The create routes return the submission row, not its lines — the workflow
+   * writes items after `createPaymentSubmissions` returns. Every assertion
+   * about a LINE therefore has to re-read the detail rather than trust the
+   * create response, which is the same reason the write routes re-read instead
+   * of echoing.
+   */
+  async function readSubmission(submissionId: string) {
+    const res = await api.get(
+      `/admin/payment-submissions/${submissionId}`,
+      adminHeaders
+    )
+    return res.data.payment_submission
+  }
+
+  // ─── Draft → Pending: the submit route (#1604) ─────────────────────────────
+
+  /**
+   * 🔴 Before this route existed there was NO way out of a Draft.
+   *
+   * `auto-draft-payment-submission` writes one on every completed run, holding
+   * the design, the rate, the quantity AND the run ids. "Submitting" it meant
+   * creating a SECOND submission by hand — which could not name the runs (the
+   * Draft already claims them, so the run-level guard refuses) and therefore
+   * had to name none. #1602 closed the runless hole and with it the only path a
+   * drafted design had; #1605 had to reopen it. Seven production Drafts are
+   * still sitting in that state.
+   *
+   * Converting in place keeps the run evidence, which is the whole point: the
+   * line that reaches review reads `recorded`, not `not_recorded`.
+   */
+  describe("POST /partners/payment-submissions/:submissionId/submit (#1604)", () => {
+    it("turns a partner's own Draft into a Pending claim, keeping its run evidence", async () => {
+      const designId = await createDesign("Submittable Draft Design")
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Submittable Draft Design")
+
+      const draft = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          status: "Draft",
+          quantities: { [designId]: 4 },
+          unit_amounts: { [designId]: 1200 },
+          production_run_ids: { [designId]: [runId] },
+        },
+        adminHeaders
+      )
+      expect(draft.status).toBe(201)
+      expect(draft.data.payment_submission.status).toBe("Draft")
+      expect(draft.data.payment_submission.submitted_at).toBeFalsy()
+
+      const submissionId = draft.data.payment_submission.id
+
+      const res = await api.post(
+        `/partners/payment-submissions/${submissionId}/submit`,
+        {},
+        { headers: partnerHeaders }
+      )
+
+      expect(res.status).toBe(200)
+      // Read back, not echoed — the review route's stale-200 is exactly this.
+      expect(res.data.payment_submission.status).toBe("Pending")
+      expect(res.data.payment_submission.submitted_at).toBeTruthy()
+
+      const line = res.data.payment_submission.items.find(
+        (i: any) => i.design_id === designId
+      )
+      // The evidence survives the transition. A hand-made re-submission could
+      // never have carried it.
+      expect(line.run_provenance).toBe("recorded")
+      expect(line.production_run_ids).toEqual([runId])
+      expect(Number(line.amount)).toBe(4800)
+    })
+
+    it("refuses anything that is not a Draft, and says which status it is in", async () => {
+      const designId = await createDesign("Already Pending Design")
+      await linkDesignToPartner(designId, partnerId)
+
+      const created = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [designId] },
+        { headers: partnerHeaders }
+      )
+      expect(created.data.payment_submission.status).toBe("Pending")
+
+      const res = await api
+        .post(
+          `/partners/payment-submissions/${created.data.payment_submission.id}/submit`,
+          {},
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain("Pending")
+    })
+
+    it("refuses another partner's Draft", async () => {
+      const designId = await createDesign("Someone Else's Draft")
+      await linkDesignToPartner(designId, partnerId)
+
+      const draft = await api.post(
+        "/admin/payment-submissions",
+        { partner_id: partnerId, design_ids: [designId], status: "Draft" },
+        adminHeaders
+      )
+
+      const other = await createPartnerWithAuth(
+        Math.floor(Math.random() * 100000)
+      )
+
+      const res = await api
+        .post(
+          `/partners/payment-submissions/${draft.data.payment_submission.id}/submit`,
+          {},
+          { headers: other.partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      // `MedusaError.Types.NOT_ALLOWED` is what the sibling GET detail route
+      // already throws for exactly this, and Medusa maps it to 400. What
+      // matters is that it is refused and says so, not the digit.
+      expect([400, 401, 403]).toContain(res.status)
+      expect(res.data.message).toContain("do not have access")
+    })
+
+    /**
+     * 🔴 The reason submit re-runs the guards rather than trusting the draft.
+     *
+     * A Draft can be months old. If the same run has been billed by another
+     * submission in the meantime, converting the draft in place would pay for
+     * it twice — and the draft would look perfectly clean while doing it.
+     */
+    it("refuses a Draft whose design was claimed by a hand submission since", async () => {
+      /**
+       * The exact hole #1605's Draft exemption leaves open. A partner with a
+       * pre-filled Draft can still submit the SAME design by hand naming no
+       * runs — the runless guard waves it through precisely because the prior
+       * is a Draft. Submitting the Draft afterwards would bill the work twice,
+       * and neither claim could be told from the other.
+       */
+      const designId = await createDesign("Raced Draft Design")
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Raced Draft Design")
+
+      const draft = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          status: "Draft",
+          production_run_ids: { [designId]: [runId] },
+        },
+        adminHeaders
+      )
+
+      const byHand = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [designId] },
+        { headers: partnerHeaders }
+      )
+      expect(byHand.data.payment_submission.status).toBe("Pending")
+
+      const res = await api
+        .post(
+          `/partners/payment-submissions/${draft.data.payment_submission.id}/submit`,
+          {},
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain("already in an active payment submission")
+    })
+
+    it("refuses a Draft whose run was claimed by another submission since", async () => {
+      /**
+       * A Draft can be months old. `create` refuses a second submission that
+       * names a run the Draft already holds, so this claim is written straight
+       * through the module — which is exactly the shape a repair job, an
+       * import, or a future edit route can produce. The transition must
+       * re-check rather than trust the draft it was written from.
+       */
+      const designId = await createDesign("Contested Draft Run Design")
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Contested Draft Run Design")
+
+      const draft = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          status: "Draft",
+          production_run_ids: { [designId]: [runId] },
+        },
+        adminHeaders
+      )
+
+      const container = getContainer()
+      const service: any = container.resolve("payment_submissions")
+      /**
+       * Approved, not Pending — deliberately. The design-level guard only
+       * blocks Pending/Under_Review, so an Approved rival slips past it and
+       * leaves the RUN-level guard as the only thing standing between this
+       * draft and a second payment for the same work. That is the check under
+       * test; a Pending rival would be caught one step earlier and prove
+       * nothing about it.
+       */
+      const rival = await service.createPaymentSubmissions({
+        partner_id: partnerId,
+        status: "Approved",
+        total_amount: 1000,
+        currency: "inr",
+        submitted_at: new Date(),
+      })
+      await service.createPaymentSubmissionItems({
+        source_type: "design",
+        design_id: designId,
+        design_name: "Contested Draft Run Design",
+        amount: 1000,
+        /**
+         * ⚠️ The rival takes the WHOLE run — 9, its ordered quantity. Since
+         * #1596 a claim is quantity-aware, so a rival holding 1 of 9 leaves
+         * room the draft's own 4 units fit inside, and the transition would be
+         * right to allow it. What must still be refused is a draft claiming
+         * units nobody has left.
+         */
+        quantity: 9,
+        production_run_ids: [runId],
+        run_provenance: "recorded",
+        submission_id: rival.id,
+      })
+
+      const res = await api
+        .post(
+          `/partners/payment-submissions/${draft.data.payment_submission.id}/submit`,
+          {},
+          { headers: partnerHeaders }
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain(runId)
+    })
+
+    it("lets an admin submit a Draft on the partner's behalf", async () => {
+      // Seven production Drafts need exactly this: the partner is not the only
+      // one who gets stuck.
+      const designId = await createDesign("Admin Submitted Draft")
+      await linkDesignToPartner(designId, partnerId)
+
+      const draft = await api.post(
+        "/admin/payment-submissions",
+        { partner_id: partnerId, design_ids: [designId], status: "Draft" },
+        adminHeaders
+      )
+
+      const res = await api.post(
+        `/admin/payment-submissions/${draft.data.payment_submission.id}/submit`,
+        { notes: "Chased by ops" },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(200)
+      expect(res.data.payment_submission.status).toBe("Pending")
+      expect(res.data.payment_submission.notes).toBe("Chased by ops")
+    })
+
+    it("makes the submitted claim reviewable, which a Draft never was", async () => {
+      // The end of the road the Draft could not reach: `review` refuses
+      // anything that is not Pending or Under_Review.
+      const designId = await createDesign("Draft To Review Design")
+      await linkDesignToPartner(designId, partnerId)
+
+      const draft = await api.post(
+        "/admin/payment-submissions",
+        { partner_id: partnerId, design_ids: [designId], status: "Draft" },
+        adminHeaders
+      )
+      const submissionId = draft.data.payment_submission.id
+
+      const beforeSubmit = await api
+        .post(
+          `/admin/payment-submissions/${submissionId}/review`,
+          { action: "reject", rejection_reason: "n/a" },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+      expect(beforeSubmit.status).toBe(400)
+
+      await api.post(
+        `/partners/payment-submissions/${submissionId}/submit`,
+        {},
+        { headers: partnerHeaders }
+      )
+
+      const afterSubmit = await api.post(
+        `/admin/payment-submissions/${submissionId}/review`,
+        { action: "reject", rejection_reason: "Wrong quantity" },
+        adminHeaders
+      )
+      expect(afterSubmit.status).toBe(200)
+    })
+  })
+
+  // ─── Deleting a machine-written Draft (#1604) ──────────────────────────────
+
+  describe("DELETE /admin/payment-submissions/:id (#1604)", () => {
+    it("removes a Draft and releases the design it was holding", async () => {
+      const designId = await createDesign("Deletable Draft Design")
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Deletable Draft Design")
+
+      const draft = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          status: "Draft",
+          production_run_ids: { [designId]: [runId] },
+        },
+        adminHeaders
+      )
+      const submissionId = draft.data.payment_submission.id
+
+      const del = await api.delete(
+        `/admin/payment-submissions/${submissionId}`,
+        adminHeaders
+      )
+      expect(del.status).toBe(200)
+      expect(del.data.deleted).toBe(true)
+
+      const gone = await api
+        .get(`/admin/payment-submissions/${submissionId}`, adminHeaders)
+        .catch((e: any) => e.response)
+      expect(gone.status).toBe(404)
+
+      /**
+       * 🔴 The lines have to go with it. Every claim guard reads
+       * `listPaymentSubmissionItems` joined to its submission, so a deleted
+       * header whose lines survived would keep blocking the very run it named
+       * — which is the failure this route exists to end.
+       */
+      const reclaim = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          production_run_ids: { [designId]: [runId] },
+        },
+        adminHeaders
+      )
+      expect(reclaim.status).toBe(201)
+    })
+
+    it("refuses to delete anything that has been submitted", async () => {
+      const designId = await createDesign("Undeletable Pending Design")
+      await linkDesignToPartner(designId, partnerId)
+
+      const created = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [designId] },
+        { headers: partnerHeaders }
+      )
+
+      const res = await api
+        .delete(
+          `/admin/payment-submissions/${created.data.payment_submission.id}`,
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain("Only a Draft")
+    })
+  })
+
+  // ─── Correcting a line (#1604) ─────────────────────────────────────────────
+
+  describe("PATCH /admin/payment-submissions/:id/items/:itemId (#1604)", () => {
+    async function draftWithLine(name: string, extra: Record<string, any> = {}) {
+      const designId = await createDesign(name)
+      await linkDesignToPartner(designId, partnerId)
+      const res = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          status: "Draft",
+          quantities: { [designId]: 1 },
+          unit_amounts: { [designId]: 850 },
+          ...extra,
+        },
+        adminHeaders
+      )
+      const detail = await readSubmission(res.data.payment_submission.id)
+      return {
+        designId,
+        submissionId: detail.id as string,
+        itemId: detail.items[0].id as string,
+      }
+    }
+
+    it("re-prices a line and moves the submission total with it", async () => {
+      // The `unmatched` lines `audit-partner-payout-quantity` reports and
+      // refuses to write: 850/unit billed once against a run of nine.
+      const { submissionId, itemId } = await draftWithLine("Underbilled Line")
+
+      const res = await api.patch(
+        `/admin/payment-submissions/${submissionId}/items/${itemId}`,
+        { quantity: 9 },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(200)
+      const line = res.data.payment_submission.items[0]
+      expect(Number(line.quantity)).toBe(9)
+      expect(Number(line.unit_amount)).toBe(850)
+      expect(Number(line.amount)).toBe(7650)
+      expect(Number(res.data.payment_submission.total_amount)).toBe(7650)
+    })
+
+    it("takes a typed total and clears the rate behind it", async () => {
+      const { submissionId, itemId } = await draftWithLine("Typed Total Line")
+
+      const res = await api.patch(
+        `/admin/payment-submissions/${submissionId}/items/${itemId}`,
+        { amount: 5000 },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(200)
+      const line = res.data.payment_submission.items[0]
+      expect(Number(line.amount)).toBe(5000)
+      // There is no recorded rate behind a typed total, and dividing it back
+      // out would invent one.
+      expect(line.unit_amount).toBeFalsy()
+    })
+
+    /**
+     * 🔴 THE case this route had to get right.
+     *
+     *     submit naming no runs        → refused by the guard
+     *     submit clean, then PATCH runs in → completely unguarded
+     *
+     * An edit route that writes `production_run_ids` without re-running the
+     * claim checks silently undoes #1602.
+     */
+    it("refuses to PATCH in a run another submission has already claimed", async () => {
+      const designId = await createDesign("Contested Run Design")
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Contested Run Design")
+
+      const holder = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [designId],
+          production_run_ids: { [designId]: [runId] },
+        },
+        adminHeaders
+      )
+      expect(holder.status).toBe(201)
+
+      // A second, clean submission on the same design — allowed while the
+      // first is merely Pending only because it names no runs.
+      const secondDesign = await createDesign("Contested Run Design B")
+      await linkDesignToPartner(secondDesign, partnerId)
+      const clean = await api.post(
+        "/admin/payment-submissions",
+        {
+          partner_id: partnerId,
+          design_ids: [secondDesign],
+          status: "Draft",
+        },
+        adminHeaders
+      )
+
+      const cleanDetail = await readSubmission(clean.data.payment_submission.id)
+
+      const res = await api
+        .patch(
+          `/admin/payment-submissions/${cleanDetail.id}/items/${cleanDetail.items[0].id}`,
+          { production_run_ids: [runId] },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      // Refused — the run belongs to another design AND is already claimed.
+      // Either refusal is correct; what must not happen is a 200.
+      expect(res.status).toBeGreaterThanOrEqual(400)
+    })
+
+    it("records the runs on a line that never named any, and says so", async () => {
+      const designId = await createDesign("Late Evidence Design")
+      await linkDesignToPartner(designId, partnerId)
+      const runId = await createCompletedRun(designId, "Late Evidence Design")
+
+      const draft = await api.post(
+        "/admin/payment-submissions",
+        { partner_id: partnerId, design_ids: [designId], status: "Draft" },
+        adminHeaders
+      )
+      const before = await readSubmission(draft.data.payment_submission.id)
+      expect(before.items[0].run_provenance).toBe("not_recorded")
+
+      const res = await api.patch(
+        `/admin/payment-submissions/${before.id}/items/${before.items[0].id}`,
+        { production_run_ids: [runId] },
+        adminHeaders
+      )
+
+      expect(res.status).toBe(200)
+      const line = res.data.payment_submission.items[0]
+      expect(line.run_provenance).toBe("recorded")
+      expect(line.production_run_ids).toEqual([runId])
+    })
+
+    it("refuses to rewrite a line once the money has moved", async () => {
+      const designId = await createDesign("Paid Line Design")
+      await linkDesignToPartner(designId, partnerId)
+
+      const created = await api.post(
+        "/partners/payment-submissions",
+        { design_ids: [designId] },
+        { headers: partnerHeaders }
+      )
+      const submissionId = created.data.payment_submission.id
+
+      const approved = await api.post(
+        `/admin/payment-submissions/${submissionId}/review`,
+        { action: "approve", payment_type: "Bank", paid_to_id: paidToId },
+        adminHeaders
+      )
+      expect(approved.status).toBe(200)
+
+      const detail = await readSubmission(submissionId)
+
+      const res = await api
+        .patch(
+          `/admin/payment-submissions/${submissionId}/items/${detail.items[0].id}`,
+          { quantity: 9 },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      // Rewriting a committed row makes our record disagree with what was
+      // actually agreed, without putting a rupee in anyone's hand.
+      //
+      // The status named here is `Approved`, not `Paid`: approval stops at
+      // Approved since #1639, and the line is locked from that moment — the
+      // amount is agreed even though the transfer has not been made yet.
+      expect(res.status).toBe(400)
+      expect(res.data.message).toContain("Approved")
+      expect(res.data.message).toContain("cannot be edited")
+    })
+
+    it("refuses an empty body rather than writing nothing and returning 200", async () => {
+      const { submissionId, itemId } = await draftWithLine("Empty Patch Line")
+
+      const res = await api
+        .patch(
+          `/admin/payment-submissions/${submissionId}/items/${itemId}`,
+          {},
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      expect(res.status).toBe(400)
+    })
+  })
+
+  // ─── Provenance runs are not billable labour (#1606) ───────────────────────
+
+  describe("payable-runs excludes retail provenance runs (#1606)", () => {
+    /**
+     * A run minted by `reconcile-provenance-runs` when a design-backed retail
+     * order ships from stock passes every filter payable-runs applies:
+     * completed, a design, a partner, a cost. No shop-floor work happened
+     * inside it, so offering it as billable invents labour — the money-side
+     * twin of the material-side rule `reconcileDesigns` has applied since
+     * #1123.
+     */
+    it("holds a provenance run back and says why, on both surfaces", async () => {
+      const designId = await createDesign("Provenance Run Design")
+      await linkDesignToPartner(designId, partnerId)
+
+      const realRun = await createCompletedRun(designId, "Provenance Run Design")
+      const provenanceRun = await createCompletedRun(
+        designId,
+        "Provenance Run Design",
+        {
+          metadata: {
+            source: "order.fulfillment_created",
+            design_backed: true,
+          },
+        }
+      )
+
+      const admin = await api.get(
+        `/admin/payment-submissions/payable-runs?partner_id=${partnerId}`,
+        adminHeaders
+      )
+      expect(admin.status).toBe(200)
+      const adminIds = admin.data.payable_runs.map((r: any) => r.run_id)
+      expect(adminIds).toContain(realRun)
+      expect(adminIds).not.toContain(provenanceRun)
+      expect(admin.data.excluded_runs).toEqual([
+        expect.objectContaining({
+          run_id: provenanceRun,
+          excluded_reason: "provenance_run",
+        }),
+      ])
+
+      const partnerRes = await api.get(
+        "/partners/payment-submissions/payable-runs",
+        { headers: partnerHeaders }
+      )
+      expect(partnerRes.status).toBe(200)
+      const partnerIds = partnerRes.data.payable_runs.map((r: any) => r.run_id)
+      expect(partnerIds).toContain(realRun)
+      expect(partnerIds).not.toContain(provenanceRun)
+      expect(partnerRes.data.excluded_count).toBe(1)
+    })
+  })
+
+  describe("Auth protection", () => {
+    it("should reject unauthenticated partner endpoints", async () => {
+      const endpoints = [
+        () => api.get("/partners/payment-submissions"),
+        () => api.get("/partners/payment-submissions/payable-runs"),
+        () =>
+          api.post("/partners/payment-submissions", {
+            design_ids: ["fake"],
+          }),
+      ]
+
+      for (const call of endpoints) {
+        const res = await call().catch((e: any) => e.response)
+        expect([401, 403]).toContain(res.status)
+      }
+    })
+
+    it("should reject unauthenticated admin endpoints", async () => {
+      const endpoints = [
+        () => api.get("/admin/payment-submissions"),
+        () => api.get("/admin/payment_reports/reconciliation"),
+      ]
+
+      for (const call of endpoints) {
+        const res = await call().catch((e: any) => e.response)
+        expect([401, 403]).toContain(res.status)
+      }
+    })
+  })
+
+  /**
+   * GOODS, as opposed to work (#1612).
+   *
+   * `create` has accepted `inventory_order_lines` since the guard was written —
+   * validator, partner-ownership check, read-side resolution — and NOTHING ever
+   * sent one. On production no payment carries an `inventory_order_id` at all,
+   * because no screen offered them. `assessInventoryOrderClaims` says as much
+   * itself: "inventory-order-sourced payouts have no integration coverage at
+   * all", which is why its money decision was extracted to be testable without
+   * standing up a submission.
+   *
+   * This exercises the path end to end, through the endpoint the screen reads.
+   */
+  describe("GET /admin/payment-submissions/payable-inventory-orders (#1612)", () => {
+    /**
+     * A minimal orderable item. A line must name an inventory item or a
+     * variant — neither is optional, because a line naming nothing is a line
+     * nobody can receive against (#1662).
+     */
+    /**
+     * `send-to-partner` creates the partner's order tasks from three templates
+     * BY NAME and refuses outright when they are absent. The test database has
+     * no seeded templates, so the only way to link an order to a partner
+     * through the API is to make them exist first.
+     */
+    const seedOrderTaskTemplates = async () => {
+      // 🔴 NOT memoised. The runner restores a DB SNAPSHOT before every test,
+      // so a flag saying "already seeded" outlives the rows it describes and
+      // the second case finds no templates at all.
+      for (const name of [
+        "partner-order-sent",
+        "partner-order-received",
+        "partner-order-shipped",
+      ]) {
+        await api
+          .post(
+            "/admin/task-templates",
+            {
+              name,
+              description: `Inventory order step: ${name}`,
+              priority: "medium",
+              estimated_duration: 30,
+              eventable: false,
+              notifiable: false,
+            },
+            adminHeaders
+          )
+          .catch((e: any) => e.response)
+          .then((r: any) => {
+            // Loudly. A template that silently fails to be created surfaces
+            // three calls later as "send-to-partner 400", which says nothing
+            // about the actual cause.
+            if (r && r.status !== 201 && r.status !== 200) {
+              throw new Error(
+                `task-template ${name} failed ${r.status}: ${JSON.stringify(r.data)}`
+              )
+            }
+          })
+      }
+    }
+
+    /** A stock location to receive into — required on every order. */
+    const seedStockLocation = async () => {
+      // Same snapshot rule as the templates above — created per test.
+      const res = await api
+        .post(
+          "/admin/stock-locations",
+          { name: `Payable Goods Warehouse ${Date.now()}` },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+      if (res.status !== 200 && res.status !== 201) {
+        throw new Error(`stock-location failed ${res.status}: ${JSON.stringify(res.data)}`)
+      }
+      return res.data.stock_location.id as string
+    }
+
+    const seedInventoryItem = async (tag: string) => {
+      const res = await api
+        .post(
+          "/admin/inventory-items",
+          { sku: `PAYIO-${tag}`, title: `Payable Goods ${tag}` },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+      if (res.status !== 200 && res.status !== 201) {
+        throw new Error(`inventory-item failed ${res.status}: ${JSON.stringify(res.data)}`)
+      }
+      return res.data.inventory_item.id
+    }
+
+    const seedOrderForPartner = async (
+      partnerId: string,
+      tag: string,
+      opts?: {
+        quantity?: number
+        price?: number
+        /**
+         * #2315 — nothing is billable before a receipt unless the order is
+         * paid in advance. Cases that bill an order they never received
+         * against (settlement, charges, ownership) are advance orders, so the
+         * rule under test there is not "when may it be billed".
+         */
+        advancePercent?: number
+      }
+    ) => {
+      await seedOrderTaskTemplates()
+      const inventoryItemId = await seedInventoryItem(tag)
+      const stockLocationId = await seedStockLocation()
+      const quantity = opts?.quantity ?? 4
+      const price = opts?.price ?? 250
+
+      const created = await api
+        .post(
+          "/admin/inventory-orders",
+          {
+            order_lines: [
+              { inventory_item_id: inventoryItemId, quantity, price },
+            ],
+            quantity,
+            total_price: quantity * price,
+            ...(opts?.advancePercent
+              ? { payment_terms: "advance", advance_percent: opts.advancePercent }
+              : {}),
+            status: "Pending",
+            expected_delivery_date: new Date().toISOString(),
+            order_date: new Date().toISOString(),
+            shipping_address: {},
+            stock_location_id: stockLocationId,
+          },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+      if (created.status !== 201) {
+        throw new Error(
+          `inventory-order create failed ${created.status}: ${JSON.stringify(created.data)}`
+        )
+      }
+      const orderId = created.data.inventoryOrder.id
+
+      const sent = await api
+        .post(
+          `/admin/inventory-orders/${orderId}/send-to-partner`,
+          { partnerId },
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+      if (sent.status !== 200 && sent.status !== 201) {
+        throw new Error(`send-to-partner failed ${sent.status}: ${JSON.stringify(sent.data)}`)
+      }
+      return orderId
+    }
+
+    it("requires a partner_id rather than listing everyone's orders", async () => {
+      const res = await api
+        .get(
+          "/admin/payment-submissions/payable-inventory-orders",
+          adminHeaders
+        )
+        .catch((e: any) => e.response)
+
+      // 400 from the validator, not a 200 with somebody else's goods on it.
+      expect(res.status).toBe(400)
+    })
+
+    /**
+     * 🔴 Non-vacuously: an order really exists, and it is really withheld.
+     *
+     * `expect([]).toEqual([])` against a database with no inventory orders in
+     * it passes whatever the route does — a fixture tidier than reality
+     * certifies the wrong code. So an order is created and sent to partner A,
+     * and B is asked for it.
+     *
+     * The failure this guards is not hypothetical: an id that resolves to no
+     * filter returns EVERY row rather than none, which is how one dangling key
+     * once served every tenant's data to every tenant.
+     */
+    it("withholds another partner's inventory orders, and shows the owner theirs", async () => {
+      const stamp = Date.now()
+      const ownerAuth = await createPartnerWithAuth(stamp)
+      const otherAuth = await createPartnerWithAuth(stamp + 1)
+      const ownerId = ownerAuth.partnerId
+      const otherId = otherAuth.partnerId
+
+      const orderId = await seedOrderForPartner(ownerId, `own-${stamp}`)
+
+      const owner = await api.get(
+        `/admin/payment-submissions/payable-inventory-orders?partner_id=${ownerId}`,
+        adminHeaders
+      )
+      expect(owner.status).toBe(200)
+      const ownerIds = owner.data.payable_inventory_orders.map(
+        (o: any) => o.inventory_order_id
+      )
+      expect(ownerIds).toContain(orderId)
+
+      const other = await api.get(
+        `/admin/payment-submissions/payable-inventory-orders?partner_id=${otherId}`,
+        adminHeaders
+      )
+      expect(other.status).toBe(200)
+      expect(
+        other.data.payable_inventory_orders.map(
+          (o: any) => o.inventory_order_id
+        )
+      ).not.toContain(orderId)
+    })
+
+    /**
+     * The order above has NO receipts. It is listed rather than hidden — "why
+     * isn't this order here" is the question an operator arrives with — but it
+     * bills nothing, because no receipt is a gap in the record and not a
+     * statement that the goods were free (#1612).
+     */
+    it("lists an order with no receipts, and refuses to bill it", async () => {
+      const stamp = Date.now() + 2
+      const auth = await createPartnerWithAuth(stamp)
+      const partnerId2 = auth.partnerId
+
+      const orderId = await seedOrderForPartner(partnerId2, `norec-${stamp}`)
+
+      const res = await api.get(
+        `/admin/payment-submissions/payable-inventory-orders?partner_id=${partnerId2}`,
+        adminHeaders
+      )
+      const row = res.data.payable_inventory_orders.find(
+        (o: any) => o.inventory_order_id === orderId
+      )
+      expect(row).toBeDefined()
+
+      // 🔑 The ORDERED total is reported — it is the guard's ceiling — while
+      // the billable amount is zero. Reporting 1000 as payable here is the
+      // #1612 overpayment in miniature.
+      expect(row.ordered_total).toBe(1000)
+      expect(row.receipts_total).toBe(0)
+      expect(row.amount).toBe(0)
+      expect(row.payable).toBe(false)
+    })
+
+    /**
+     * #1710 — the PARTNER's own door to the same question.
+     *
+     * The admin has been able to bill goods since #1612; a partner never
+     * could. Their create validator accepted `design_ids` and `task_ids` and
+     * nothing else, and no partner screen listed an inventory order — so the
+     * one party who knows what they delivered had to ask an admin. The only
+     * self-serve path left, `submit-payment` on the order, writes an
+     * `internal_payments` row that is NOT a claim and that no payout accounts
+     * for. That is where the two orphaned INR 10,000 rows came from.
+     */
+    describe("GET /partners/payment-submissions/payable-inventory-orders (#1710)", () => {
+      it("401s without partner auth, rather than listing everyone's goods", async () => {
+        const res = await api
+          .get("/partners/payment-submissions/payable-inventory-orders")
+          .catch((e: any) => e.response)
+
+        expect(res.status).toBe(401)
+      })
+
+      /**
+       * 🔴 Non-vacuously. An order really exists and really belongs to A, and
+       * B is asked for it with B's own token. There is no `partner_id`
+       * parameter on this route at all — the scope comes from the auth
+       * context, which is the whole of the security boundary.
+       */
+      it("shows the owner their order and withholds it from another partner", async () => {
+        const stamp = Date.now() + 10
+        const owner = await createPartnerWithAuth(stamp)
+        const other = await createPartnerWithAuth(stamp + 1)
+
+        const orderId = await seedOrderForPartner(
+          owner.partnerId,
+          `pown-${stamp}`
+        )
+
+        const mine = await api.get(
+          "/partners/payment-submissions/payable-inventory-orders",
+          { headers: owner.partnerHeaders }
+        )
+        expect(mine.status).toBe(200)
+        expect(
+          mine.data.payable_inventory_orders.map(
+            (o: any) => o.inventory_order_id
+          )
+        ).toContain(orderId)
+
+        const theirs = await api.get(
+          "/partners/payment-submissions/payable-inventory-orders",
+          { headers: other.partnerHeaders }
+        )
+        expect(theirs.status).toBe(200)
+        expect(
+          theirs.data.payable_inventory_orders.map(
+            (o: any) => o.inventory_order_id
+          )
+        ).not.toContain(orderId)
+      })
+
+      /**
+       * 🔑 One question, one answer. The admin and partner routes read the
+       * same lib, so the receipts rule, the ordered-total ceiling and the cap
+       * flag cannot drift apart between them — which is exactly what happened
+       * when `apps/partner-ui` kept a private copy of `foldPartnerBilling`.
+       */
+      it("answers identically to the admin route for the same partner", async () => {
+        const stamp = Date.now() + 20
+        const owner = await createPartnerWithAuth(stamp)
+        const orderId = await seedOrderForPartner(
+          owner.partnerId,
+          `psame-${stamp}`
+        )
+
+        const asPartner = await api.get(
+          "/partners/payment-submissions/payable-inventory-orders",
+          { headers: owner.partnerHeaders }
+        )
+        const asAdmin = await api.get(
+          `/admin/payment-submissions/payable-inventory-orders?partner_id=${owner.partnerId}`,
+          adminHeaders
+        )
+
+        const pick = (data: any) =>
+          data.payable_inventory_orders.find(
+            (o: any) => o.inventory_order_id === orderId
+          )
+
+        expect(pick(asPartner.data)).toEqual(pick(asAdmin.data))
+      })
+    })
+
+    /**
+     * #1710 — a partner BILLING for goods, which the create route refused
+     * outright until now ("At least one design or task is required").
+     */
+    describe("POST /partners/payment-submissions — inventory_order_lines (#1710)", () => {
+      it("refuses an order that belongs to ANOTHER partner", async () => {
+        const stamp = Date.now() + 30
+        const owner = await createPartnerWithAuth(stamp)
+        const thief = await createPartnerWithAuth(stamp + 1)
+
+        const orderId = await seedOrderForPartner(
+          owner.partnerId,
+          `pthief-${stamp}`
+        )
+
+        const res = await api
+          .post(
+            "/partners/payment-submissions",
+            {
+              inventory_order_lines: [
+                { inventory_order_id: orderId, amount: 500 },
+              ],
+            },
+            { headers: thief.partnerHeaders }
+          )
+          .catch((e: any) => e.response)
+
+        expect(res.status).toBe(400)
+        expect(res.data.message).toContain("does not belong to this partner")
+      })
+
+      /**
+       * 🔴 The hole this route would have opened.
+       *
+       * The ownership guard read `if (ownerId && ownerId !== partner_id)`, so
+       * an order with NO partner link satisfied it by having nothing to
+       * compare — and 8 of 16 orders in a dev database have no link. That was
+       * survivable while only an admin naming an explicit `partner_id` could
+       * reach the step. It stopped being survivable the moment a partner
+       * could. A missing id is not permission; it is a missing answer.
+       */
+      it("refuses an order linked to NO partner at all", async () => {
+        const stamp = Date.now() + 40
+        const partner = await createPartnerWithAuth(stamp)
+
+        // Deliberately NOT sent to any partner.
+        const inventoryItemId = await seedInventoryItem(`orphan-${stamp}`)
+        const stockLocationId = await seedStockLocation()
+        const created = await api.post(
+          "/admin/inventory-orders",
+          {
+            order_lines: [
+              { inventory_item_id: inventoryItemId, quantity: 4, price: 250 },
+            ],
+            quantity: 4,
+            total_price: 1000,
+            status: "Pending",
+            expected_delivery_date: new Date().toISOString(),
+            order_date: new Date().toISOString(),
+            shipping_address: {},
+            stock_location_id: stockLocationId,
+          },
+          adminHeaders
+        )
+        const orphanId = created.data.inventoryOrder.id
+
+        const res = await api
+          .post(
+            "/partners/payment-submissions",
+            {
+              inventory_order_lines: [
+                { inventory_order_id: orphanId, amount: 500 },
+              ],
+            },
+            { headers: partner.partnerHeaders }
+          )
+          .catch((e: any) => e.response)
+
+        expect(res.status).toBe(400)
+        expect(res.data.message).toContain("not linked to any partner")
+      })
+
+      it("creates a goods-sourced submission a partner can see on their own list", async () => {
+        const stamp = Date.now() + 50
+        const owner = await createPartnerWithAuth(stamp)
+        const orderId = await seedOrderForPartner(
+          owner.partnerId,
+          `pbill-${stamp}`,
+          { advancePercent: 100 }
+        )
+
+        const res = await api
+          .post(
+            "/partners/payment-submissions",
+            {
+              // An explicit amount on a 100% ADVANCE order (#2315): nothing
+              // has been received, so only its terms make it billable.
+              inventory_order_lines: [
+                { inventory_order_id: orderId, amount: 600 },
+              ],
+              notes: "Cotton delivered in July",
+            },
+            { headers: owner.partnerHeaders }
+          )
+          .catch((e: any) => e.response)
+
+        expect(res.status).toBe(201)
+
+        const submission = res.data.payment_submission
+        expect(Number(submission.total_amount)).toBe(600)
+
+        /**
+         * 🔑 The LINE carries the order, at `source_type: "inventory_order"`.
+         * Without that the partner detail screen has nothing to render and the
+         * ledger cannot tell which order the payout bills — which is the join
+         * #1710 needs to warn on money already recorded against it.
+         */
+        const line = (submission.items || [])[0]
+        expect(line.source_type).toBe("inventory_order")
+        expect(line.inventory_order_id).toBe(orderId)
+      })
+
+      /**
+       * 🔴 The prod shape this warning exists for.
+       *
+       * `inv_order_01KKB850WN…` (Parmar): ordered 9,800, receipts 5,800,
+       * claimed **0**, and INR 9,800 PAID since March 2026. The billable
+       * ceiling measures claims against the ordered total and has no term for
+       * payments, so the route offered 5,800 of an order already settled in
+       * full — on a screen a partner can now reach.
+       */
+      it("reports money already PAID against an order it still offers to bill", async () => {
+        const stamp = Date.now() + 60
+        const owner = await createPartnerWithAuth(stamp)
+        const orderId = await seedOrderForPartner(
+          owner.partnerId,
+          `precorded-${stamp}`
+        )
+
+        const before = await api.get(
+          "/partners/payment-submissions/payable-inventory-orders",
+          { headers: owner.partnerHeaders }
+        )
+        const clean = before.data.payable_inventory_orders.find(
+          (o: any) => o.inventory_order_id === orderId
+        )
+        // The control: nothing paid yet, so nothing to warn about.
+        expect(clean.recorded_total).toBe(0)
+        expect(clean.recorded_covers_amount).toBe(false)
+
+        // Record a payment against the order — the exact call the inventory
+        // order's "Add payment" form makes, and the one that made #1710.
+        const paid = await api
+          .post(
+            "/admin/payments/link",
+            {
+              payment: {
+                amount: 1000,
+                status: "Completed",
+                payment_type: "Bank",
+                payment_date: new Date().toISOString(),
+              },
+              inventoryOrderIds: [orderId],
+            },
+            adminHeaders
+          )
+          .catch((e: any) => e.response)
+        expect(paid.status).toBe(201)
+
+        const after = await api.get(
+          "/partners/payment-submissions/payable-inventory-orders",
+          { headers: owner.partnerHeaders }
+        )
+        const row = after.data.payable_inventory_orders.find(
+          (o: any) => o.inventory_order_id === orderId
+        )
+
+        expect(row.recorded_total).toBe(1000)
+
+        /**
+         * ⚠️ And the offer is UNCHANGED. The warning is reported, never netted:
+         * a payment on an order is not necessarily an advance against a payout,
+         * and silently reducing what a partner may bill is the underpayment
+         * this codebase keeps producing (#1596, #1616, #1679).
+         */
+        expect(row.ordered_total).toBe(clean.ordered_total)
+        expect(row.remaining).toBe(clean.remaining)
+        expect(row.amount).toBe(clean.amount)
+      })
+
+      /**
+       * #1710 — stating that an EXISTING payment settles a payout, which is
+       * what makes a PARTIAL payout expressible.
+       *
+       * Parmar's payout is INR 28,200 with INR 20,000 moved. `Approved` reports
+       * 0 paid and 28,200 outstanding — the reading that pays someone twice;
+       * `Paid` would claim 28,200 moved when 8,200 is still owed. Neither is
+       * true, and linking is how a human says which.
+       */
+      describe("POST /admin/payments/:id/settles (#1710)", () => {
+        const recordPayment = async (orderId: string, amount: number) => {
+          const res = await api
+            .post(
+              "/admin/payments/link",
+              {
+                payment: {
+                  amount,
+                  status: "Completed",
+                  payment_type: "Bank",
+                  payment_date: new Date().toISOString(),
+                },
+                inventoryOrderIds: [orderId],
+              },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(res.status).toBe(201)
+          return res.data.payment.id as string
+        }
+
+        const billOrder = async (partnerHeaders: any, orderId: string, amount: number) => {
+          const res = await api
+            .post(
+              "/partners/payment-submissions",
+              {
+                inventory_order_lines: [
+                  { inventory_order_id: orderId, amount },
+                ],
+              },
+              { headers: partnerHeaders }
+            )
+            .catch((e: any) => e.response)
+          expect(res.status).toBe(201)
+          return res.data.payment_submission.id as string
+        }
+
+        const ledger = async (partnerId: string) => {
+          const res = await api.get(
+            `/admin/payments/partners/${partnerId}/ledger`,
+            adminHeaders
+          )
+          expect(res.status).toBe(200)
+          return res.data.totals
+        }
+
+        it("settles a payout in PART — the reading neither status could give", async () => {
+          const stamp = Date.now() + 70
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `psettle-${stamp}`, { advancePercent: 100 })
+
+          const submissionId = await billOrder(owner.partnerHeaders, orderId, 1000)
+          const paymentId = await recordPayment(orderId, 400)
+
+          // Before linking: the money is visible but settles nothing.
+          const before = await ledger(owner.partnerId)
+          expect(before.billed).toBe(1000)
+          expect(before.paid).toBe(0)
+          expect(before.outstanding).toBe(1000)
+          expect(before.recorded).toBe(400)
+          // …and it WARNS, because a payout still bills that order.
+          expect(before.recorded_against_open).toBe(400)
+
+          const link = await api
+            .post(
+              `/admin/payments/${paymentId}/settles`,
+              { payment_submission_id: submissionId },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(link.status).toBe(200)
+
+          // After: 400 of 1,000 is settled and only 600 is owed.
+          const after = await ledger(owner.partnerId)
+          expect(after.billed).toBe(1000)
+          expect(after.paid).toBe(400)
+          expect(after.outstanding).toBe(600)
+          /**
+           * 🔑 And it stops warning: the money is no longer unmatched, it is
+           * accounted for. Reporting it as both settled AND a double-pay risk
+           * would contradict itself.
+           */
+          expect(after.recorded_against_open).toBe(0)
+        })
+
+        it("is idempotent — re-stating the same fact is not a 500", async () => {
+          /**
+           * ⚠️ `link.create` raises on the composite primary key, so a repeated
+           * call would 500 without the dismiss-first (#1710).
+           */
+          const stamp = Date.now() + 80
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `pidem-${stamp}`, { advancePercent: 100 })
+          const submissionId = await billOrder(owner.partnerHeaders, orderId, 1000)
+          const paymentId = await recordPayment(orderId, 400)
+
+          for (const _ of [1, 2]) {
+            const res = await api
+              .post(
+                `/admin/payments/${paymentId}/settles`,
+                { payment_submission_id: submissionId },
+                adminHeaders
+              )
+              .catch((e: any) => e.response)
+            expect(res.status).toBe(200)
+          }
+
+          // Linked once, counted once.
+          expect((await ledger(owner.partnerId)).paid).toBe(400)
+        })
+
+        it("takes the statement back, and the money returns to unmatched", async () => {
+          const stamp = Date.now() + 90
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `punlink-${stamp}`, { advancePercent: 100 })
+          const submissionId = await billOrder(owner.partnerHeaders, orderId, 1000)
+          const paymentId = await recordPayment(orderId, 400)
+
+          await api.post(
+            `/admin/payments/${paymentId}/settles`,
+            { payment_submission_id: submissionId },
+            adminHeaders
+          )
+          expect((await ledger(owner.partnerId)).paid).toBe(400)
+
+          const res = await api
+            .delete(
+              `/admin/payments/${paymentId}/settles?payment_submission_id=${submissionId}`,
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(res.status).toBe(200)
+
+          const after = await ledger(owner.partnerId)
+          expect(after.paid).toBe(0)
+          expect(after.outstanding).toBe(1000)
+          expect(after.recorded_against_open).toBe(400)
+        })
+
+        it("refuses a payout that does not exist, rather than linking to nothing", async () => {
+          const stamp = Date.now() + 100
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `pnosub-${stamp}`)
+          const paymentId = await recordPayment(orderId, 400)
+
+          const res = await api
+            .post(
+              `/admin/payments/${paymentId}/settles`,
+              { payment_submission_id: "ps_does_not_exist" },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).toBe(404)
+        })
+
+        it("accepts payment_submission_id at all — the route ordering trap", async () => {
+          /**
+           * 🔴 `/admin/payments/:id` POST carries a `.strict()` validator and
+           * matching is prefix-based, so if the settles entry were registered
+           * AFTER it, this body would be rejected as an unrecognised field —
+           * a 400 that reads like a bad request rather than a mis-ordered
+           * route. This case exists to fail loudly if the order is disturbed.
+           */
+          const stamp = Date.now() + 110
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `porder-${stamp}`, { advancePercent: 100 })
+          const submissionId = await billOrder(owner.partnerHeaders, orderId, 1000)
+          const paymentId = await recordPayment(orderId, 400)
+
+          const res = await api
+            .post(
+              `/admin/payments/${paymentId}/settles`,
+              { payment_submission_id: submissionId },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).not.toBe(400)
+          expect(res.status).toBe(200)
+        })
+      })
+
+      /**
+       * #1737 — stating that an EXISTING payment was recorded against an
+       * inventory order. The mirror of `/settles`, one entity over.
+       *
+       * 🔴 The measured gap: `inv_order_01K5QSCSK…` on production reads
+       * `recorded_total: 0` and is offered at its full 56,856.94 while 58,000
+       * has already been paid against it in two unlinked payments. Nothing
+       * could put a payment there — `inventoryOrderIds` writes only at
+       * creation, `UpdatePaymentSchema` is `.strict()`, and the backfill job
+       * only walks payments that came through a payout.
+       */
+      describe("POST /admin/payments/:id/records-against (#1737)", () => {
+        /** A payment with NO order link — the historical row this route is for. */
+        const recordStandalonePayment = async (
+          partnerId: string,
+          amount: number
+        ) => {
+          const res = await api
+            .post(
+              "/admin/payments/link",
+              {
+                payment: {
+                  amount,
+                  status: "Completed",
+                  payment_type: "Bank",
+                  payment_date: new Date().toISOString(),
+                },
+                partnerIds: [partnerId],
+              },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(res.status).toBe(201)
+          return res.data.payment.id as string
+        }
+
+        const orderRow = async (partnerId: string, orderId: string) => {
+          const res = await api.get(
+            `/admin/payment-submissions/payable-inventory-orders?partner_id=${partnerId}`,
+            adminHeaders
+          )
+          expect(res.status).toBe(200)
+          return res.data.payable_inventory_orders.find(
+            (o: any) => o.inventory_order_id === orderId
+          )
+        }
+
+        it("arms the double-pay warning on an order money had already reached", async () => {
+          const stamp = Date.now() + 210
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `pra-${stamp}`)
+          const paymentId = await recordStandalonePayment(owner.partnerId, 400)
+
+          /**
+           * Before: the order has no idea. This is the production state of
+           * `inv_order_01K5QSCSK…` — paid, and reading as untouched.
+           */
+          const before = await orderRow(owner.partnerId, orderId)
+          expect(before.recorded_total).toBe(0)
+          expect(before.recorded_covers_amount).toBe(false)
+
+          const link = await api
+            .post(
+              `/admin/payments/${paymentId}/records-against`,
+              { inventory_order_id: orderId },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(link.status).toBe(200)
+
+          const after = await orderRow(owner.partnerId, orderId)
+          expect(after.recorded_total).toBe(400)
+        })
+
+        /**
+         * 🔴 Recording is NOT settling. `payable-inventory-orders` reports
+         * `recorded_total` and refuses to subtract it, because a payment on an
+         * order may be an advance rather than a discharge — netting silently
+         * underpays, which is this codebase's recurring failure mode.
+         */
+        it("reports the money without reducing what the order still offers", async () => {
+          const stamp = Date.now() + 220
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `prb-${stamp}`)
+          const paymentId = await recordStandalonePayment(owner.partnerId, 400)
+
+          const before = await orderRow(owner.partnerId, orderId)
+          await api.post(
+            `/admin/payments/${paymentId}/records-against`,
+            { inventory_order_id: orderId },
+            adminHeaders
+          )
+          const after = await orderRow(owner.partnerId, orderId)
+
+          expect(after.amount).toBe(before.amount)
+          expect(after.recorded_total).toBe(400)
+        })
+
+        it("is idempotent — re-stating the same fact is not a 500", async () => {
+          /**
+           * ⚠️ `link.create` raises on the composite primary key, so a repeat
+           * would 500 without the dismiss-first (#1129).
+           */
+          const stamp = Date.now() + 230
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `prc-${stamp}`)
+          const paymentId = await recordStandalonePayment(owner.partnerId, 400)
+
+          for (const _ of [1, 2]) {
+            const res = await api
+              .post(
+                `/admin/payments/${paymentId}/records-against`,
+                { inventory_order_id: orderId },
+                adminHeaders
+              )
+              .catch((e: any) => e.response)
+            expect(res.status).toBe(200)
+          }
+
+          // Linked once, counted once — not 800.
+          expect((await orderRow(owner.partnerId, orderId)).recorded_total).toBe(400)
+        })
+
+        it("takes the statement back", async () => {
+          const stamp = Date.now() + 240
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `prd-${stamp}`)
+          const paymentId = await recordStandalonePayment(owner.partnerId, 400)
+
+          await api.post(
+            `/admin/payments/${paymentId}/records-against`,
+            { inventory_order_id: orderId },
+            adminHeaders
+          )
+          expect((await orderRow(owner.partnerId, orderId)).recorded_total).toBe(400)
+
+          const res = await api
+            .delete(
+              `/admin/payments/${paymentId}/records-against?inventory_order_id=${orderId}`,
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(res.status).toBe(200)
+          expect((await orderRow(owner.partnerId, orderId)).recorded_total).toBe(0)
+        })
+
+        /**
+         * 🔴 The guard that matters. Existence checks alone let partner A's
+         * money silence the double-pay warning on partner B's order — and a
+         * bulk reconciliation pass is exactly where an id gets typed wrong.
+         * This route exists because of such a pass.
+         */
+        it("refuses to record one partner's payment against another's order", async () => {
+          const stamp = Date.now() + 250
+          const a = await createPartnerWithAuth(stamp)
+          const b = await createPartnerWithAuth(stamp + 1)
+          const bOrderId = await seedOrderForPartner(b.partnerId, `pre-${stamp}`)
+          const aPaymentId = await recordStandalonePayment(a.partnerId, 400)
+
+          const res = await api
+            .post(
+              `/admin/payments/${aPaymentId}/records-against`,
+              { inventory_order_id: bOrderId },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).toBe(400)
+          // And nothing was written.
+          expect((await orderRow(b.partnerId, bOrderId)).recorded_total).toBe(0)
+        })
+
+        it("refuses an order that does not exist, rather than linking to nothing", async () => {
+          const stamp = Date.now() + 260
+          const owner = await createPartnerWithAuth(stamp)
+          const paymentId = await recordStandalonePayment(owner.partnerId, 400)
+
+          const res = await api
+            .post(
+              `/admin/payments/${paymentId}/records-against`,
+              { inventory_order_id: "inv_order_does_not_exist" },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).toBe(404)
+        })
+
+        it("accepts inventory_order_id at all — the route ordering trap", async () => {
+          /**
+           * 🔴 `/admin/payments/:id` POST carries a `.strict()` validator and
+           * matching is prefix-based. Registered after it, this body would be
+           * rejected as an unrecognised field — a 400 that reads like a bad
+           * request rather than a mis-ordered route.
+           */
+          const stamp = Date.now() + 270
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `prf-${stamp}`)
+          const paymentId = await recordStandalonePayment(owner.partnerId, 400)
+
+          const res = await api
+            .post(
+              `/admin/payments/${paymentId}/records-against`,
+              { inventory_order_id: orderId },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).not.toBe(400)
+          expect(res.status).toBe(200)
+        })
+      })
+
+      /**
+       * #1737 — amounts on an order that are not goods. Three turned up in one
+       * reconciliation with no home: 200 of tax, 1,960 of shipping, an 829
+       * write-off. `metadata` was the only writable place, which is the trap
+       * #1557 closed.
+       */
+      describe("POST /admin/inventory-orders/:id/charges (#1737)", () => {
+        const orderRow = async (partnerId: string, orderId: string) => {
+          const res = await api.get(
+            `/admin/payment-submissions/payable-inventory-orders?partner_id=${partnerId}`,
+            adminHeaders
+          )
+          expect(res.status).toBe(200)
+          return res.data.payable_inventory_orders.find(
+            (o: any) => o.inventory_order_id === orderId
+          )
+        }
+
+        /**
+         * 🔴 The property that makes adding a term to a live money guard safe:
+         * an order with no charges is EXACTLY what it was before.
+         */
+        it("leaves an order with no charges exactly as it was", async () => {
+          const stamp = Date.now() + 310
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chg0-${stamp}`)
+
+          const row = await orderRow(owner.partnerId, orderId)
+          expect(row.charges_total).toBe(0)
+          expect(row.payable_ceiling).toBe(row.ordered_total)
+        })
+
+        it("raises the ceiling by tax, and says so without touching ordered_total", async () => {
+          const stamp = Date.now() + 320
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chg1-${stamp}`)
+          const before = await orderRow(owner.partnerId, orderId)
+
+          const res = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/charges`,
+              { type: "tax", amount: 200 },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(res.status).toBe(201)
+
+          const after = await orderRow(owner.partnerId, orderId)
+          expect(after.charges_total).toBe(200)
+          /** 🔑 GOODS is unchanged — the field did not silently widen. */
+          expect(after.ordered_total).toBe(before.ordered_total)
+          expect(after.payable_ceiling).toBe(before.payable_ceiling + 200)
+        })
+
+        it("lowers the ceiling by a discount", async () => {
+          const stamp = Date.now() + 330
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chg2-${stamp}`)
+          const before = await orderRow(owner.partnerId, orderId)
+
+          const res = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/charges`,
+              { type: "discount", amount: 100, note: "settled short by agreement" },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(res.status).toBe(201)
+
+          const after = await orderRow(owner.partnerId, orderId)
+          expect(after.charges_total).toBe(-100)
+          expect(after.payable_ceiling).toBe(before.payable_ceiling - 100)
+        })
+
+        /**
+         * 🔴 The 829 write-off sat as an unexplained gap and read as an
+         * OVERpayment until a human remembered the shipping. A reduction with
+         * no reason is indistinguishable from an underpayment.
+         */
+        it("refuses a reduction that does not say why", async () => {
+          const stamp = Date.now() + 340
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chg3-${stamp}`)
+
+          const res = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/charges`,
+              { type: "discount", amount: 100 },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).toBe(400)
+          expect((await orderRow(owner.partnerId, orderId)).charges_total).toBe(0)
+        })
+
+        /** A raise needs no note — tax is self-explanatory and always owed. */
+        it("does not demand a reason for a charge that raises what is owed", async () => {
+          const stamp = Date.now() + 350
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chg4-${stamp}`)
+
+          const res = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/charges`,
+              { type: "shipping", amount: 1960 },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).toBe(201)
+        })
+
+        /**
+         * ⚠️ The amount is always positive; the TYPE carries the direction. A
+         * signed amount would let one typo turn an obligation into a reduction.
+         */
+        it("refuses a negative amount rather than inferring a direction from it", async () => {
+          const stamp = Date.now() + 360
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chg5-${stamp}`)
+
+          const res = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/charges`,
+              { type: "tax", amount: -200 },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).toBe(400)
+        })
+
+        /**
+         * 🔴 The whole point: the screen and the write guard must agree. A tax
+         * charge has to make the claim `create` accepts LARGER, or the partner
+         * is silently short of the tax they invoiced.
+         */
+        it("lets a claim reach the tax the partner invoiced", async () => {
+          const stamp = Date.now() + 370
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chg6-${stamp}`, { advancePercent: 100 })
+          const row = await orderRow(owner.partnerId, orderId)
+          const goods = row.ordered_total
+
+          // Without the charge, billing goods + 50 is refused by the guard.
+          const refused = await api
+            .post(
+              "/partners/payment-submissions",
+              {
+                inventory_order_lines: [
+                  { inventory_order_id: orderId, amount: goods + 50 },
+                ],
+              },
+              { headers: owner.partnerHeaders }
+            )
+            .catch((e: any) => e.response)
+          expect(refused.status).toBe(400)
+
+          await api.post(
+            `/admin/inventory-orders/${orderId}/charges`,
+            { type: "tax", amount: 50 },
+            adminHeaders
+          )
+
+          // With it recorded, the same claim is accepted.
+          const accepted = await api
+            .post(
+              "/partners/payment-submissions",
+              {
+                inventory_order_lines: [
+                  { inventory_order_id: orderId, amount: goods + 50 },
+                ],
+              },
+              { headers: owner.partnerHeaders }
+            )
+            .catch((e: any) => e.response)
+          expect(accepted.status).toBe(201)
+        })
+      })
+
+      /**
+       * #2315 — WHEN a supplier may be paid. The live case: Bhuttico wants the
+       * whole Chupa wool order paid before it ships. Before this, a payout on
+       * an undelivered order passed with any typed amount and nothing said
+       * whether that was an advance or a mistake.
+       */
+      describe("supplier payment terms (#2315)", () => {
+        const orderRow = async (partnerId: string, orderId: string) => {
+          const res = await api.get(
+            `/admin/payment-submissions/payable-inventory-orders?partner_id=${partnerId}`,
+            adminHeaders
+          )
+          expect(res.status).toBe(200)
+          return res.data.payable_inventory_orders.find(
+            (o: any) => o.inventory_order_id === orderId
+          )
+        }
+
+        const bill = (headers: any, orderId: string, amount?: number) =>
+          api
+            .post(
+              "/partners/payment-submissions",
+              {
+                inventory_order_lines: [
+                  amount == null
+                    ? { inventory_order_id: orderId }
+                    : { inventory_order_id: orderId, amount },
+                ],
+              },
+              { headers }
+            )
+            .catch((e: any) => e.response)
+
+        it("refuses to bill a pay-on-receipt order before anything is received", async () => {
+          const stamp = Date.now() + 610
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `terms0-${stamp}`)
+
+          const row = await orderRow(owner.partnerId, orderId)
+          expect(row.payment_terms).toBe("on_receipt")
+          expect(row.amount).toBe(0)
+          expect(row.is_advance).toBe(false)
+
+          const res = await bill(owner.partnerHeaders, orderId, 500)
+          expect(res.status).toBe(400)
+          expect(res.data.message).toContain("paid on receipt")
+        })
+
+        it("offers and bills a 50% advance, and no more, before delivery", async () => {
+          const stamp = Date.now() + 620
+          const owner = await createPartnerWithAuth(stamp)
+          // 4 × 250 = 1,000 goods.
+          const orderId = await seedOrderForPartner(owner.partnerId, `terms50-${stamp}`, {
+            advancePercent: 50,
+          })
+
+          const row = await orderRow(owner.partnerId, orderId)
+          expect(row.payment_terms).toBe("advance")
+          expect(row.advance_percent).toBe(50)
+          expect(row.amount).toBe(500)
+          expect(row.is_advance).toBe(true)
+
+          // An amountless line defaults to the advance still unclaimed.
+          const first = await bill(owner.partnerHeaders, orderId)
+          expect(first.status).toBe(201)
+          expect(Number(first.data.payment_submission.total_amount)).toBe(500)
+          const line = (first.data.payment_submission.items || [])[0]
+          expect(line.cost_breakdown?.is_advance).toBe(true)
+
+          // The advance is spent: nothing more before the goods arrive.
+          const after = await orderRow(owner.partnerId, orderId)
+          expect(after.amount).toBe(0)
+          const second = await bill(owner.partnerHeaders, orderId, 1)
+          expect(second.status).toBe(400)
+          expect(second.data.message).toContain("50% advance")
+        })
+
+        it("sets terms on an existing order through the order edit", async () => {
+          const stamp = Date.now() + 630
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `termsput-${stamp}`)
+
+          const missingPct = await api
+            .put(
+              `/admin/inventory-orders/${orderId}`,
+              { payment_terms: "advance" },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(missingPct.status).toBe(400)
+
+          const set = await api
+            .put(
+              `/admin/inventory-orders/${orderId}`,
+              { payment_terms: "advance", advance_percent: 100 },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(set.status).toBe(200)
+          // Read the row back — a 200 is not proof it persisted.
+          expect(set.data.inventoryOrder.payment_terms).toBe("advance")
+          expect(set.data.inventoryOrder.advance_percent).toBe(100)
+
+          const row = await orderRow(owner.partnerId, orderId)
+          expect(row.amount).toBe(1000)
+          expect((await bill(owner.partnerHeaders, orderId, 1000)).status).toBe(201)
+        })
+
+        /**
+         * The J.P. Handloom shape: goods cut, 5% tax left at the old figure. A
+         * charge could only be added, so the fix was a second offsetting row.
+         */
+        it("corrects a stale tax charge in place, and reads it back", async () => {
+          const stamp = Date.now() + 640
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chgfix-${stamp}`)
+          const added = await api.post(
+            `/admin/inventory-orders/${orderId}/charges`,
+            { type: "tax", amount: 130 },
+            adminHeaders
+          )
+          const chargeId = added.data.charge.id
+
+          const fixed = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/charges/${chargeId}`,
+              { amount: 50, note: "5% of 1,000" },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(fixed.status).toBe(200)
+          expect(fixed.data.previous.amount).toBe(130)
+
+          const read = await api.get(`/admin/inventory-orders/${orderId}/charges`, adminHeaders)
+          expect(read.data.charges).toHaveLength(1)
+          expect(Number(read.data.charges[0].amount)).toBe(50)
+          expect(read.data.payable_ceiling).toBe(1050)
+        })
+
+        it("refuses a charge edit that would sink the ceiling below a live payout", async () => {
+          const stamp = Date.now() + 650
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chgsink-${stamp}`, {
+            advancePercent: 100,
+          })
+          const added = await api.post(
+            `/admin/inventory-orders/${orderId}/charges`,
+            { type: "tax", amount: 50 },
+            adminHeaders
+          )
+          const chargeId = added.data.charge.id
+          expect((await bill(owner.partnerHeaders, orderId, 1050)).status).toBe(201)
+
+          const lowered = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/charges/${chargeId}`,
+              { amount: 10 },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(lowered.status).toBe(400)
+          expect(lowered.data.message).toContain("already claim")
+
+          const removed = await api
+            .delete(`/admin/inventory-orders/${orderId}/charges/${chargeId}`, adminHeaders)
+            .catch((e: any) => e.response)
+          expect(removed.status).toBe(400)
+
+          const read = await api.get(`/admin/inventory-orders/${orderId}/charges`, adminHeaders)
+          expect(Number(read.data.charges[0].amount)).toBe(50)
+        })
+
+        it("removes a charge nobody has claimed against", async () => {
+          const stamp = Date.now() + 660
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `chgdel-${stamp}`)
+          const added = await api.post(
+            `/admin/inventory-orders/${orderId}/charges`,
+            { type: "shipping", amount: 80 },
+            adminHeaders
+          )
+          const removed = await api
+            .delete(
+              `/admin/inventory-orders/${orderId}/charges/${added.data.charge.id}`,
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(removed.status).toBe(200)
+          const read = await api.get(`/admin/inventory-orders/${orderId}/charges`, adminHeaders)
+          expect(read.data.charges).toHaveLength(0)
+        })
+      })
+
+      /**
+       * #1737 — assigning a partner to a HISTORICAL order without commissioning
+       * anything. `send-to-partner` is the only other writer of this link and
+       * it emits `inventory_order_assigned_to_partner` and parks
+       * `awaitOrderStart`/`awaitOrderCompletion` — right for new work, wrong for
+       * a delivery from five months ago.
+       */
+      describe("POST /admin/inventory-orders/:id/assign-partner (#1737)", () => {
+        /**
+         * An order created with NO partner link — the historical-record shape
+         * this route exists for. `seedOrderForPartner` cannot be used here: it
+         * goes through `send-to-partner`, which links the order as a side
+         * effect, and a test built on it would assert nothing.
+         */
+        const seedUnlinkedOrder = async (tag: string) => {
+          const inventoryItemId = await seedInventoryItem(tag)
+          const stockLocationId = await seedStockLocation()
+          const created = await api
+            .post(
+              "/admin/inventory-orders",
+              {
+                order_lines: [
+                  { inventory_item_id: inventoryItemId, quantity: 4, price: 250 },
+                ],
+                quantity: 4,
+                total_price: 1000,
+                status: "Pending",
+                expected_delivery_date: new Date().toISOString(),
+                order_date: new Date().toISOString(),
+                shipping_address: {},
+                stock_location_id: stockLocationId,
+              },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+          expect(created.status).toBe(201)
+          return created.data.inventoryOrder.id as string
+        }
+
+        const visibleTo = async (partnerId: string, orderId: string) => {
+          const list = await api.get(
+            `/admin/payment-submissions/payable-inventory-orders?partner_id=${partnerId}`,
+            adminHeaders
+          )
+          expect(list.status).toBe(200)
+          return list.data.payable_inventory_orders.some(
+            (o: any) => o.inventory_order_id === orderId
+          )
+        }
+
+        /**
+         * 🔑 Without the link an order is invisible in every partner-scoped
+         * view: `payable-inventory-orders` reaches orders THROUGH the partner,
+         * because there is no partner column on an inventory order.
+         */
+        it("makes an unlinked order visible to its partner", async () => {
+          const stamp = Date.now() + 410
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedUnlinkedOrder(`ap0-${stamp}`)
+
+          // It genuinely starts invisible — otherwise this asserts nothing.
+          expect(await visibleTo(owner.partnerId, orderId)).toBe(false)
+
+          const res = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/assign-partner`,
+              { partner_id: owner.partnerId },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).toBe(200)
+          /** Stated plainly on the response: nothing was commissioned. */
+          expect(res.data.notified).toBe(false)
+
+          expect(await visibleTo(owner.partnerId, orderId)).toBe(true)
+        })
+
+        it("is idempotent — re-stating the same assignment is not a 500", async () => {
+          const stamp = Date.now() + 420
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `ap1-${stamp}`)
+
+          for (const _ of [1, 2]) {
+            const res = await api
+              .post(
+                `/admin/inventory-orders/${orderId}/assign-partner`,
+                { partner_id: owner.partnerId },
+                adminHeaders
+              )
+              .catch((e: any) => e.response)
+            expect(res.status).toBe(200)
+          }
+        })
+
+        /**
+         * 🔴 Silently re-pointing an order would move a debt between partners,
+         * and the previous owner would simply stop seeing work they may already
+         * have billed.
+         */
+        it("refuses to move an order that already belongs to someone else", async () => {
+          const stamp = Date.now() + 430
+          const a = await createPartnerWithAuth(stamp)
+          const b = await createPartnerWithAuth(stamp + 1)
+          const orderId = await seedOrderForPartner(a.partnerId, `ap2-${stamp}`)
+
+          await api.post(
+            `/admin/inventory-orders/${orderId}/assign-partner`,
+            { partner_id: a.partnerId },
+            adminHeaders
+          )
+
+          const res = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/assign-partner`,
+              { partner_id: b.partnerId },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).toBe(400)
+        })
+
+        it("refuses a partner that does not exist", async () => {
+          const stamp = Date.now() + 440
+          const owner = await createPartnerWithAuth(stamp)
+          const orderId = await seedOrderForPartner(owner.partnerId, `ap3-${stamp}`)
+
+          const res = await api
+            .post(
+              `/admin/inventory-orders/${orderId}/assign-partner`,
+              { partner_id: "partner_does_not_exist" },
+              adminHeaders
+            )
+            .catch((e: any) => e.response)
+
+          expect(res.status).toBe(404)
+        })
+      })
+
+      it("still refuses a submission naming nothing at all", async () => {
+        const res = await api
+          .post(
+            "/partners/payment-submissions",
+            { notes: "pay me" },
+            { headers: partnerHeaders }
+          )
+          .catch((e: any) => e.response)
+
+        expect(res.status).toBe(400)
+      })
+    })
+  })
+})

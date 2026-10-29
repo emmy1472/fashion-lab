@@ -1,0 +1,87 @@
+import { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils"
+import { deleteSalesChannelsWorkflow } from "@medusajs/medusa/core-flows"
+import { validatePartnerStoreAccess } from "../../../../helpers"
+
+export const GET = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const { store } = await validatePartnerStoreAccess(
+    req.auth_context,
+    req.params.id,
+    req.scope
+  )
+
+  if (store.default_sales_channel_id !== req.params.channelId) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      "Sales channel not found for this store"
+    )
+  }
+
+  const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+  const { data: channels } = await query.graph({
+    entity: "sales_channels",
+    fields: ["*"],
+    filters: { id: req.params.channelId },
+  })
+
+  if (!channels?.[0]) {
+    throw new MedusaError(MedusaError.Types.NOT_FOUND, "Sales channel not found")
+  }
+
+  res.json({ sales_channel: channels[0] })
+}
+
+export const POST = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const { store } = await validatePartnerStoreAccess(
+    req.auth_context,
+    req.params.id,
+    req.scope
+  )
+
+  if (store.default_sales_channel_id !== req.params.channelId) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      "Sales channel not found for this store"
+    )
+  }
+
+  const body = req.body as Record<string, any>
+  const scService = req.scope.resolve(Modules.SALES_CHANNEL) as any
+  const updated = await scService.updateSalesChannels({
+    id: req.params.channelId,
+    ...body,
+  })
+
+  res.json({ sales_channel: updated })
+}
+
+export const DELETE = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const { store } = await validatePartnerStoreAccess(
+    req.auth_context,
+    req.params.id,
+    req.scope
+  )
+
+  if (store.default_sales_channel_id !== req.params.channelId) {
+    throw new MedusaError(
+      MedusaError.Types.NOT_FOUND,
+      "Sales channel not found for this store"
+    )
+  }
+
+  await deleteSalesChannelsWorkflow(req.scope).run({ input: { ids: [req.params.channelId] } })
+
+  // PARITY-NOTE: admin's DELETE envelope uses the hyphenated object name
+  // ("sales-channel"), not "sales_channel". Mirror it exactly so the wire
+  // contract matches @medusajs/medusa/dist/api/admin/sales-channels/[id]/route.js.
+  res.json({ id: req.params.channelId, object: "sales-channel", deleted: true })
+}

@@ -1,0 +1,74 @@
+// @ts-nocheck - Ignore all TypeScript errors in this file
+import { Mastra } from "@mastra/core/mastra";
+import { PostgresStore } from "@mastra/pg";
+import { seoWorkflow } from "./workflows/seo";
+import designValidationWorkflow from './workflows/designValidator';
+import productDescriptionWorkflow from './workflows/productDescription';
+import { imageExtractionWorkflow } from './workflows/imageExtraction';
+import { visualFlowCodegenWorkflow } from "./workflows/visualFlowCodegen";
+import { multiStepApiRequestWorkflow } from "./workflows/multiStepApiRequest";
+import { aiChatWorkflow } from "./workflows/aiChat";
+import { imageGenerationWorkflow } from "./workflows/imagegen";
+import { textileProductExtractionWorkflow } from "./workflows/textileProductExtraction"
+import { extractionEvalWorkflow } from "./workflows/extractionEval";
+import { sharedStorage } from "./memory";
+import {
+    seoAgent,
+    designAgent,
+    modelAgent,
+    productDescriptionAgent,
+    visualFlowCodegenAgent,
+    imageExtractionAgent,
+    generalChatAgent,
+} from "./agents";
+import { textileExtractionAgent } from "./agents/textileExtractionAgent";
+
+const mastraDisabled = process.env.MASTRA_DISABLED === "true"
+const mastraConnectionString = mastraDisabled ? undefined : (process.env.MASTRA_DATABASE_URL || process.env.DATABASE_URL)
+// See mastra/memory.ts — Mastra's pools are separate from Medusa's and
+// default to 10 each, which does not fit on a small Postgres.
+const mastraPoolMax = Number(process.env.MASTRA_PG_POOL_MAX) || undefined
+
+export const mastra = new Mastra({
+    agents: {
+        "seo-agent": seoAgent,
+        "design-agent": designAgent,
+        "model-agent": modelAgent,
+        "ProductDescriptionAgent": productDescriptionAgent,
+        "visual-flow-codegen-agent": visualFlowCodegenAgent,
+        "image-extraction-agent": imageExtractionAgent,
+        "general-chat-agent": generalChatAgent,
+        "textile-extraction-agent": textileExtractionAgent,
+    },
+    workflows: {
+        seoWorkflow,
+        designValidationWorkflow,
+        productDescriptionWorkflow,
+        imageExtractionWorkflow,
+        aiChatWorkflow,
+        visualFlowCodegenWorkflow,
+        multiStepApiRequestWorkflow,
+        imageGenerationWorkflow,
+        textileProductExtractionWorkflow,
+        extractionEvalWorkflow,
+    },
+    ...(sharedStorage
+        ? { storage: sharedStorage }
+        : (mastraConnectionString
+            ? { storage: new PostgresStore({ id: "mastra-storage", connectionString: mastraConnectionString, ...(mastraPoolMax ? { max: mastraPoolMax } : {}) }) }
+            : {})),
+    observability: {
+        default: {
+            enabled: true,
+        },
+    },
+})
+
+export const mastraStorageInit: Promise<boolean> = (async () => {
+    try {
+        const storage = mastra.getStorage?.()
+        return Boolean(storage)
+    } catch {
+        return false
+    }
+})()

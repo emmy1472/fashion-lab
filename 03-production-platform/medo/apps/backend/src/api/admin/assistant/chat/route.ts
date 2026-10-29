@@ -1,0 +1,503 @@
+/**
+ * POST /admin/assistant/chat
+ *
+ * Streaming chat endpoint for the admin assistant. The model drives the Admin
+ * API through the shared MCP tool registry (see ../../mcp/lib/registry) with
+ * three safety rails from the shared dispatcher:
+ *
+ *   - `dry_run` on any tool previews the request (and current object for writes)
+ *     without executing, so the model can inspect live data first.
+ *   - sensitive/destructive tools return `requires_confirmation` instead of
+ *     running; the UI surfaces an approval card and, on confirm, calls
+ *     POST /admin/mcp directly with `confirm: true`.
+ *   - dangerous (platform-destructive) tools additionally return
+ *     `requires_reason`; the admin must supply a reason (audited).
+ *
+ * Pipeline mirrors the partner assistant: resolve the chat model for the
+ * `ai_admin_assistant` role (DB-configured platform → OpenRouter free
+ * fallback), bind tools, `streamText(...)`, and pipe the UI message stream into
+ * the response. All /admin/* routes are admin-user authenticated by Medusa.
+ */
+import { AuthenticatedMedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import {
+  convertToModelMessages,
+  streamText,
+  stepCountIs,
+  tool,
+  jsonSchema,
+} from "ai"
+import { resolveRoleTextModel, logAiUsage } from "../../../../mastra/services/ai-platforms"
+import { dynamicFreeToolTextModel } from "../../../../mastra/providers/dynamic-text-model"
+import { foldSystemForProvider } from "../../../store/ai/chat/system-fold-lib"
+import { ADMIN_MCP_TOOLS, renderToolGuidance } from "../../mcp/lib/registry"
+import {
+  selectAdminToolSlice,
+  toolsInDomains,
+  widenedDomainsFromHistory,
+  toolDomain,
+  SELECTABLE_DOMAINS,
+} from "../../mcp/lib/tool-slice"
+import {
+  dispatchAdminTool,
+  buildToolInputSchema,
+  isSensitive,
+  isDangerous,
+  type AdminMcpContext,
+} from "../../mcp/lib/dispatch"
+import {
+  resolveAdminBaseUrl,
+  resolveAdminMcpScope,
+} from "../../mcp/lib/handler"
+import { mcpScopeToContextFlags } from "../../../../lib/mcp-scope"
+import { makeMcpLedgerSink } from "../../../../lib/mcp-ledger"
+import {
+  buildSystemPrompt,
+  domainSop,
+  extractContextFromTurn,
+  loadAndFormatContext,
+  resolveContextCache,
+  buildRunPlanTool,
+} from "../../../../lib/assistant-context"
+import { normaliseUiMessages } from "../../../../lib/assistant-messages"
+import { keepStreamAlive } from "../../../../lib/ai/stream-keepalive"
+import type { AdminAssistantChatReq } from "./validators"
+
+const FEATURE = "admin/assistant/chat"
+const ROLE = "ai_admin_assistant"
+
+/**
+ * Ceiling on a single tool result, in serialised bytes.
+ *
+ * A tool result is streamed to the client, stored in the thread, and sent back
+ * up on EVERY subsequent turn — so one large result is paid for repeatedly. A
+ * Data Plumbing sweep returns one `changes` row per affected record, which for
+ * a wide backfill runs to hundreds of kB and used to push the next request past
+ * the body limit ("Payload too large"). Raising that limit was the actual fix;
+ * this keeps a single job from silently eating the whole budget anyway.
+ *
+ * 64kB is far more than any result a human reads in a chat, and the model gets
+ * an explicit note that it was truncated rather than a silently short list.
+ */
+const MAX_TOOL_RESULT_BYTES = 64 * 1024
+
+/**
+ * Trim an oversized tool result to something a thread can carry.
+ *
+ * Arrays are the only thing that grows without bound here (`changes`, `runs`,
+ * result rows), so the biggest one is truncated and annotated. The summary,
+ * counts and every scalar field survive untouched — those are what the operator
+ * is reading, and dropping them to save bytes would defeat the point.
+ */
+export const capToolResult = (result: any): any => {
+  if (!result || typeof result !== "object") {
+    return result
+  }
+
+  const size = (v: unknown) => {
+    try {
+      return JSON.stringify(v)?.length ?? 0
+    } catch {
+      return 0
+    }
+  }
+
+  if (size(result) <= MAX_TOOL_RESULT_BYTES) {
+    return result
+  }
+
+  // Walk one level into the payload — tool results are `{ data: {...} }` or a
+  // flat object; either way the unbounded arrays sit at the top of one of them.
+  const trimContainer = (obj: any): any => {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+      return obj
+    }
+    const entries = Object.entries(obj)
+    const biggest = entries
+      .filter(([, v]) => Array.isArray(v) && v.length > 1)
+      .sort((a, b) => size(b[1]) - size(a[1]))[0]
+
+    if (!biggest) {
+      return obj
+    }
+
+    const [key, arr] = biggest as [string, unknown[]]
+    // Keep whatever prefix fits, always at least one row so the shape is legible.
+    let keep = arr.length
+    while (keep > 1 && size(arr.slice(0, keep)) > MAX_TOOL_RESULT_BYTES / 2) {
+      keep = Math.floor(keep / 2)
+    }
+
+    return {
+      ...obj,
+      [key]: arr.slice(0, keep),
+      truncated: {
+        field: key,
+        shown: keep,
+        total: arr.length,
+        note: `${key} was truncated to keep the conversation within its size budget. ${
+          arr.length - keep
+        } more row(s) exist — narrow the request, or read the full set via the audit log / admin UI.`,
+      },
+    }
+  }
+
+  const trimmed = trimContainer(result)
+  if (size(trimmed) <= MAX_TOOL_RESULT_BYTES) {
+    return trimmed
+  }
+  if (result.data && typeof result.data === "object") {
+    return { ...result, data: trimContainer(result.data) }
+  }
+  return trimmed
+}
+
+
+/**
+ * Tell the model an attachment EXISTS without sending a single pixel.
+ *
+ * The url is what makes it actionable: `read_image` and
+ * `extract_inventory_from_image` both take one, so the model can act on an image
+ * it cannot see, but only deliberately.
+ */
+const renderAttachments = (
+  attachments: NonNullable<AdminAssistantChatReq["attachments"]>
+): string =>
+  [
+    "",
+    "---",
+    `The operator attached ${attachments.length} file(s) to this message. You cannot see them.`,
+    "Read one only if this request actually requires it (see: Images the operator attaches).",
+    ...attachments.map(
+      (a, i) =>
+        `[attachment ${i + 1}] name=${a.name ?? "untitled"} type=${
+          a.mime_type ?? "unknown"
+        } url=${a.url}`
+    ),
+  ].join("\n")
+
+export const POST = async (
+  req: AuthenticatedMedusaRequest,
+  res: MedusaResponse
+) => {
+  const logger: any = req.scope.resolve(ContainerRegistrationKeys.LOGGER)
+  const body = (req as any).validatedBody as AdminAssistantChatReq
+
+  const resolved = await resolveRoleTextModel(req.scope as any, ROLE)
+  if (resolved.source === "free" && !process.env.OPENROUTER_API_KEY) {
+    res.status(503).json({
+      error:
+        "The admin assistant is not configured. Add a platform with role ai_admin_assistant in Settings → External Platforms, or set OPENROUTER_API_KEY.",
+    })
+    return
+  }
+
+  // Loopback context — forward the admin's auth so wrapped routes authenticate
+  // as the admin user. Writes/dangerous still require confirmation (+ reason)
+  // via the shared dispatcher; the scope flags gate visibility.
+  //
+  // The level is min(process ceiling, this principal's mcp_access_scope row),
+  // resolved exactly as the JSON-RPC endpoint does (#1306 Track C) — the two
+  // tool surfaces must not disagree about what a credential may reach. In
+  // practice this is the process ceiling, since the assistant is driven by a
+  // human admin and scope rows are written for machine credentials.
+  const { level: scopeLevel } = await resolveAdminMcpScope(req)
+  const scopeFlags = mcpScopeToContextFlags(scopeLevel)
+  const ctx: AdminMcpContext = {
+    baseUrl: resolveAdminBaseUrl(req),
+    bearer: req.get("authorization") || undefined,
+    cookie: req.get("cookie") || undefined,
+    ...scopeFlags,
+    surface: "admin",
+    observe: makeMcpLedgerSink(req.scope, {
+      id: (req as any).auth_context?.actor_id ?? null,
+      type: "admin",
+    }),
+  }
+  const writeEnabled = ctx.enableWrite !== false
+  const dangerousEnabled = ctx.enableDangerous === true
+  const sensitiveEnabled = ctx.enableSensitive !== false
+
+  // Bind the registry as AI-SDK tools. One source of truth (JSON Schema) feeds
+  // both this binding and the MCP endpoint's tools/list. Disabled tiers are
+  // hidden from the model entirely (and refused at dispatch as a backstop).
+  const enabled = ADMIN_MCP_TOOLS.filter(
+    (def) =>
+      (writeEnabled || !def.write) &&
+      (dangerousEnabled || !isDangerous(def)) &&
+      (sensitiveEnabled || !isSensitive(def))
+  )
+
+  const tools: Record<string, any> = Object.fromEntries(
+    enabled.map((def) => [
+      def.name,
+      tool({
+        description:
+          def.description +
+          (isDangerous(def)
+            ? " [dangerous: requires user confirmation AND a reason]"
+            : isSensitive(def)
+            ? " [sensitive: requires user confirmation]"
+            : "") +
+          renderToolGuidance(def),
+        inputSchema: jsonSchema(buildToolInputSchema(def)),
+        execute: async (input: any) =>
+          capToolResult(await dispatchAdminTool(ctx, def.name, input)),
+      }),
+    ])
+  )
+
+  // Normalise inbound UI messages — strip tool parts from history, then bound
+  // what we keep. This route accepts a 5 MB body deliberately (a thread that
+  // ran a Data Plumbing job replays tool parts far past Express's 100 kB
+  // default), but nothing used to stop that 5 MB being copied through parse →
+  // zod → normalise → convertToModelMessages → fold.
+  //
+  // `capToolResult` above does NOT cover this: it bounds one tool result on the
+  // way OUT, not a thread replaying dozens of prior turns back IN.
+  // See lib/assistant-messages for the ceilings and why they sit above real use.
+  const normalised = normaliseUiMessages(body.messages)
+  const messages = normalised.messages
+  if (normalised.bounded) {
+    logger.warn(
+      `[${FEATURE}] payload bounded: dropped ${normalised.droppedMessages} old message(s), ` +
+        `truncated ${normalised.truncatedParts} part(s). Conversation ${body.id ?? "unknown"}.`
+    )
+  }
+
+  // Attachments ride on the LAST user message — the turn they were sent with.
+  // Appended as text so every provider handles it identically; a provider that
+  // can't do multimodal parts is not a special case here, because we never send
+  // parts it would have to understand.
+  const attachments = body.attachments ?? []
+  if (attachments.length) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") {
+        messages[i].parts.push({ type: "text", text: renderAttachments(attachments) })
+        break
+      }
+    }
+  }
+
+  // ---- Per-ask registry slicing -------------------------------------------
+  // All ~100 tools stay BOUND (so any of them can still execute), but only the
+  // slice this ask needs is serialised to the provider via `activeTools`.
+  // Without this every turn re-sends the whole registry, which is both the
+  // dominant token cost of a conversation and — because the free rotator ranks
+  // by context length — a lever on which model answers.
+  //
+  // `activated` is the live slice. It starts from keyword matching on the recent
+  // conversation and can only ever GROW, via load_admin_tools below, so a bad
+  // initial guess costs one round trip rather than a capability.
+  const recentText = messages
+    .slice(-6)
+    .map((m: any) => m.parts.map((p: any) => p.text).join(" "))
+    .join("\n")
+
+  const initialSlice = selectAdminToolSlice(recentText, enabled)
+  const activated = new Set<string>(initialSlice.names)
+
+  // Carry forward whatever the model widened into earlier in this conversation.
+  // Keyword matching runs fresh every request and history arrives text-only, so
+  // without this a domain bought with a round trip on the previous turn is gone
+  // on this one — and "now do the same for the other one" pays for it twice.
+  const carried = widenedDomainsFromHistory(body.messages)
+  if (carried.length) {
+    toolsInDomains(carried, enabled).forEach((n) => activated.add(n))
+  }
+
+  logger.debug?.(
+    `[${FEATURE}] tool slice: ${activated.size}/${enabled.length} tools` +
+      ` (domains: ${initialSlice.domains.join(", ") || "none matched"}` +
+      `${carried.length ? `; carried: ${carried.join(", ")}` : ""})`
+  )
+
+  // ---- Prior context injection (cross-conversation cache) -----------------
+  // Read the domain-keyed cache for this principal and inject a thin "you
+  // already found this" block into the system prompt. Lets the model skip a
+  // re-fetch when the user repeats a task from a previous conversation.
+  const adminUserId = (req as any).auth_context?.actor_id ?? null
+  // Resolved defensively: the cache only ever saves a re-fetch, so it must
+  // never be able to fail the turn (see lib/assistant-context/resolve).
+  const cacheService = adminUserId ? resolveContextCache(req.scope, logger) : null
+  const activeDomains = initialSlice.domains.filter((d) => d !== "core")
+  const priorContext = cacheService
+    ? await loadAndFormatContext(
+        cacheService,
+        adminUserId,
+        "admin",
+        activeDomains
+      )
+    : undefined
+
+  // The escape hatch. Always active, so the model is never boxed in by a slice
+  // that guessed wrong — it names the domains it needs and they light up on the
+  // next step. This is also why the slice can be aggressive.
+  tools.load_admin_tools = tool({
+    description:
+      "Load the tools for one or more admin domains when the tool you need is not currently available to you. " +
+      `Valid domains: ${SELECTABLE_DOMAINS.join(", ")}. ` +
+      "Returns the names and descriptions of the tools that just became callable — call them on your next step. " +
+      "Use this instead of telling the user something is impossible.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        domains: {
+          type: "array",
+          items: { type: "string", enum: SELECTABLE_DOMAINS },
+          description: "The admin domains to load tools for.",
+        },
+      },
+      required: ["domains"],
+      additionalProperties: false,
+    }),
+    execute: async ({ domains }: { domains: string[] }) => {
+      const names = toolsInDomains(domains ?? [], enabled)
+      names.forEach((n) => activated.add(n))
+      // A domain widened into MID-RUN never got its SOP in the system prompt
+      // (that is fixed at streamText start), so deliver it here instead — the
+      // model reads it as part of the tool result and applies it next step.
+      const guidance = (domains ?? [])
+        .map((d) => domainSop("admin", d))
+        .filter(Boolean)
+        .join("\n\n")
+      return {
+        ok: true,
+        loaded: names.length,
+        domains: domains ?? [],
+        tools: enabled
+          .filter((d) => names.includes(d.name))
+          .map((d) => ({
+            name: d.name,
+            domain: toolDomain(d),
+            description: d.description,
+          })),
+        ...(guidance ? { guidance } : {}),
+      }
+    },
+  })
+  activated.add("load_admin_tools")
+
+  // Structured multi-step planning. The model can emit ONE plan instead of
+  // chaining tool calls itself; every step still goes through dispatchAdminTool
+  // (dry_run / reason rails + scope checks); a plan naming a tool that needs
+  // CONFIRMATION is refused whole, before anything runs (#1757). `resolve` steps consult
+  // the entity-memory cache so "customer by email" skips the lookup tool.
+  const resolveEntity = cacheService && adminUserId
+    ? (type: string, by: string, value: string) =>
+        cacheService.resolveEntityByKey(adminUserId, "admin", type, by, value)
+    : undefined
+  tools.run_plan = buildRunPlanTool({
+    ctx,
+    tools: enabled,
+    dispatch: (name, args) => dispatchAdminTool(ctx, name, args),
+    resolveEntity,
+    cap: capToolResult,
+  })
+  activated.add("run_plan")
+
+  // This assistant REQUIRES tool calling. The free rotator ranks by context
+  // length and can land on a text-only model, so on the free path use the
+  // tool-capable variant. A DB-configured platform for this role overrides this.
+  const chatModel =
+    resolved.source === "free" ? dynamicFreeToolTextModel : resolved.model
+
+  const systemPrompt = buildSystemPrompt("admin", {
+    domains: activeDomains,
+    hasImages: attachments.length > 0,
+  })
+  const folded = foldSystemForProvider(
+    resolved.providerType,
+    priorContext ? `${systemPrompt}\n\n${priorContext}` : systemPrompt,
+    messages
+  )
+  const startedAt = Date.now()
+
+  const usageBase = {
+    feature: FEATURE,
+    role: ROLE,
+    provider: resolved.providerType,
+    source: resolved.source,
+    platformId: resolved.platformId,
+    model: resolved.modelId,
+  } as const
+
+  let result
+  const MAX_CONSTRUCTION_ATTEMPTS = 2
+  for (let attempt = 1; attempt <= MAX_CONSTRUCTION_ATTEMPTS; attempt++) {
+    try {
+      result = streamText({
+        model: chatModel,
+        ...(folded.system ? { system: folded.system } : {}),
+        messages: convertToModelMessages(folded.messages as any),
+        tools,
+        // Re-read `activated` before every step so tools loaded via
+        // load_admin_tools become callable on the very next one.
+        prepareStep: () => ({ activeTools: [...activated] }),
+        stopWhen: stepCountIs(8),
+        temperature: 0.3,
+        maxRetries: 3,
+        onFinish: async ({ usage: u, toolResults }: any) => {
+          logAiUsage(logger, {
+            ...usageBase,
+            ok: true,
+            ms: Date.now() - startedAt,
+            tokens: u?.totalTokens,
+          })
+
+          // Fire-and-forget: cache what was found so the next conversation can
+          // skip the same fetch. A failure here is logged and swallowed — the
+          // conversation already completed, and a missing cache entry is
+          // harmless.
+          if (cacheService && adminUserId) {
+            try {
+              const entries = extractContextFromTurn(toolResults, "admin")
+              for (const entry of entries) {
+                await cacheService.upsertContextEntry({
+                  principalId: adminUserId,
+                  surface: "admin",
+                  domain: entry.domain,
+                  entityIds: entry.entityIds,
+                  summary: entry.summary,
+                  conversationId: body.id ?? null,
+                  resolutions: entry.resolutions,
+                })
+              }
+            } catch (e: any) {
+              logger.debug?.(
+                `[${FEATURE}] context cache write failed: ${e?.message}`
+              )
+            }
+          }
+        },
+        onError: (err: any) => {
+          logAiUsage(logger, {
+            ...usageBase,
+            ok: false,
+            ms: Date.now() - startedAt,
+            error: err?.error ?? err,
+          })
+        },
+      })
+      break
+    } catch (e: any) {
+      logAiUsage(logger, {
+        ...usageBase,
+        ok: false,
+        ms: Date.now() - startedAt,
+        error: e,
+      })
+      if (attempt < MAX_CONSTRUCTION_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, 400 * attempt))
+        continue
+      }
+      res.status(502).json({ error: "admin assistant provider failed" })
+      return
+    }
+  }
+
+  result.pipeUIMessageStreamToResponse(res as any)
+  // A long tool-using turn can go >60 s without a byte; the load balancer
+  // would cut it and the browser show "Couldn't reach the server".
+  keepStreamAlive(res as any)
+}

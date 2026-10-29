@@ -1,0 +1,846 @@
+// @ts-nocheck - Ignore all TypeScript errors in this file
+import { createWorkflow, createStep } from "@mastra/core/workflows";
+import { z } from "zod";
+import {
+  createTextileAgentWithModel,
+  createTextileAgentFromModel,
+  getTextileFallbackModels,
+  getTextileModelsForRun,
+  getTextileCooldownForRun,
+  setTextileCooldownForRun,
+  isRateLimitError,
+  sleep,
+  MAX_RETRIES,
+  INITIAL_RETRY_DELAY_MS,
+  MAX_RETRY_DELAY_MS,
+} from "../../agents/textileExtractionAgent";
+import { PinoLogger } from "@mastra/loggers";
+import { readModelJsonOrThrow } from "../../../lib/ai/model-json";
+
+/**
+ * `sharp`, loaded LAZILY and never as a top-level import.
+ *
+ * 🔴 It is a NATIVE module, and the production image builds its dependency tree
+ * with `pnpm deploy --ignore-scripts` — which skips the install script that
+ * fetches the platform binary. So `node_modules/sharp` ships without
+ * `build/Release/sharp-linux-x64.node`, and a static `import sharp from "sharp"`
+ * turns that absence into:
+ *
+ *     Error starting server: Something went wrong installing the "sharp" module
+ *     Cannot find module '../build/Release/sharp-linux-x64.node'
+ *
+ * which exits the container with code 1 before it can serve a request. The ECS
+ * circuit breaker then rolled production back through two consecutive deploys
+ * (#1729), leaving migrations applied and the code that needed them not live.
+ *
+ * The binary is now installed in the image and asserted at build time, so this
+ * should not recur — but the import stays lazy regardless, because the caller
+ * ALREADY treats an unusable sharp as non-fatal: it warns and sends the
+ * original bytes. A top-level import defeated that design by failing before any
+ * of that code could run. An image-processing nicety must never be able to take
+ * the server down at boot.
+ *
+ * Cached after the first attempt, including the failure — a missing binary does
+ * not become present, and retrying the import per image would log once per
+ * request.
+ */
+let sharpModule: any | null | undefined
+const loadSharp = async (logger: any): Promise<any | null> => {
+  if (sharpModule !== undefined) return sharpModule
+  try {
+    sharpModule = (await import("sharp")).default
+  } catch (err) {
+    logger?.warn?.(
+      `[TextileExtraction] sharp is unavailable — images will be sent as fetched, so HEIC will still be rejected by the vision providers: ${err}`
+    )
+    sharpModule = null
+  }
+  return sharpModule
+}
+
+const logger = new PinoLogger();
+
+/**
+ * Vision models on the free/rotating ladder routinely emit a SINGLE-value field
+ * (e.g. `visible_pattern`, `shot_type`, `cloth_type`) as an ARRAY (`["floral"]`)
+ * instead of a string. The observation pass hands its output straight into
+ * `deriveProductFields`' inputSchema, which strict-validates it — so an array
+ * there aborts the run with "Invalid input: expected string, received array".
+ *
+ * Coerce at the schema boundary: array → joined string, anything else non-string
+ * → null. `z.preprocess` keeps the JSON-schema OUTPUT hint as string|null (so the
+ * model is still told "emit a string"), while the validator tolerates an array.
+ */
+const scalarString = (description: string) =>
+  z.preprocess(
+    (val: unknown): string | null => {
+      if (val == null) return null
+      if (Array.isArray(val)) {
+        const joined = val
+          .filter((x): x is string => typeof x === "string")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(", ")
+        return joined || null
+      }
+      if (typeof val === "string") return val
+      // Numbers/booleans the model occasionally throws at a prose field.
+      return typeof val === "number" || typeof val === "boolean" ? String(val) : null
+    },
+    z.string().nullable().describe(description)
+  )
+
+/**
+ * Coerce a list field that a sloppy model may emit as a single comma-separated
+ * string (or a JSON-stringified array already handled upstream). Salvage rather
+ * than reject: array of strings stays, a lone string is split on commas/pipes.
+ */
+const stringList = (description: string) =>
+  z.preprocess(
+    (val: unknown): string[] => {
+      if (val == null) return []
+      if (Array.isArray(val)) {
+        return val
+          .filter((x): x is string => typeof x === "string")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      }
+      if (typeof val === "string") {
+        return val.split(/[,|;\n]/).map((s) => s.trim()).filter(Boolean)
+      }
+      return []
+    },
+    z.array(z.string()).describe(description)
+  )
+
+/**
+ * Coerce a numeric field the model may hand back as a string ("0.8").
+ */
+const flexNumber = (description: string) =>
+  z.preprocess(
+    (val: unknown): number | null => {
+      if (val == null) return null
+      if (typeof val === "number") return Number.isFinite(val) ? val : null
+      if (typeof val === "string") {
+        const n = Number(val)
+        return Number.isFinite(n) ? n : null
+      }
+      return null
+    },
+    z.number().nullable().describe(description)
+  )
+
+/**
+ * Tolerate a nested object field arriving as null/array/string — treat anything
+ * that isn't a plain object as null, so a `fabric: "cotton"` or `face_raw: []`
+ * can't abort the run.
+ */
+const laxObject = <T extends z.ZodTypeAny>(inner: T) =>
+  z.preprocess(
+    (val: unknown) => (val && typeof val === "object" && !Array.isArray(val) ? val : null),
+    inner.nullable()
+  )
+
+/** Longest-side cap for images sent to vision models — keeps the base64 body
+ * under Cloudflare's request-size ceiling and matches typical "high detail". */
+const MAX_IMAGE_DIM = 1024;
+
+// Input schema for the workflow
+export const triggerSchema = z.object({
+  image_url: z
+    .string()
+    .refine(
+      (s) => {
+        if (!s) return false;
+        if (s.startsWith("data:")) {
+          const allowed = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+          const mime = s.slice(5, s.indexOf(";")) || "";
+          return allowed.includes(mime);
+        }
+        try {
+          new URL(s);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: "image_url must be a valid URL or a data URI of type png/jpeg/webp/gif" }
+    ),
+  hints: z.array(z.string()).optional().default([]),
+  gender: z.enum(["female", "male", "unisex"]).optional().default("unisex"),
+  threadId: z.string().optional(),
+  resourceId: z.string().optional(),
+  // Non-secret handle used to fetch the admin-resolved vision models that the
+  // Medusa layer stashed for this run (see setTextileModelsForRun).
+  run_id: z.string().optional(),
+});
+
+// ─────────────────────────────────────────────────────────────
+// Visual observations — the FEEDBACK-ORIENTED first pass.
+// Describes ONLY what is visible in the image. No inference,
+// no e-commerce fields. This becomes ground truth for pass 2.
+// ─────────────────────────────────────────────────────────────
+export const visualObservationsSchema = z.object({
+  visible_colors: stringList("Every color visibly present, be specific e.g. 'navy blue', 'off-white'").optional(),
+  visible_pattern: scalarString(
+    "Surface pattern as seen: solid, stripes, checks, floral, ikat, block-print, abstract… or null"
+  ).optional(),
+  pattern_description: scalarString(
+    "One or two sentences describing how the pattern looks (scale, repeat, placement)"
+  ).optional(),
+  design_elements: stringList(
+    "Observable design details: motifs, embroidery, borders, seams, buttons, zippers, tassels, prints"
+  ).optional(),
+  fabric: laxObject(
+    z.object({
+      type_idea: scalarString(
+        "Best guess of fabric family from visual cues only (e.g. 'cotton-like', 'silk sheen')"
+      ).optional(),
+      texture: scalarString("Visible texture: matte, glossy, slubbed, ribbed, woven, knit…").optional(),
+      weave_or_knit: scalarString("Visible weave/knit structure if discernible").optional(),
+      perceived_weight: scalarString(
+        "Visual weight impression: lightweight/drapey, medium, heavyweight/structured"
+      ).optional(),
+      finish: scalarString("Visible finish: sheen, washed, raw edge, printed, dyed…").optional(),
+    })
+  ).optional(),
+  visible_item: scalarString(
+    "What the item physically appears to be, described from what is seen (e.g. 'long tunic with side slits')"
+  ).optional(),
+  visible_text: stringList("Any text visible in the image: labels, tags, watermarks, brand marks").optional(),
+  shot_type: scalarString("Framing as seen: full body, half body, flat lay, close-up detail, mannequin").optional(),
+  not_visible_or_uncertain: stringList(
+    "Things that CANNOT be seen or confirmed (e.g. 'fabric composition not visible', 'no tag visible')"
+  ).optional(),
+});
+
+export type VisualObservations = z.infer<typeof visualObservationsSchema>;
+
+// Raw face details — internal use only, never shown to customers
+const faceRawSchema = laxObject(
+  z.object({
+    estimated_age_range: scalarString("e.g. '22–28', '30–35'").optional(),
+    skin_tone: scalarString("e.g. 'fair', 'medium', 'dark'").optional(),
+    hair_color: scalarString("e.g. 'dark brown', 'blonde', 'black'").optional(),
+    hair_style: scalarString("e.g. 'straight long', 'curly short', 'bun'").optional(),
+    eye_color: scalarString("e.g. 'brown', 'blue', 'green'").optional(),
+    facial_features: stringList("notable observable features").optional(),
+  })
+);
+
+// Raw body details — internal use only
+const bodyRawSchema = laxObject(
+  z.object({
+    body_type: scalarString("e.g. 'slim', 'athletic', 'petite'").optional(),
+    estimated_height: scalarString("e.g. 'tall', 'medium', 'short'").optional(),
+    pose: scalarString("e.g. 'standing front', 'sitting', 'walking'").optional(),
+    skin_tone: scalarString("e.g. 'fair', 'medium', 'dark'").optional(),
+  })
+);
+
+// Overall model/shot characteristics — internal use only
+const modelCharacteristicsSchema = laxObject(
+  z.object({
+    gender_presentation: scalarString("e.g. 'feminine', 'masculine', 'androgynous'").optional(),
+    styling: scalarString("e.g. 'editorial high-fashion', 'casual street'").optional(),
+    overall_vibe: scalarString("e.g. 'luxury', 'sporty', 'bohemian'").optional(),
+    shot_type: scalarString("observed shot_type").optional(),
+  })
+);
+
+// Output schema for textile product extraction
+export const textileProductSchema = z.object({
+  // ── Garment / product catalog fields ─────────────────────────
+  title: scalarString("Short, marketable product name").optional().default(""),
+  description: scalarString("Rich product description (2–3 sentences)").optional().default(""),
+  designer: scalarString("Brand or designer label only if visible").optional(),
+  model_name: scalarString("Specific model/SKU name if visible").optional(),
+  cloth_type: scalarString("Primary garment type").optional(),
+  pattern: scalarString("Use visible_pattern as-is").optional(),
+  fabric_weight: scalarString("perceived_weight: lightweight / medium-weight / heavyweight").optional(),
+  care_instructions: stringList("care symbols/instructions visible or inferable").optional(),
+  season: stringList("seasons consistent with observed fabric weight/texture").optional(),
+  occasion: stringList("occasions consistent with observed design and styling").optional(),
+  colors: stringList("copy visible_colors, be specific").optional(),
+  category: scalarString("broad clothing category").optional(),
+  suggested_price: laxObject(
+    z.object({
+      amount: flexNumber("numeric price amount"),
+      currency: scalarString("currency code").optional().default("USD"),
+    })
+  ).optional(),
+  seo_keywords: stringList("5–10 grounded keywords").optional(),
+  target_audience: scalarString("description of intended customer").optional(),
+  confidence: flexNumber("float 0–1").optional(),
+
+  // ── Visual observations from the feedback-oriented first pass ─
+  visual_observations: laxObject(visualObservationsSchema).optional(),
+
+  // ── Raw internal fields — NOT for customer display ────────────
+  face_raw: faceRawSchema,
+  body_raw: bodyRawSchema,
+  model_characteristics: modelCharacteristicsSchema,
+});
+
+export type TextileProductExtractionInput = z.infer<typeof triggerSchema>;
+export type TextileProductExtractionOutput = z.infer<typeof textileProductSchema>;
+
+// Helper to infer MIME type from URL
+const inferMime = (u: string): string => {
+  try {
+    const lower = u.toLowerCase();
+    if (lower.startsWith("data:")) {
+      const semi = lower.indexOf(";");
+      return lower.slice(5, semi >= 0 ? semi : undefined);
+    }
+    if (lower.endsWith(".png")) return "image/png";
+    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+    if (lower.endsWith(".webp")) return "image/webp";
+    if (lower.endsWith(".gif")) return "image/gif";
+  } catch {}
+  return "";
+};
+
+// Prepares an image URL/data-URI for the agent (download + sniff mime)
+const prepareImageForAgent = async (image_url: string): Promise<{ image: string; mimeType: string }> => {
+  let imageForAgent = image_url;
+  let mimeType = inferMime(image_url);
+
+  if (image_url.startsWith("http")) {
+    try {
+      const resp = await fetch(image_url);
+      let buf = Buffer.from(await resp.arrayBuffer());
+
+      const isPng = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+      const isJpeg = buf[0] === 0xff && buf[1] === 0xd8;
+      const isGif = buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38;
+      const isWebp =
+        buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP";
+
+      if (isPng) mimeType = "image/png";
+      else if (isJpeg) mimeType = "image/jpeg";
+      else if (isGif) mimeType = "image/gif";
+      else if (isWebp) mimeType = "image/webp";
+      else {
+        const ct = resp.headers.get("content-type") || "";
+        if (ct.startsWith("image/")) mimeType = ct.split(";")[0].trim();
+      }
+
+      // 🔑 Normalise through sharp → JPEG. HEIC (iPhone) and other phone
+      // formats are rejected by almost every vision model (Cloudflare:
+      // "unrecognized image format", Minimax: "image/heic not supported"), and
+      // an oversized base64 body trips Cloudflare's request-size limit. Anything
+      // that isn't already JPEG/PNG/WebP is re-encoded, and everything is capped
+      // to MAX_IMAGE_DIM so the body stays small.
+      const needsReencode = !isJpeg && !isPng && !isWebp; // HEIC, GIF, TIFF, …
+      const sharp = await loadSharp(logger);
+      try {
+        if (!sharp) {
+          throw new Error(
+            "sharp is unavailable in this runtime — cannot re-encode"
+          );
+        }
+        const meta = await sharp(buf, { failOn: "none" }).metadata();
+        const tooBig =
+          (meta.width ?? 0) > MAX_IMAGE_DIM || (meta.height ?? 0) > MAX_IMAGE_DIM;
+        if (needsReencode || tooBig) {
+          buf = await sharp(buf, { failOn: "none" })
+            .rotate() // apply EXIF orientation
+            .resize({
+              width: MAX_IMAGE_DIM,
+              height: MAX_IMAGE_DIM,
+              fit: "inside",
+              withoutEnlargement: true,
+            })
+            .jpeg({ quality: 82 })
+            .toBuffer();
+          mimeType = "image/jpeg";
+        }
+      } catch (err) {
+        logger.warn(`[TextileExtraction] sharp re-encode failed, using original bytes: ${err}`);
+      }
+
+      const b64 = buf.toString("base64");
+      imageForAgent = `data:${mimeType};base64,${b64}`;
+    } catch (err) {
+      logger.warn(`[TextileExtraction] Failed to fetch image, using URL directly: ${err}`);
+    }
+  }
+
+  if (!mimeType) mimeType = "image/jpeg";
+  return { image: imageForAgent, mimeType };
+};
+
+/**
+ * Runs a schema-constrained vision call across the fallback model ladder
+ * with retry/backoff on rate limits. Shared by every extraction pass.
+ */
+const runVisionExtraction = async <T>(
+  label: string,
+  messages: any[],
+  outputSchema: any,
+  context?: { threadId?: string; resourceId?: string; runId?: string }
+): Promise<T> => {
+  let lastError: any = null;
+
+  // ── 1. Admin-configured vision providers (Cloudflare → Groq → …) ────────
+  // Built in the Medusa layer (which has the container) and stashed by runId.
+  // These generate PLAIN text and parse via readModelJsonOrThrow, because
+  // Groq/Cloudflare don't reliably honour AI-SDK `json_schema` structured
+  // output — the prompts already demand "ONLY a valid JSON object".
+  //
+  // Rate-limit handling matches the free ladder below: a 429 retries the SAME
+  // provider with exponential backoff (a transient 429 must not cascade into
+  // the next provider and burn ITS rpm), and a provider that stays rate-limited
+  // after retries is cooled down for the rest of this run so the other passes
+  // and providers take over.
+  const configuredModels = getTextileModelsForRun(context?.runId);
+  const cooldown = getTextileCooldownForRun(context?.runId);
+  for (let i = 0; i < configuredModels.length; i++) {
+    if (cooldown.has(i)) {
+      logger.info(`[${label}] Configured provider #${i + 1} in cooldown — skipping`);
+      continue;
+    }
+
+    let retryCount = 0;
+    while (retryCount < MAX_RETRIES) {
+      try {
+        const agent = await createTextileAgentFromModel(configuredModels[i]);
+        logger.info(`[${label}] Attempting configured vision provider #${i + 1}/${configuredModels.length} (attempt ${retryCount + 1})`);
+        const response = await agent.generate(messages);
+        const parsed = readModelJsonOrThrow(response, `${label}(configured#${i})`) as T;
+        logger.info(`[${label}] Successfully extracted with configured vision provider`);
+        return parsed;
+      } catch (error: any) {
+        lastError = error;
+        const errorMsg = error?.message || String(error);
+        logger.warn(`[${label}] Error with configured provider #${i + 1} (attempt ${retryCount + 1}): ${errorMsg}`);
+
+        if (isRateLimitError(error)) {
+          retryCount++;
+          if (retryCount < MAX_RETRIES) {
+            const delay = Math.min(
+              INITIAL_RETRY_DELAY_MS * Math.pow(2, retryCount - 1) + Math.random() * 2000,
+              MAX_RETRY_DELAY_MS
+            );
+            logger.info(`[${label}] Rate limited on provider #${i + 1}. Waiting ${Math.round(delay / 1000)}s before retry...`);
+            await sleep(delay);
+          } else {
+            cooldown.add(i);
+            setTextileCooldownForRun(context?.runId ?? "", cooldown);
+            logger.warn(`[${label}] Provider #${i + 1} still rate-limited — cooling down for this run.`);
+            break;
+          }
+        } else {
+          logger.warn(`[${label}] Non-rate-limit error on provider #${i + 1}. Trying next provider...`);
+          break;
+        }
+      }
+    }
+  }
+
+  // ── 2. OpenRouter `:free` fallback ladder ────────────────────────────────
+  const availableModels = await getTextileFallbackModels();
+  logger.info(`[${label}] Free vision models: ${availableModels.slice(0, 5).join(", ")}`);
+
+  const stableResourceId =
+    context?.resourceId && !String(context.resourceId).startsWith("textile-extraction:http")
+      ? context.resourceId
+      : `textile-extraction:${label}`;
+
+  let modelIndex = 0;
+
+  while (modelIndex < availableModels.length) {
+    const currentModel = availableModels[modelIndex];
+    let retryCount = 0;
+
+    while (retryCount < MAX_RETRIES) {
+      try {
+        const agent = await createTextileAgentWithModel(currentModel, false);
+        logger.info(`[${label}] Attempting with model: ${currentModel} (attempt ${retryCount + 1})`);
+
+        const response = await agent.generate(messages, {
+          output: outputSchema,
+        } as any);
+
+        const parsed = readModelJsonOrThrow(response, `${label}(${currentModel})`) as T;
+        logger.info(`[${label}] Successfully extracted with model: ${currentModel}`);
+        return parsed;
+      } catch (error: any) {
+        lastError = error;
+        const errorMsg = error?.message || String(error);
+        logger.warn(`[${label}] Error with model ${currentModel} (attempt ${retryCount + 1}): ${errorMsg}`);
+
+        if (isRateLimitError(error)) {
+          retryCount++;
+          if (retryCount < MAX_RETRIES) {
+            const delay = Math.min(
+              INITIAL_RETRY_DELAY_MS * Math.pow(2, retryCount - 1) + Math.random() * 2000,
+              MAX_RETRY_DELAY_MS
+            );
+            logger.info(`[${label}] Rate limited. Waiting ${Math.round(delay / 1000)}s before retry...`);
+            await sleep(delay);
+          } else {
+            logger.warn(`[${label}] Max retries for ${currentModel}. Trying next model...`);
+            break;
+          }
+        } else {
+          logger.warn(`[${label}] Non-rate-limit error. Trying next model...`);
+          break;
+        }
+      }
+    }
+
+    modelIndex++;
+    if (modelIndex < availableModels.length) {
+      logger.info(`[${label}] Switching to fallback model: ${availableModels[modelIndex]}`);
+    }
+  }
+
+  // Surface the provider's REAL reason, not just a wrapped "Provider returned
+  // error". The AI SDK buries the detail in `responseBody` (e.g. Cloudflare
+  // "unrecognized image format", Minimax "image/heic not supported"), which is
+  // the difference between a diagnosable failure and "[object Object]".
+  const lastDetail = lastError?.responseBody
+    ? `${lastError?.message ?? "error"} — ${String(lastError.responseBody).slice(0, 300)}`
+    : lastError?.message || String(lastError)
+  throw new Error(`[${label}] All vision models exhausted. Last error: ${lastDetail}`);
+};
+
+// ─────────────────────────────────────────────────────────────
+// STEP 1 — Observation pass: what is VISIBLE.
+// Deliberately does NOT ask for e-commerce fields so the model
+// reports what it sees instead of forcing generic answers.
+// ─────────────────────────────────────────────────────────────
+const observeVisibleFeaturesStep = createStep({
+  id: "observeVisibleFeatures",
+  inputSchema: triggerSchema,
+  outputSchema: visualObservationsSchema,
+  execute: async ({ inputData }) => {
+    const { image_url, hints } = inputData;
+
+    logger.info(`[TextileObservation] Starting visible-features observation for image: ${image_url.substring(0, 50)}...`);
+
+    const { image: imageForAgent, mimeType } = await prepareImageForAgent(image_url);
+
+    const hintsText =
+      hints && hints.length > 0
+        ? `\n\nAreas the requester specifically wants observed (still only if visible):\n${hints
+            .map((h) => `- ${h}`)
+            .join("\n")}`
+        : "";
+
+    const prompt = `You are a textile and fashion visual analyst. Look at this image and report ONLY what you can actually SEE.
+
+Do NOT infer e-commerce fields. Do NOT guess prices, target audience, seasons, SEO keywords, or product titles. Do NOT fabricate anything. If something is not visible, put it under "not_visible_or_uncertain" instead of guessing.
+
+Report what is visible:
+
+- **visible_colors**: Every color you can see, be specific ("navy blue", "off-white", "terracotta")
+- **visible_pattern**: The surface pattern as seen ("solid", "stripes", "checks", "floral", "ikat", "block-print", "abstract"), or null if plain/uniform
+- **pattern_description**: How the pattern looks — scale, repeat, placement, density. Or null.
+- **design_elements**: Observable design details — motifs, embroidery, borders, piping, seams, buttons, zippers, tassels, mirror work, prints, trims
+- **fabric**: What the fabric LOOKS like (visual idea only, not a lab analysis):
+  - type_idea: best visual guess of fabric family ("cotton-like", "silk sheen", "linen-like", "denim", "velvet")
+  - texture: matte / glossy / slubbed / ribbed / woven / knit / smooth
+  - weave_or_knit: visible weave or knit structure if discernible, else null
+  - perceived_weight: lightweight & drapey / medium / heavyweight & structured — based on how it hangs or folds
+  - finish: sheen, washed look, raw edges, printed, dyed, embroidered surface
+- **visible_item**: What the item physically appears to be, described from what you see ("long tunic with side slits", "folded yardage of printed cloth")
+- **visible_text**: Any text visible — labels, tags, watermarks, brand marks. Empty array if none.
+- **shot_type**: How the image is framed — full body, half body, flat lay, close-up detail, mannequin
+- **not_visible_or_uncertain**: List anything that CANNOT be seen or confirmed ("fabric composition not visible", "no care label visible", "back of garment not visible")
+${hintsText}
+
+Return ONLY a valid JSON object. Do not include markdown, commentary, or any text outside the JSON.`;
+
+    const messages = [
+      {
+        role: "user" as const,
+        content: [
+          {
+            type: "image" as const,
+            image: imageForAgent,
+            mimeType,
+          },
+          {
+            type: "text" as const,
+            text: prompt,
+          },
+        ],
+      },
+    ];
+
+    const observations = await runVisionExtraction<VisualObservations>(
+      "TextileObservation",
+      messages,
+      visualObservationsSchema,
+      { threadId: inputData.threadId, resourceId: inputData.resourceId, runId: inputData.run_id }
+    );
+
+    return observations;
+  },
+});
+
+// ─────────────────────────────────────────────────────────────
+// STEP 2 — Feedback pass: derive product fields FROM the
+// observations. The observation JSON is fed back into the prompt
+// as ground truth so derived fields stay anchored to what was
+// actually visible rather than generic guesses.
+// ─────────────────────────────────────────────────────────────
+const deriveProductFieldsStep = createStep({
+  id: "deriveProductFields",
+  inputSchema: z.object({
+    image_url: triggerSchema.shape.image_url,
+    hints: z.array(z.string()).optional().default([]),
+    gender: z.enum(["female", "male", "unisex"]).optional().default("unisex"),
+    threadId: z.string().optional(),
+    resourceId: z.string().optional(),
+    run_id: z.string().optional(),
+    observations: visualObservationsSchema,
+  }),
+  outputSchema: textileProductSchema,
+  execute: async ({ inputData }) => {
+    const { image_url, hints, gender, threadId, resourceId, run_id, observations } = inputData;
+
+    logger.info(`[TextileDerivation] Deriving product fields from observations for image: ${image_url.substring(0, 50)}...`);
+
+    const { image: imageForAgent, mimeType } = await prepareImageForAgent(image_url);
+
+    const genderContext =
+      gender !== "unisex"
+        ? `\nGender context: ${gender} — use this to interpret sizing, fit, and target audience correctly.`
+        : "";
+
+    const hintsText =
+      hints && hints.length > 0 ? `\n\nAdditional hints:\n${hints.map((h) => `- ${h}`).join("\n")}` : "";
+
+    const observationsText = JSON.stringify(observations, null, 2);
+
+    const prompt = `You are a fashion and textile product expert. A previous observation pass examined this image and recorded ONLY what is visible. That observation record is provided below as GROUND TRUTH.
+
+---
+## OBSERVATION RECORD (ground truth — do NOT contradict it)
+${observationsText}
+---
+
+Using these observations, return a single JSON object with ALL of the following fields. Ground every derived field in the observations. If the observations say something is "not visible or uncertain", leave the dependent field null/empty rather than guessing.
+
+---
+## PART 1 — Garment & Product Catalog Data
+Extract accurate product information for e-commerce listing:
+
+- **title**: Short, marketable product name (e.g. "Slim-fit Cotton Oxford Shirt") — anchored in what was observed
+- **description**: Rich product description (2–3 sentences, mentions fabric feel, fit, styling) — reference observed colors, pattern and fabric
+- **designer**: Brand or designer label ONLY if it appears in visible_text or is clearly visible, otherwise null
+- **model_name**: Specific model/SKU name if visible, or null
+- **cloth_type**: Primary garment type consistent with "visible_item" (e.g. "shirt", "dress", "jacket", "trousers", "fabric")
+- **pattern**: Use "visible_pattern" as-is when present, or null
+- **fabric_weight**: Use the observed "perceived_weight" ("lightweight", "medium-weight", "heavyweight"), or null if uncertain
+- **care_instructions**: Array of care symbols/instructions visible or inferable from the observed fabric — empty if nothing supports them
+- **season**: Array of seasons consistent with the observed fabric weight/texture
+- **occasion**: Array of occasions consistent with the observed design and styling
+- **colors**: Copy "visible_colors" (be specific: "navy blue", "off-white")
+- **category**: Broad clothing category ("tops", "bottoms", "outerwear", "dresses", "accessories", "fabric")
+- **suggested_price**: Object { amount: number, currency: "USD" } based on observed quality/design complexity, or null
+- **seo_keywords**: Array of 5–10 keywords grounded in observed colors, pattern, fabric and design elements
+- **target_audience**: Description of intended customer (e.g. "women aged 25–40, professional")
+- **confidence**: Float 0–1 representing extraction confidence${genderContext}
+- **visual_observations**: Echo the observation record unchanged
+
+---
+## PART 2 — Raw Internal Data (for internal analysis only, NOT shown to customers)
+Extract observable characteristics of any person/model visible in the image:
+
+- **face_raw**: If a person's face is visible, extract:
+  - estimated_age_range (e.g. "22–28", "30–35"), or null
+  - skin_tone (e.g. "fair", "medium-fair", "medium", "medium-dark", "dark"), or null
+  - hair_color (e.g. "dark brown", "blonde", "black"), or null
+  - hair_style (e.g. "straight long", "curly short", "bun"), or null
+  - eye_color (e.g. "brown", "blue", "green"), or null
+  - facial_features: array of notable observable features (e.g. ["defined cheekbones"])
+  If no face is visible, set face_raw to null.
+
+- **body_raw**: If a person's body is visible, extract:
+  - body_type (e.g. "slim", "athletic", "petite", "curvy", "tall-lean"), or null
+  - estimated_height (e.g. "tall", "medium", "short") based on proportions, or null
+  - pose (e.g. "standing front", "standing side", "sitting", "walking"), or null
+  - skin_tone (e.g. "fair", "medium", "dark"), or null
+  If no body is visible, set body_raw to null.
+
+- **model_characteristics**: Overall shot/styling context:
+  - gender_presentation (e.g. "feminine", "masculine", "androgynous"), or null
+  - styling (e.g. "editorial high-fashion", "casual street", "clean minimalist"), or null
+  - overall_vibe (e.g. "luxury", "sporty", "bohemian", "classic"), or null
+  - shot_type: use the observed "shot_type", or null
+  If no model is in the image (e.g. flat lay), set non-applicable fields to null.${hintsText}
+
+---
+Return ONLY a valid JSON object. Do not include markdown, commentary, or any text outside the JSON.`;
+
+    const messages = [
+      {
+        role: "user" as const,
+        content: [
+          {
+            type: "image" as const,
+            image: imageForAgent,
+            mimeType,
+          },
+          {
+            type: "text" as const,
+            text: prompt,
+          },
+        ],
+      },
+    ];
+
+    const product = await runVisionExtraction<TextileProductExtractionOutput>(
+      "TextileDerivation",
+      messages,
+      textileProductSchema,
+      { threadId, resourceId, runId: run_id }
+    );
+
+    return product;
+  },
+});
+
+// Step to validate and normalize extraction results
+const validateExtractionStep = createStep({
+  id: "validateTextileExtraction",
+  inputSchema: textileProductSchema,
+  outputSchema: textileProductSchema,
+  execute: async ({ inputData }) => {
+    logger.info(`[TextileExtraction] Validating extraction results...`);
+
+    const normalized: TextileProductExtractionOutput = {
+      // Garment fields
+      title: inputData.title || "Untitled Product",
+      description: inputData.description || "",
+      designer: inputData.designer || null,
+      model_name: inputData.model_name || null,
+      cloth_type: inputData.cloth_type || null,
+      pattern: inputData.pattern || null,
+      fabric_weight: inputData.fabric_weight || null,
+      care_instructions: Array.isArray(inputData.care_instructions) ? inputData.care_instructions : [],
+      season: Array.isArray(inputData.season) ? inputData.season : [],
+      occasion: Array.isArray(inputData.occasion) ? inputData.occasion : [],
+      colors: Array.isArray(inputData.colors) ? inputData.colors : [],
+      category: inputData.category || null,
+      suggested_price: inputData.suggested_price
+        ? {
+            amount: Number(inputData.suggested_price.amount) || 0,
+            currency: inputData.suggested_price.currency || "USD",
+          }
+        : null,
+      seo_keywords: Array.isArray(inputData.seo_keywords) ? inputData.seo_keywords : [],
+      target_audience: inputData.target_audience || null,
+      confidence:
+        typeof inputData.confidence === "number"
+          ? Math.max(0, Math.min(1, inputData.confidence))
+          : undefined,
+
+      // Visual observations — normalize but keep as-is (feedback trail)
+      visual_observations: inputData.visual_observations
+        ? {
+            visible_colors: Array.isArray(inputData.visual_observations.visible_colors)
+              ? inputData.visual_observations.visible_colors
+              : [],
+            visible_pattern: inputData.visual_observations.visible_pattern || null,
+            pattern_description: inputData.visual_observations.pattern_description || null,
+            design_elements: Array.isArray(inputData.visual_observations.design_elements)
+              ? inputData.visual_observations.design_elements
+              : [],
+            fabric: inputData.visual_observations.fabric
+              ? {
+                  type_idea: inputData.visual_observations.fabric.type_idea || null,
+                  texture: inputData.visual_observations.fabric.texture || null,
+                  weave_or_knit: inputData.visual_observations.fabric.weave_or_knit || null,
+                  perceived_weight: inputData.visual_observations.fabric.perceived_weight || null,
+                  finish: inputData.visual_observations.fabric.finish || null,
+                }
+              : undefined,
+            visible_item: inputData.visual_observations.visible_item || null,
+            visible_text: Array.isArray(inputData.visual_observations.visible_text)
+              ? inputData.visual_observations.visible_text
+              : [],
+            shot_type: inputData.visual_observations.shot_type || null,
+            not_visible_or_uncertain: Array.isArray(inputData.visual_observations.not_visible_or_uncertain)
+              ? inputData.visual_observations.not_visible_or_uncertain
+              : [],
+          }
+        : null,
+
+      // Raw internal fields — normalize but keep as-is
+      face_raw: inputData.face_raw
+        ? {
+            estimated_age_range: inputData.face_raw.estimated_age_range || null,
+            skin_tone: inputData.face_raw.skin_tone || null,
+            hair_color: inputData.face_raw.hair_color || null,
+            hair_style: inputData.face_raw.hair_style || null,
+            eye_color: inputData.face_raw.eye_color || null,
+            facial_features: Array.isArray(inputData.face_raw.facial_features) ? inputData.face_raw.facial_features : [],
+          }
+        : null,
+      body_raw: inputData.body_raw
+        ? {
+            body_type: inputData.body_raw.body_type || null,
+            estimated_height: inputData.body_raw.estimated_height || null,
+            pose: inputData.body_raw.pose || null,
+            skin_tone: inputData.body_raw.skin_tone || null,
+          }
+        : null,
+      model_characteristics: inputData.model_characteristics
+        ? {
+            gender_presentation: inputData.model_characteristics.gender_presentation || null,
+            styling: inputData.model_characteristics.styling || null,
+            overall_vibe: inputData.model_characteristics.overall_vibe || null,
+            shot_type: inputData.model_characteristics.shot_type || null,
+          }
+        : null,
+    };
+
+    if (!normalized.title || normalized.title === "Untitled Product") {
+      logger.warn("[TextileExtraction] Missing product title");
+    }
+    if (!normalized.description) {
+      logger.warn("[TextileExtraction] Missing product description");
+    }
+    if (normalized.colors.length === 0) {
+      logger.warn("[TextileExtraction] No colors identified");
+    }
+
+    logger.info(`[TextileExtraction] Validation complete. Confidence: ${normalized.confidence || "N/A"}`);
+    return normalized;
+  },
+});
+
+// Create and export the workflow
+// Observation pass first (what is visible), then the observations are
+// fed back into the product-field derivation pass (feedback-oriented).
+export const textileProductExtractionWorkflow = createWorkflow({
+  id: "textile-product-extraction",
+  inputSchema: triggerSchema,
+  outputSchema: textileProductSchema,
+})
+  .then(observeVisibleFeaturesStep)
+  .map(async ({ inputData, getInitData }) => {
+    // inputData = observations from the visible-features pass.
+    // getInitData() = the original trigger input (image URL, hints, gender).
+    const init = getInitData() as TextileProductExtractionInput;
+    return {
+      image_url: init.image_url,
+      hints: init.hints || [],
+      gender: init.gender || "unisex",
+      threadId: init.threadId,
+      resourceId: init.resourceId,
+      run_id: (init as any).run_id,
+      observations: inputData,
+    };
+  })
+  .then(deriveProductFieldsStep)
+  .then(validateExtractionStep)
+  .commit();
+
+export default textileProductExtractionWorkflow;

@@ -1,0 +1,22 @@
+{
+  "id": "sarah",
+  "code": "Timur Duehr",
+  "design": "Timur Duehr",
+  "description": "A FreeSewing pattern for a basic skirt block pattern (natural waist) based on Aldrich",
+  "name": "Sarah skirt block",
+  "difficulty": 2,
+  "tags": [
+    "skirts",
+    "bottoms",
+    "blocks"
+  ],
+  "techniques": [
+    "hem",
+    "curved-seam",
+    "block",
+    "dart"
+  ],
+  "version": "4.2.0",
+  "pkg": "@freesewing/sarah",
+  "collection": true
+}

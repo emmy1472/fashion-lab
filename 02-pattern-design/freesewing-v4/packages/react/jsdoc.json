@@ -1,0 +1,30 @@
+{
+  "plugins": [ ],
+  "recurseDepth": 10,
+  "source":{
+     "includePattern": ".+\\.mjs$",
+     "excludePattern": "(^|\\/|\\\\)_"
+  },
+  "sourceType": "module",
+  "tags":{
+     "allowUnknownTags": true,
+     "dictionaries":[
+        "jsdoc",
+        "closure"
+     ]
+  },
+  "templates":{
+     "monospaceLinks": false,
+     "cleverLinks": false,
+     "default":{
+        "outputSourceFiles": true
+     }
+  },
+  "opts":{
+     "_":[ ],
+     "debug": false,
+     "encoding": "utf8",
+     "explain": true,
+     "recurse": true
+   }
+}

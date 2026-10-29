@@ -1,0 +1,20 @@
+{
+  "id": "sabrina",
+  "name": "Sabrina sports top",
+  "code": "Jonathan Haas",
+  "description": "A FreeSewing pattern for sports tops",
+  "design": "Jonathan Haas",
+  "difficulty": 2,
+  "tags": [
+    "tops",
+    "underwear"
+  ],
+  "techniques": [
+    "stretch",
+    "curved-seam",
+    "elastic"
+  ],
+  "version": "4.2.0",
+  "pkg": "@freesewing/sabrina",
+  "collection": true
+}

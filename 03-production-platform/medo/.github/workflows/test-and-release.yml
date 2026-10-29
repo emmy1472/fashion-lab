@@ -1,0 +1,507 @@
+name: Test and Release
+
+on:
+  # Manual trigger for the full sharded suite. Without this the only way to
+  # exercise the release gate is to merge to main and hope — which is how the
+  # gate managed to run zero tests for months (#1187). `shard_list` lets you
+  # probe a single shard cheaply (`[1]`) before spending eight runners.
+  workflow_dispatch:
+    inputs:
+      shard_list:
+        description: 'JSON array of shard indices to run, e.g. [1] or [1,2,3,4,5,6,7,8]'
+        required: false
+        default: '[1,2,3,4,5,6,7,8]'
+      shard_total:
+        description: 'Size of the division (blank = SUITE_SHARDS). Keep at 8 when probing one shard so it still selects 1/8th of the files.'
+        required: false
+        default: ''
+      batch_size:
+        description: 'Spec files per jest invocation (blank = runner default)'
+        required: false
+        default: ''
+  push:
+    branches: [ main ]
+    paths:
+      - 'apps/backend/**'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/test-and-release.yml'
+  pull_request:
+  # 🔴 NO `branches:` filter, deliberately.
+  #
+  # This used to read `branches: [ main ]`, which meant a PR based on another
+  # PR's branch — a stack — triggered NOTHING. #2095 and #2097 sat with zero
+  # check runs, and `gh pr checks` reported them CLEAN, because an empty check
+  # list is indistinguishable from a passing one. Two PRs came within one
+  # command of merging completely untested.
+  #
+  # Retargeting a stacked PR to main does NOT rescue it either: `pull_request`
+  # fires on opened/synchronize/reopened, and changing the base is `edited`.
+  #
+  # The `paths:` filter below is what keeps the cost down; the branch filter
+  # was only ever excluding work that most needed checking.
+    paths:
+      - 'apps/backend/**'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/test-and-release.yml'
+
+env:
+  # Opt into Node.js 24 for JS-based actions. Node 20 runtime is deprecated
+  # on GHA runners; forced default 2026-06-02, removed 2026-09-16.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # How many shards the spec list is divided into. MUST equal the length of the
+  # `shard:` matrix below — a mismatch silently drops files from the run, which
+  # is the exact failure class #1187 was about. The guard step in the test job
+  # asserts the two agree on a main push rather than trusting them to.
+  SUITE_SHARDS: "8"
+
+jobs:
+  # Prod-parity build gate — mirrors what the ECS Dockerfile does (build the
+  # backend against medusa-config.prod.ts) on the SAME x86 Node 22 runner, so a
+  # build that is green locally with the dev config (or on a dev's ARM machine)
+  # but RED in the prod build is caught here, on a PR, instead of only after a
+  # push-to-main when the "Deploy to AWS ECS" image build fails. Fast (no Docker
+  # image push, no DB). This is the check that would have caught the 2026-07-11
+  # prod-only build break (dev-config build passed; prod-config build failed).
+  prod-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - name: Install dependencies (frozen — package checksum)
+        run: pnpm install --frozen-lockfile
+      # The backend loads the etsy workspace plugin from its built .medusa output;
+      # medusa build can't resolve it unless it's built first.
+      - name: Build workspace plugins
+        run: pnpm --filter "@jytextiles/medusa-plugin-etsy-sync" build
+      # Reads the source rather than resolving it. The build below resolves
+      # through `shamefully-hoist`, so an import declared in no package.json
+      # still compiles here and only breaks where the shared slot comes up
+      # empty or holds the wrong version (#2093, #2088). Static, so its answer
+      # is the same on every machine. Runs first — it costs seconds.
+      - name: No new phantom imports
+        run: pnpm --filter @jyt/backend check:phantom-imports
+      - name: Config dev/prod parity
+        run: pnpm --filter @jyt/backend check:prod-config
+      - name: Prod-config build (mirror ECS Dockerfile)
+        run: pnpm --filter @jyt/backend check:prod-build
+
+  test:
+    runs-on: ubuntu-latest
+    # An honest full suite is ~6.5h in one job (measured: ~368s fixed cost per
+    # jest invocation + ~10.4s per test, see #1188) against GitHub's 6h kill.
+    # Sharding is what makes the gate runnable at all, not an optimisation.
+    # Each shard gets its own runner and its own Postgres service container.
+    # PRs run a single job — that path only executes the specs the PR changed.
+    timeout-minutes: 120
+    strategy:
+      # Every shard reports. One red shard must not hide the state of the
+      # other seven — that is the whole point of running the suite.
+      fail-fast: false
+      matrix:
+        # PRs run one job (that path only executes the PR's changed specs).
+        # Anything else runs the full shard list — the dispatch input when
+        # present, otherwise all eight.
+        shard: ${{ github.event_name == 'pull_request' && fromJSON('[1]') || fromJSON(github.event.inputs.shard_list || '[1,2,3,4,5,6,7,8]') }}
+
+    services:
+      postgres:
+        image: postgres:latest
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        # The theme drift test reads apps/storefront-starter's theme type to
+        # check that every setting the API accepts is actually rendered. Without
+        # this the file is simply absent on the runner and that half of the
+        # guard cannot run. The submodule is a PUBLIC repo over HTTPS, so the
+        # default job token is enough — no PAT.
+        submodules: true
+
+    - name: Install pnpm
+      uses: pnpm/action-setup@v4
+
+    - name: Use Node.js
+      uses: actions/setup-node@v4
+      with:
+        # Pin to 22 (the backend's `engines` floor + prod runtime). Leaving it
+        # at '>=20' floats to the newest available (Node 24), which is fine for
+        # isolated-vm but non-deterministic across runs.
+        node-version: '22'
+        cache: 'pnpm'
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+
+    # Workspace plugins ship their built output under .medusa/ (their package
+    # exports point there). pnpm install only symlinks the package, so the
+    # backend can't load the plugin until it's built — without this step every
+    # /admin/etsy/* route 404s and the etsySync module won't resolve.
+    - name: Build workspace plugins
+      run: pnpm --filter "@jytextiles/medusa-plugin-etsy-sync" build
+
+    # Config parity is a property of the commit, not of the shard — running it
+    # once is enough. (The prod-build job checks it independently too.)
+    - name: Check medusa-config dev/prod parity
+      if: matrix.shard == 1
+      run: pnpm --filter @jyt/backend check:prod-config
+
+    - name: Setup Database
+      run: |
+        psql -h localhost -U postgres -d postgres -c "CREATE USER runner SUPERUSER CREATEDB CREATEROLE;"
+        psql -h localhost -U postgres -d postgres -c "GRANT ALL PRIVILEGES ON DATABASE postgres TO runner;"
+        psql -h localhost -U postgres -d postgres -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO runner;"
+
+    - name: Create test environment file
+      run: |
+        cat << EOF > apps/backend/.env.test
+        DATABASE_TYPE=postgres
+        DATABASE_URL=postgresql://runner@localhost:5432/postgres
+        REDIS_URL=redis://localhost:6379
+        JWT_SECRET=secret
+        COOKIE_SECRET=secret
+        ADMIN_CORS=http://localhost:7001
+        STORE_CORS=http://localhost:8000
+        NODE_ENV=test
+        # Test-only AES-256 key for the EncryptionService module. Not real
+        # cryptographic material — CI runs against a throwaway DB, no
+        # production data is encrypted with it. Generate prod keys via
+        # openssl rand -base64 32 and store in your secret manager.
+        ENCRYPTION_KEY=bPH59JuZDRQULLeDD62+NiwqwcChpOLN/j7aqu3A+Hw=
+        EOF
+
+    # ---- The WHOLE unit suite, on every PR and every main push -----------
+    # 🔴 Why this is not filtered.
+    #
+    # The PR path below runs only the specs whose FILES changed, and the
+    # main-push path runs only `test:integration:http:batched`. So no job
+    # anywhere ran the full unit suite. A unit spec that started failing was
+    # invisible until somebody happened to edit that spec's own file — at which
+    # point it looked like THAT PR's fault.
+    #
+    # On 2026-09-12 the suite had FIVE reds on main accumulated this way. Three
+    # were stale hand-written field lists. One was a real production defect in
+    # the canonical design resolver, wearing a "known flaky test" label.
+    #
+    # ~2 minutes, no database. `shard == 1` so it runs exactly ONCE: PRs launch
+    # only shard 1, and a main push launches 1..8. (A manual dispatch of a
+    # shard list without 1 skips it — that path is a probe, not a gate.)
+    - name: Run the full unit suite
+      if: matrix.shard == 1
+      working-directory: apps/backend
+      env:
+        NODE_ENV: test
+      run: pnpm test:unit
+
+    # ---- PR: run only the spec files changed in this PR (fast feedback) ----
+    - name: Detect changed spec files
+      if: github.event_name == 'pull_request'
+      id: changed-specs
+      uses: tj-actions/changed-files@v45
+      with:
+        files: |
+          apps/backend/**/*.spec.ts
+
+    - name: Run changed specs (PR)
+      if: github.event_name == 'pull_request'
+      working-directory: apps/backend
+      env:
+        NODE_ENV: test
+        DATABASE_URL: postgresql://runner@localhost:5432/postgres
+        POSTGRES_USER: runner
+        POSTGRES_PASSWORD: runner
+      run: |
+        ALL="${{ steps.changed-specs.outputs.all_changed_files }}"
+        if [ -z "$ALL" ]; then
+          echo "::notice::No *.spec.ts files changed in this PR — nothing to run."
+          echo "If this PR changes backend source, add/update its spec so CI exercises it."
+          exit 0
+        fi
+
+        UNIT=""
+        HTTP=""
+        for f in $ALL; do
+          rel="${f#apps/backend/}"          # paths come in repo-root-relative
+          case "$rel" in
+            *.unit.spec.ts)            UNIT="$UNIT $rel" ;;
+            integration-tests/modules/*) echo "::warning::skipping module spec $rel (not wired into targeted PR run)";;
+            *.spec.ts)                 HTTP="$HTTP $rel" ;;
+          esac
+        done
+
+        echo "Changed unit specs:        ${UNIT:-(none)}"
+        echo "Changed integration specs: ${HTTP:-(none)}"
+
+        # No `--` before the jest flags. pnpm forwards trailing args to the
+        # script either way, but jest treats everything after a literal `--` as
+        # a positional testPathPattern — so `-- --runTestsByPath foo.spec.ts`
+        # silently became the REGEX `--runTestsByPath|foo.spec.ts` instead of a
+        # path selection. For most paths the regex happens to match the same
+        # single file, which is why this looked fine. It is not fine for the six
+        # specs living under Medusa's bracketed route dirs — in a regex, `[id]`
+        # is a character class, so
+        #   src/api/admin/websites/[id]/pages/__tests__/validators.unit.spec.ts
+        # matches nothing, jest reports "0 matches" and the PR fails without
+        # ever running the spec the PR changed.
+        if [ -n "$UNIT" ]; then
+          echo "::group::unit specs"
+          pnpm test:unit --runTestsByPath $UNIT
+          echo "::endgroup::"
+        fi
+        # Batch the integration specs. The jest parent leaks heap per spec file
+        # (#1189): a single invocation grows until it dies with
+        # "Ineffective mark-compacts near heap limit" / exit 134 somewhere past
+        # a dozen files. The main-suite path has always batched for this reason
+        # (BATCH_SIZE is capped at 10 for the same leak); this path did not, so
+        # a PR touching many specs OOM'd after ~11 minutes and reported nothing
+        # about the specs it changed. Seen on #1192, which changes 19.
+        if [ -n "$HTTP" ]; then
+          echo "::group::integration (shared DB) specs"
+          set -- $HTTP
+          while [ "$#" -gt 0 ]; do
+            CHUNK=""
+            n=0
+            while [ "$#" -gt 0 ] && [ "$n" -lt 8 ]; do
+              CHUNK="$CHUNK $1"
+              shift
+              n=$((n + 1))
+            done
+            echo "--- batch:$CHUNK"
+            pnpm test:integration:http:shared --runTestsByPath $CHUNK
+          done
+          echo "::endgroup::"
+        fi
+
+    # ---- main push (and manual dispatch): full suite is the release gate ----
+    # SHARD_TOTAL is the size of the division, NOT the number of jobs launched —
+    # a one-shard dispatch probe must still select 1/8th of the files, so
+    # strategy.job-total is the wrong source for it.
+    - name: Assert shard matrix matches SUITE_SHARDS
+      if: github.event_name == 'push'
+      run: |
+        if [ "${{ strategy.job-total }}" != "$SUITE_SHARDS" ]; then
+          echo "::error::matrix launches ${{ strategy.job-total }} shards but SUITE_SHARDS=$SUITE_SHARDS. Whichever is larger, the mismatch means some spec files are never assigned to any runner. Keep them equal."
+          exit 1
+        fi
+
+    # The runner assigns files by stride (i % total), so `--shard=3/8` selects
+    # the same files locally as on CI and a red shard is reproducible verbatim.
+    - name: Run integration suite shard
+      if: github.event_name != 'pull_request'
+      run: pnpm --filter @jyt/backend test:integration:http:batched
+      env:
+        NODE_ENV: test
+        DATABASE_URL: postgresql://runner@localhost:5432/postgres
+        POSTGRES_USER: runner
+        POSTGRES_PASSWORD: runner
+        SHARD_INDEX: ${{ matrix.shard }}
+        SHARD_TOTAL: ${{ github.event.inputs.shard_total || env.SUITE_SHARDS }}
+        BATCH_SIZE: ${{ github.event.inputs.batch_size || '' }}
+
+  release:
+    needs: test
+    # Release is deliberately NOT gated on the suite yet.
+    #
+    # Until now `needs: test` looked like a gate but wasn't one: the suite
+    # fake-passed, so release always ran. Turning the suite honest without this
+    # escape hatch would flip that from "always releases" to "never releases" in
+    # one commit — the first honest measurement puts the failure rate around 7%
+    # (15 of 202 tests in shard 1/8), i.e. ~110-120 failures suite-wide, none of
+    # which are triaged yet.
+    #
+    # So: honest signal now, gate once it's green. Flip the repo variable
+    # RELEASE_IGNORES_SUITE to false (or delete it) to make the gate real — that
+    # is the last step of the triage tracked on #1187, and the whole point of
+    # this being a variable rather than a comment is that flipping it needs no
+    # code change.
+    #
+    # `!cancelled()` is required: without a status-check function, a failed
+    # dependency skips this job before the `if` is even considered.
+    if: >-
+      !cancelled() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      (needs.test.result == 'success' || vars.RELEASE_IGNORES_SUITE == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm semantic-release
+
+  # 🔴 A red `main` must announce itself, not wait to ambush a PR.
+  #
+  # The full batched suite DOES run on every push to main — that was never the
+  # gap. The gap was that "notify" echoed a line into a log nobody opens, so
+  # main ran red for days while `#2096`'s six failures sat there, and the first
+  # person to learn of them was whoever next touched one of those spec files —
+  # at which point they look like that PR's fault.
+  #
+  # PRs still run only their changed specs (fast feedback); this is what makes
+  # the main-push run's verdict impossible to miss.
+  notify:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Notify on success
+        if: ${{ needs.test.result == 'success' }}
+        run: |
+          echo "Tests passed and release completed successfully!"
+
+      # 🔑 Mirrors `e2e.yml`'s `notify-on-red` deliberately — same sticky
+      # marker, same github-script, same label-free create. That job's own
+      # comment records why: `issues.create` 422s on a label that does not
+      # exist, which leaves the notifier silently unable to notify — the exact
+      # failure it exists to prevent. Two different implementations of one idea
+      # drift; this is the same idea, so it is the same shape.
+      #
+      # What this one adds is the other half: the first GREEN main push closes
+      # the sticky, so nobody has to remember to.
+      - name: Open or update the sticky "main is red" issue
+        if: ${{ needs.test.result == 'failure' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        with:
+          script: |
+            const MARKER = '<!-- backend-suite-red-sticky -->'
+            const TITLE = '🔴 The backend integration suite is red on main'
+            const { owner, repo } = context.repo
+            const runUrl = process.env.RUN_URL
+            const sha = (process.env.SHA || '').slice(0, 9)
+
+            const existing = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            )
+            const sticky = existing.find(
+              (i) => !i.pull_request && i.title === TITLE && (i.body || '').includes(MARKER)
+            )
+
+            const line = `- 🔴 \`${sha}\` failed — [run](${runUrl})`
+
+            if (sticky) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: sticky.number,
+                body: `${line}\n\nStill red. This is the same sticky issue, not a new one.`,
+              })
+              core.notice(`Updated sticky issue #${sticky.number}`)
+              return
+            }
+
+            const body = [
+              MARKER,
+              '## The backend integration suite is red on `main`',
+              '',
+              line,
+              '',
+              'This issue is **sticky**: while the suite stays red, each failing run on',
+              '`main` adds a comment here instead of filing a new issue. The first GREEN',
+              'push to `main` closes it automatically.',
+              '',
+              '### Why this exists',
+              '',
+              'The full batched suite has always run on every push to `main`. What did',
+              'not exist was anyone learning the result — `notify` echoed "Tests or',
+              'release failed!" into a job log nobody opens. #2096 recorded six failures',
+              'that had been sitting on `main` for days; the full run actually held',
+              'EIGHT, and one of them was a live cross-tenant region leak, not a stale',
+              'test. PRs run only the specs they changed, so the first person to meet a',
+              'red main is whoever next edits one of those files — where it looks like',
+              'their fault.',
+              '',
+              '### What to do',
+              '',
+              '1. Open the failing `test (N)` shard and read the **totals line**, not',
+              '   just the first `●` — a shard can fail more than one spec, and a shard',
+              '   that OOMs prints no totals at all.',
+              '2. Check WHICH jobs ran. An empty check list is indistinguishable from a',
+              '   passing one (#2098).',
+              '3. Reproduce with the shared runner, a few specs at a time:',
+              '   `pnpm test:integration:http:shared ./integration-tests/http/<spec>`',
+            ].join('\n')
+
+            const created = await github.rest.issues.create({
+              owner, repo, title: TITLE, body,
+            })
+            core.notice(`Opened sticky issue #${created.data.number}`)
+
+      - name: Close the sticky when main goes green
+        if: ${{ needs.test.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const MARKER = '<!-- backend-suite-red-sticky -->'
+            const TITLE = '🔴 The backend integration suite is red on main'
+            const { owner, repo } = context.repo
+
+            const existing = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            )
+            const sticky = existing.find(
+              (i) => !i.pull_request && i.title === TITLE && (i.body || '').includes(MARKER)
+            )
+            if (!sticky) return
+
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: sticky.number,
+              body: `✅ Green again — [run](${process.env.RUN_URL})`,
+            })
+            await github.rest.issues.update({
+              owner, repo, issue_number: sticky.number, state: 'closed',
+            })
+            core.notice(`Closed sticky issue #${sticky.number}`)
+
+      - name: Notify on failure
+        if: ${{ needs.test.result == 'failure' }}
+        run: |
+          echo "Tests or release failed!"

@@ -1,0 +1,200 @@
+---
+title: ringSector
+---
+
+The `ringsector` macro drafts a ring sector, which is like a part of a donut
+with an inside and outside radius. It is particularly useful for drafting
+curved waistbands, circle skirts, and so on.
+
+It is provided by the [ringsector plugin](/reference/plugins/ringsector).
+
+:::note
+
+##### Not a core-plugins macro
+
+The `ringsector` macro is not provided by the [core-plugins](/reference/plugins/core),
+so you need to load the [ringsector plugin](/reference/plugins/ringsector) explicitly
+if you want to use it.
+
+:::
+
+## Signature
+
+```js
+macro('ringsector', {
+  String id='ringsector',
+  Point center = new Point(0,0),
+  Number angle,
+  Number insideRadius,
+  Number outsideRadius,
+  Boolean rotate = false,
+})
+```
+
+## Example
+
+<Example caption="Example of a ring sector drafted by this macro">
+```js
+({ Point, macro, Path, paths, part }) => {
+
+  macro('ringsector', {
+    angle: 60,
+    insideRadius: 30,
+    outsideRadius: 45,
+  })
+
+  return part
+}
+
+```
+</Example>
+
+## Configuration
+
+| Property       | Default           | Type                | Description |
+|---------------:|-------------------|------------|-------------|
+| `id`           | `ringsector`      | String     | The id to use in auto-generate macro points and paths |
+| `center`       | `new Point(0,0)`  | [Point][1] | The center point of the ring sector |
+| `angle`        |                   | Number     | The angle the ring sector should cover |
+| `insideRadius` |                   | Number     | The inside radius of the ring sector |
+| `outsideRadius` |                  | Number     | The outside radius of the ring sector |
+| `rotate`       | `false`           | Boolean    | Whether or not to rotate the ringsector so one of its sides is vertical (see [example below](#example-when-rotatetrue)) |
+
+[1]: /reference/api/point
+
+## Notes
+
+The `ringsector` macro creates a `path` that can be used as a seam path for a part. If doing so, the left side of the path assumes a `cutOnFold`, as the `sa` is not offset here like it is along the rest of the `path`.
+
+### Example when rotate=true
+
+<Example caption="Example of a ring sector drafted by this macro when rotate is truthy">
+```js
+({ Point, macro, Path, paths, part }) => {
+
+  macro('ringsector', {
+    angle: 60,
+    insideRadius: 30,
+    outsideRadius: 45,
+    rotate: true,
+  })
+
+  return part
+}
+```
+
+</Example>
+
+## Points and Paths
+
+The `ringsector` macro creates the following
+[Points](/reference/api/point) and [Paths](/reference/api/path)
+(with "id" replaced with the value of `id` in the names).
+Different Points and Paths are created depending on the value of
+the `rotate` property.
+
+### When `rotate=false`
+
+#### Points when `rotate=false`
+
+| Point Name                                        | Description                                       |
+| :------------------------------------------------ | ------------------------------------------------- |
+| `points.__macro_ringsector_id_center`             | Center of the ring sector arc circles                         |
+| `points.__macro_ringsector_id_ex2Flipped`         | Start of outer arc; Start and end of the path |
+| `points.__macro_ringsector_id_ex2cFlipped`        | Curve control point from start to middle of outer arc                             |
+| `points.__macro_ringsector_id_ex1cFlipped`        | Curve control point from middle to start of outer arc                             |
+| `points.__macro_ringsector_id_ex2FlippedRotated`  | Middle of outer arc                               |
+| `points.__macro_ringsector_id_ex2cFlippedRotated` | Curve control point from middle to end of outer arc                             |
+| `points.__macro_ringsector_id_ex1cFlippedRotated` | Curve control point from end to middle of outer arc                             |
+| `points.__macro_ringsector_id_ex1Rotated`         | End of outer arc                                  |
+| `points.__macro_ringsector_id_in1Rotated`         | Start of inner arc                                |
+| `points.__macro_ringsector_id_in1cFlippedRotated` | Curve control point from start to middle of inner arc                             |
+| `points.__macro_ringsector_id_in2cFlippedRotated` | Curve control point from middle to start of inner arc                                   |
+| `points.__macro_ringsector_id_in2FlippedRotated`  | Middle of inner arc                               |
+| `points.__macro_ringsector_id_in1cFlipped`        | Curve control point from middle to end of inner arc                             |
+| `points.__macro_ringsector_id_in2cFlipped`        | Curve control point from end to middle of inner arc                             |
+| `points.__macro_ringsector_id_in2Flipped`         | End of inner arc                                  |
+
+#### Paths when `rotate=false`
+
+| Path Name                          | Description          |
+| :--------------------------------- | -------------------- |
+| `paths.__macro_ringsector_id_path` | The ring sector path |
+
+`paths.__macro_ringsector_id_path` is constructed in the following manner
+when `rotate=false`.
+
+```js
+Path paths.__macro_ringsector_id_path = new Path()
+  .move(points.__macro_ringsector_id_ex2Flipped)
+  .curve(points.__macro_ringsector_id_ex2cFlipped,
+    points.__macro_ringsector_id_ex1cFlipped,
+    points.__macro_ringsector_id_ex2FlippedRotated)
+  .curve(points.__macro_ringsector_id_ex2cFlippedRotated,
+    points.__macro_ringsector_id_ex1cFlippedRotated,
+    points.__macro_ringsector_id_ex1Rotated)
+  .line(points.__macro_ringsector_id_in1Rotated)
+  .curve(points.__macro_ringsector_id_in1cFlippedRotated,
+    points.__macro_ringsector_id_in2cFlippedRotated,
+    points.__macro_ringsector_id_in2FlippedRotated)
+  .curve(points.__macro_ringsector_id_in1cFlipped,
+    points.__macro_ringsector_id_in2cFlipped,
+    points.__macro_ringsector_id_in2Flipped)
+  .line(points.__macro_ringsector_id_ex2Flipped)
+  .close()
+```
+
+![`ringsector` arc points](ringsector_points.png)
+
+### When `rotate=true`
+
+#### Points when `rotate=true`
+
+| Point Name                                 | Description                                       |
+| :----------------------------------------- | ------------------------------------------------- |
+| `points.__macro_ringsector_id_center`      | Center of the ring sector arc circles                         |
+| `points.__macro_ringsector_id_ex2Flipped`  | Start of outer arc; Start and end of the path |
+| `points.__macro_ringsector_id_ex2cFlipped` | Curve control point from start to middle of outer arc |
+| `points.__macro_ringsector_id_ex1cFlipped` | Curve control point from middle to start of outer arc                             |
+| `points.__macro_ringsector_id_ex1`         | Middle of outer arc                               |
+| `points.__macro_ringsector_id_ex1c`        | Curve control point from middle to end of outer arc                             |
+| `points.__macro_ringsector_id_ex2c`        | Curve control point from end to middle of outer arc                             |
+| `points.__macro_ringsector_id_ex2`         | End of outer arc                                  |
+| `points.__macro_ringsector_id_in2`         | Start of inner arc                                |
+| `points.__macro_ringsector_id_in2c`        | Curve control point from start to middle of inner arc                             |
+| `points.__macro_ringsector_id_in1c`        | Curve control point from middle to start of inner arc                                   |
+| `points.__macro_ringsector_id_in1`         | Middle of inner arc                               |
+| `points.__macro_ringsector_id_in1cFlipped` | Curve control point from middle to end of inner arc                             |
+| `points.__macro_ringsector_id_in2cFlipped` | Curve control point from end to middle of inner arc                             |
+| `points.__macro_ringsector_id_in2Flipped`  | End of inner arc                                  |
+
+#### Paths when `rotate=true`
+
+| Path Name                          | Description          |
+| :--------------------------------- | -------------------- |
+| `paths.__macro_ringsector_id_path` | The ring sector path |
+
+`paths.__macro_ringsector_id_path` is constructed in the following manner
+when `rotate=true`.
+
+```js
+Path paths.__macro_ringsector_id_path = new Path()
+  .move(points.__macro_ringsector_id_ex2Flipped)
+  .curve(points.__macro_ringsector_id_ex2cFlipped,
+    points.__macro_ringsector_id_ex1cFlipped,
+    points.__macro_ringsector_id_ex1)
+  .curve(points.__macro_ringsector_id_ex1c,
+    points.__macro_ringsector_id_ex2c,
+    points.__macro_ringsector_id_ex2)
+  .line(points.__macro_ringsector_id_in2)
+  .curve(points.__macro_ringsector_id_in2c,
+    points.__macro_ringsector_id_in1c,
+    points.__macro_ringsector_id_in1)
+  .curve(points.__macro_ringsector_id_in1cFlipped,
+    points.__macro_ringsector_id_in2cFlipped,
+    points.__macro_ringsector_id_in2Flipped)
+  .line(points.__macro_ringsector_id_ex2Flipped)
+  .close()
+```
+
+![`ringsector` arc points](ringsector_rotate_points.png)

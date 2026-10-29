@@ -1,0 +1,588 @@
+import {
+  createStep,
+  createWorkflow,
+  StepResponse,
+  WorkflowResponse,
+  WorkflowData,
+  transform,
+} from "@medusajs/framework/workflows-sdk"
+import { ContainerRegistrationKeys, MedusaError, Modules } from "@medusajs/framework/utils"
+import type { Link } from "@medusajs/modules-sdk"
+import type { RemoteQueryFunction } from "@medusajs/types"
+import { FAIRE_SYNC_MODULE } from "../modules/faire-sync"
+import FaireSyncService from "../modules/faire-sync/service"
+import {
+  CreateProductInput,
+  ProductResponse,
+} from "../lib/types"
+
+export const SYNC_PRODUCT_TO_FAIRE = "faire-sync-product"
+
+export type SyncProductToFaireInput = {
+  product_id: string
+}
+
+type ResolvedConfig = {
+  account_id: string
+  brand_id: string
+  access_token: string
+  auth_mode: "oauth" | "apiKey"
+  currency: string | null
+  country: string | null
+  settings: any
+}
+
+type PreparedProduct = {
+  product_id: string
+  product_title: string
+  product_status: string
+  product_input: CreateProductInput
+  existing_product_token: string | null
+}
+
+type SyncResult = {
+  product: ProductResponse
+  published: boolean
+  warnings: string[]
+}
+
+/**
+ * Faire doesn't expose a public storefront URL for every product the way Etsy
+ * does; fall back to the brand portal link if no url is present.
+ */
+const productDisplayUrl = (product: ProductResponse): string | null => {
+  if (product.url) return product.url
+  if (!product.product_token) return null
+  return `https://www.faire.com/brand/products/${product.product_token}`
+}
+
+/**
+ * Faire variant prices are geo-scoped (`geo_constraint`). Derive a sensible
+ * default from the brand's currency (and country when known). Eurozone brands
+ * map to the EUROPEAN_UNION country_group; otherwise scope to a single country.
+ */
+const geoForCurrency = (
+  currency: string,
+  country: string | null
+): { country?: string; country_group?: string } => {
+  switch (currency) {
+    case "EUR":
+      return { country_group: "EUROPEAN_UNION" }
+    case "GBP":
+      return { country: "GB" }
+    case "USD":
+      return { country: "US" }
+    case "INR":
+      return { country: "IN" }
+    case "CAD":
+      return { country: "CA" }
+    case "AUD":
+      return { country: "AU" }
+    default:
+      return country ? { country } : { country_group: "EUROPEAN_UNION" }
+  }
+}
+
+// ── Step 1: resolve account (fresh token) + settings ─────────────────────
+
+const resolveFaireConfigStep = createStep(
+  "faire-resolve-config-step",
+  async (_, { container }): Promise<StepResponse<ResolvedConfig>> => {
+    const service: FaireSyncService = container.resolve(FAIRE_SYNC_MODULE)
+    const account = await service.ensureFreshToken()
+    const settings = await service.getSettings()
+    return new StepResponse({
+      account_id: account.id,
+      brand_id: account.brand_id,
+      access_token: account.access_token,
+      auth_mode: (account.auth_mode as "oauth" | "apiKey") ?? "oauth",
+      currency: account.currency ?? null,
+      country: account.country ?? null,
+      settings,
+    })
+  }
+)
+
+// ── Step 2: fetch + map product ──────────────────────────────────────────
+
+const prepareProductStep = createStep(
+  "faire-prepare-product-step",
+  async (
+    input: {
+      product_id: string
+      settings: any
+      brand_id: string
+      currency: string | null
+      country: string | null
+      access_token: string
+      auth_mode: "oauth" | "apiKey"
+    },
+    { container }
+  ): Promise<StepResponse<PreparedProduct>> => {
+    const query = container.resolve(
+      ContainerRegistrationKeys.QUERY
+    ) as Omit<RemoteQueryFunction, symbol>
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link
+    const service: FaireSyncService = container.resolve(FAIRE_SYNC_MODULE)
+
+    const { data: products } = await query.graph({
+      entity: "product",
+      fields: [
+        "id",
+        "title",
+        "description",
+        "status",
+        "metadata",
+        "type.value",
+        "tags.*",
+        "variants.*",
+        "variants.prices.*",
+        "variants.options.*",
+        "variants.options.option.*",
+        "variants.manage_inventory",
+        "variants.inventory_items.*",
+        // Real stock lives on the inventory item's per-location levels; the
+        // variant has no `inventory_quantity` column in a plain query.graph.
+        "variants.inventory_items.inventory.location_levels.*",
+        "images.*",
+        "variants.sku",
+      ],
+      filters: { id: input.product_id },
+    })
+
+    const product: any = products?.[0]
+    if (!product) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_FOUND,
+        `Product ${input.product_id} not found`
+      )
+    }
+
+    // Resolve existing Faire product (from link)
+    let existing_product_token: string | null = null
+    const account = await service.getActiveAccount()
+    if (account) {
+      try {
+        const linkRows = await remoteLink.list({
+          [Modules.PRODUCT]: { product_id: input.product_id },
+          [FAIRE_SYNC_MODULE]: { faire_sync_account_id: account.id },
+        })
+        const row: any = (linkRows as any[])?.[0]
+        existing_product_token = row?.faire_product_token ?? null
+      } catch {
+        // no link yet
+      }
+    }
+
+    const settings = input.settings
+    const metadata = product.metadata || {}
+    const variants: any[] = product.variants || []
+
+    // ── Currency + geo constraint (Faire prices are geo-scoped) ────────────
+    // Prefer the brand's own currency; fall back to the price currency Medusa
+    // stored, then EUR. Currency picks the price row + drives the geo default.
+    const currency = String(
+      metadata.faire_currency ||
+        input.currency ||
+        (variants.flatMap((v) => v.prices || [])[0]?.currency_code ?? "EUR")
+    ).toUpperCase()
+    const geoConstraint: { country?: string; country_group?: string } =
+      metadata.faire_geo_constraint && typeof metadata.faire_geo_constraint === "object"
+        ? metadata.faire_geo_constraint
+        : geoForCurrency(currency, input.country)
+
+    // Medusa v2 stores money as a whole decimal in the price's currency; Faire
+    // wants integer minor units (cents), so round.
+    const toMinor = (amount: any): number => Math.round(Number(amount || 0) * 100)
+
+    const markupPercent =
+      Number(metadata.faire_wholesale_markup_percent ?? settings.default_wholesale_markup_percent) ||
+      0
+
+    // Pick the price row matching the chosen currency (fall back to first).
+    const pickPrice = (prices: any[]): any =>
+      prices.find((p) => String(p.currency_code || "").toUpperCase() === currency) ??
+      prices[0] ??
+      null
+
+    // Available quantity for Faire. Medusa v2 has no `variant.inventory_quantity`
+    // column in a plain query.graph — the old code read that undefined field so
+    // EVERY variant published to Faire as available_quantity 0 (sold out). Compute
+    // it from the inventory item location levels (available = stocked − reserved),
+    // matching Medusa's own `min(floor(itemAvailable / required_quantity))` rule.
+    const variantQuantity = (v: any): number => {
+      // manage_inventory === false → Medusa treats the variant as always in
+      // stock, so there are no levels to read. Publish a healthy default (Faire
+      // needs a number) that operators can override per product.
+      if (v?.manage_inventory === false) {
+        const d = Number(metadata.faire_default_available_quantity)
+        return Number.isFinite(d) && d >= 0 ? Math.floor(d) : 100
+      }
+      const items: any[] = v?.inventory_items || []
+      if (!items.length) return 0
+      let available = Infinity
+      for (const link of items) {
+        // Tolerate both the pivot shape ({ inventory: {...} }) and a flattened one.
+        const inv = link?.inventory ?? link
+        const levels: any[] = inv?.location_levels || []
+        const itemAvailable = levels.reduce((sum: number, lvl: any) => {
+          const stocked = Number(lvl?.stocked_quantity ?? 0)
+          const reserved = Number(lvl?.reserved_quantity ?? 0)
+          return sum + Math.max(0, stocked - reserved)
+        }, 0)
+        const required = Number(link?.required_quantity ?? 1) || 1
+        available = Math.min(available, Math.floor(itemAvailable / required))
+      }
+      return Number.isFinite(available) ? Math.max(0, available) : 0
+    }
+
+    const wholesaleFrom = (retailMinor: number): number =>
+      markupPercent > 0
+        ? Math.round((retailMinor * (100 - markupPercent)) / 100)
+        : retailMinor
+
+    // Faire prices are geo-scoped and a variant may carry several — one per
+    // currency the product is priced in. Emit a price for EVERY currency present
+    // (INR → India, USD → US, EUR → the EU group, etc.) so buyers in each region
+    // see their own currency, and fall back to the chosen/default currency +
+    // geo (EUR by default) when the product has no multi-currency prices.
+    const buildPrices = (variantPrices: any[]) => {
+      const byCurrency = new Map<string, any>()
+      for (const p of variantPrices || []) {
+        const c = String(p.currency_code || "").toUpperCase()
+        if (!c) continue
+        // First price row per currency wins (Medusa may hold several tiers).
+        if (!byCurrency.has(c)) byCurrency.set(c, p)
+      }
+
+      const rows: {
+        geo_constraint: { country?: string; country_group?: string }
+        wholesale_price: { amount_minor: number; currency: string }
+        retail_price: { amount_minor: number; currency: string }
+      }[] = []
+      for (const [c, p] of byCurrency) {
+        const retailMinor = toMinor(p.amount)
+        if (retailMinor <= 0) continue
+        // The explicit metadata override only applies to the brand's primary
+        // currency; every other currency is scoped by its natural geo.
+        const geo =
+          c === currency ? geoConstraint : geoForCurrency(c, input.country)
+        rows.push({
+          geo_constraint: geo,
+          wholesale_price: { amount_minor: wholesaleFrom(retailMinor), currency: c },
+          retail_price: { amount_minor: retailMinor, currency: c },
+        })
+      }
+
+      // Guarantee at least the chosen-currency price so a create never ships a
+      // variant with no price at all.
+      if (!rows.length) {
+        const retail = pickPrice(variantPrices || [])
+        const retailMinor = retail ? toMinor(retail.amount) : 0
+        if (retailMinor > 0) {
+          rows.push({
+            geo_constraint: geoConstraint,
+            wholesale_price: { amount_minor: wholesaleFrom(retailMinor), currency },
+            retail_price: { amount_minor: retailMinor, currency },
+          })
+        }
+      }
+      return rows.length ? rows : undefined
+    }
+
+    const buildVariant = (v: any, idx: number) => {
+      const sku = v.sku || v.id
+      const options =
+        (v.options || [])
+          .map((o: any) => ({
+            name: String(o.option?.title || o.title || "Option"),
+            value: String(o.value ?? ""),
+          }))
+          .filter((o: any) => o.value) || []
+      return {
+        sku,
+        name: v.title || sku,
+        idempotence_token: `${product.id}:${v.id || sku}`,
+        options: options.length ? options : undefined,
+        available_quantity: variantQuantity(v),
+        prices: buildPrices(v.prices || []),
+      }
+    }
+
+    const images = (product.images || [])
+      .map((img: any) => ({ url: img.url }))
+      .filter((i: any) => i.url)
+
+    // Resolve taxonomy_type.id — REQUIRED by Faire create. Priority:
+    //   product.metadata.faire_taxonomy_type_id (tt_… or a category name)
+    //   → product.metadata.faire_category (name)
+    //   → product.type.value (the native Medusa Product Type, matched by name)
+    //   → settings.default_category (id or name) → error.
+    // Product Type is the natural per-product carrier; the product widget lets an
+    // operator pin an exact `tt_…` id in metadata when the type name is ambiguous.
+    const client = service.getClient(input.auth_mode)
+    const categoryHint =
+      metadata.faire_taxonomy_type_id ||
+      metadata.faire_category ||
+      product.type?.value ||
+      settings.default_category ||
+      ""
+    const taxonomyTypeId = await client.resolveTaxonomyTypeId(
+      input.access_token,
+      String(categoryHint)
+    )
+    if (!taxonomyTypeId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Faire requires a product category (taxonomy_type). Set the product's " +
+          "Type to a Faire category name, pick one from the Faire panel on the " +
+          "product page, or set a fallback category in Faire sync settings."
+      )
+    }
+
+    const lifecycle_state: "DRAFT" | "PUBLISHED" =
+      settings.follow_product_status !== false && product.status === "published"
+        ? "PUBLISHED"
+        : "DRAFT"
+
+    const builtVariants = (variants.length ? variants : [null]).map((v, i) =>
+      v
+        ? buildVariant(v, i)
+        : {
+            // Single-variant fallback for products with no explicit variants.
+            sku: product.id,
+            name: product.title || "Default",
+            idempotence_token: `${product.id}:default`,
+            available_quantity: 0,
+          }
+    )
+
+    // Faire requires `unit_multiplier` — the number of individual units in one
+    // sellable unit (e.g. a case of 6) — as a positive integer, or it rejects
+    // the create with 400 "unit multiplier is mandatory…". Default to 1 (sold
+    // individually); allow a per-product override via metadata.
+    const toPositiveInt = (v: any): number | null => {
+      const n = Math.floor(Number(v))
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+    const unit_multiplier = toPositiveInt(metadata.faire_unit_multiplier) ?? 1
+    const minimum_order_quantity =
+      toPositiveInt(metadata.faire_min_order_quantity) ??
+      toPositiveInt(settings.default_min_order_quantity) ??
+      1
+
+    const product_input: CreateProductInput = {
+      name: (product.title || "Untitled Product").slice(0, 140),
+      idempotence_token: product.id,
+      lifecycle_state,
+      taxonomy_type: { id: taxonomyTypeId },
+      description: product.description || "",
+      short_description:
+        typeof metadata.faire_short_description === "string"
+          ? metadata.faire_short_description
+          : undefined,
+      unit_multiplier,
+      minimum_order_quantity,
+      images,
+      variants: builtVariants,
+    }
+
+    return new StepResponse({
+      product_id: input.product_id,
+      product_title: product.title,
+      product_status: product.status,
+      product_input,
+      existing_product_token,
+    })
+  }
+)
+
+// ── Step 3: create/update product + push inventory ───────────────────────
+
+const syncProductStep = createStep(
+  "faire-sync-product-step",
+  async (
+    input: {
+      config: ResolvedConfig
+      prepared: PreparedProduct
+    },
+    { container }
+  ): Promise<StepResponse<SyncResult>> => {
+    const service: FaireSyncService = container.resolve(FAIRE_SYNC_MODULE)
+    const client = service.getClient(input.config.auth_mode)
+    const { access_token, settings } = input.config
+    const { product_input, existing_product_token, product_status } =
+      input.prepared
+
+    const warnings: string[] = []
+    let product: ProductResponse
+
+    try {
+      if (existing_product_token) {
+        product = await client.updateProduct(access_token, existing_product_token, {
+          name: product_input.name,
+          description: product_input.description,
+          short_description: product_input.short_description,
+          lifecycle_state: product_input.lifecycle_state,
+          taxonomy_type: product_input.taxonomy_type,
+          images: product_input.images,
+          variants: product_input.variants,
+        })
+      } else {
+        product = await client.createProduct(access_token, product_input)
+      }
+    } catch (err: any) {
+      // Image fetch/upload failures shouldn't abort the whole sync.
+      warnings.push(`Product create/update failed: ${err?.message || err}`)
+      throw err
+    }
+
+    // Push inventory levels — but ONLY for variants with a real SKU. When a
+    // Medusa variant has no SKU we fall back to its id for the create payload
+    // (Faire needs *something*), but that synthetic id (`variant_…` / `prod_…`)
+    // is NOT a Faire SKU, so `PATCH product-inventory/by-skus` 404s on it. Those
+    // variants are already stocked via the create payload's `available_quantity`,
+    // so skip them here rather than push an id Faire will reject.
+    if (product_input.variants?.length) {
+      const levels = product_input.variants
+        .filter((v) => v.sku && !/^(prod|variant)_/.test(v.sku))
+        .map((v) => ({
+          sku: v.sku,
+          on_hand_quantity: v.available_quantity ?? 0,
+        }))
+      if (levels.length) {
+        try {
+          await client.updateInventory(access_token, levels)
+        } catch (err: any) {
+          warnings.push(`Inventory push failed: ${err?.message || err}`)
+        }
+      }
+    }
+
+    // Publish decision: follow product status.
+    const shouldPublish =
+      settings.follow_product_status !== false && product_status === "published"
+    const published = shouldPublish && product.state === "active"
+
+    return new StepResponse({
+      product,
+      published,
+      warnings,
+    })
+  },
+  async () => {}
+)
+
+// ── Step 4: persist sync record + link ───────────────────────────────────
+
+const persistSyncResultStep = createStep(
+  "faire-persist-sync-result-step",
+  async (
+    input: {
+      config: ResolvedConfig
+      prepared: PreparedProduct
+      result: SyncResult
+    },
+    { container }
+  ): Promise<StepResponse<void>> => {
+    const service: FaireSyncService = container.resolve(FAIRE_SYNC_MODULE)
+    const remoteLink = container.resolve(ContainerRegistrationKeys.LINK) as Link
+
+    const { config, prepared, result } = input
+    const status: "success" | "draft" = result.published
+      ? "success"
+      : result.product.state === "draft"
+        ? "draft"
+        : "success"
+
+    await service.createSyncRecord({
+      product_id: prepared.product_id,
+      account_id: config.account_id,
+      product_token: result.product.product_token,
+      product_url: productDisplayUrl(result.product),
+      product_state: result.product.state,
+      action: prepared.existing_product_token ? "update" : "create",
+      status,
+      published: result.published,
+      error_message: result.warnings.length ? result.warnings.join(" | ") : null,
+      warnings: result.warnings,
+      metadata: { title: prepared.product_title },
+      synced_at: new Date(),
+    } as any)
+
+    try {
+      await remoteLink.dismiss([
+        {
+          [Modules.PRODUCT]: { product_id: prepared.product_id },
+          [FAIRE_SYNC_MODULE]: { faire_sync_account_id: config.account_id },
+        },
+      ])
+    } catch {
+      // ignore dismiss errors
+    }
+
+    await remoteLink.create([
+      {
+        [Modules.PRODUCT]: { product_id: prepared.product_id },
+        [FAIRE_SYNC_MODULE]: { faire_sync_account_id: config.account_id },
+        data: {
+          faire_product_token: result.product.product_token,
+          faire_url: productDisplayUrl(result.product),
+          sync_status: "synced",
+          last_synced_at: new Date(),
+          sync_error: result.warnings.length ? result.warnings.join(" | ") : null,
+          metadata: {
+            published: result.published,
+            state: result.product.state,
+            product_status: prepared.product_status,
+          },
+        },
+      },
+    ])
+
+    return new StepResponse()
+  }
+)
+
+// ── Workflow ─────────────────────────────────────────────────────────────
+
+export const syncProductToFaireWorkflow = createWorkflow(
+  SYNC_PRODUCT_TO_FAIRE,
+  (input: WorkflowData<SyncProductToFaireInput>) => {
+    const config = resolveFaireConfigStep()
+    const prepared = prepareProductStep(
+      transform({ input, config }, (data) => ({
+        product_id: data.input.product_id,
+        settings: data.config.settings,
+        brand_id: data.config.brand_id,
+        currency: data.config.currency,
+        country: data.config.country,
+        access_token: data.config.access_token,
+        auth_mode: data.config.auth_mode,
+      }))
+    )
+
+    const result = syncProductStep(
+      transform({ config, prepared }, (data) => ({
+        config: data.config,
+        prepared: data.prepared,
+      }))
+    )
+
+    persistSyncResultStep(
+      transform({ config, prepared, result }, (data) => ({
+        config: data.config,
+        prepared: data.prepared,
+        result: data.result,
+      }))
+    )
+
+    return new WorkflowResponse({
+      product_token: result.product.product_token,
+      product_url: productDisplayUrl(result.product),
+      published: result.published,
+      state: result.product.state,
+      warnings: result.warnings,
+    })
+  }
+)

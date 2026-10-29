@@ -1,0 +1,32 @@
+---
+title: Admin
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { ComponentDocs } from '@site/src/components/component-docs.js'
+import {
+  jsdocSubscriberAdministration,
+  jsdocUserAdministration,
+} from '@site/prebuild/jsdoc/components.admin.mjs'
+import { UserAdministration, SubscriberAdministration } from '@freesewing/react/components/Admin'
+
+<DocusaurusDoc>
+
+- [Components](#components)
+
+## Components
+
+The **Admin** component family provides the following [components](#components):
+
+- [SubscriberAdministration ](#subscriberadministration)
+- [UserAdministration ](#useradministration)
+
+### SubscriberAdministration
+
+<ComponentDocs docs={jsdocSubscriberAdministration} example={SubscriberAdministration} />
+
+### UserAdministration
+
+<ComponentDocs docs={jsdocUserAdministration} example={UserAdministration} />
+
+</DocusaurusDoc>

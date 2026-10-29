@@ -1,0 +1,138 @@
+/**
+ * @description
+ * This route allows manual execution of a visual flow by its ID.
+ * Visual flows are automated workflows that can be triggered manually
+ * via this endpoint, typically for testing or administrative purposes.
+ *
+ * @example
+ * // Basic execution with minimal data
+ * POST /admin/visual-flows/vf_123456789/execute
+ * {
+ *   "trigger_data": {
+ *     "product_id": "prod_123",
+ *     "quantity": 5
+ *   }
+ * }
+ *
+ * @example
+ * // Execution with metadata for tracking
+ * POST /admin/visual-flows/vf_123456789/execute
+ * {
+ *   "trigger_data": {
+ *     "order_id": "order_456",
+ *     "customer_email": "user@example.com"
+ *   },
+ *   "metadata": {
+ *     "source": "admin-panel",
+ *     "initiated_by": "admin@example.com"
+ *   }
+ * }
+ *
+ * @example
+ * // Execution without any additional data
+ * POST /admin/visual-flows/vf_123456789/execute
+ * {}
+ *
+ * @response
+ * {
+ *   "execution_id": "exec_987654321",
+ *   "status": "completed",
+ *   "data_chain": {
+ *     "step1_output": { ... },
+ *     "step2_output": { ... }
+ *   },
+ *   "error": null
+ * }
+ *
+ * @response 400 - Invalid input data
+ * {
+ *   "error": "Validation error",
+ *   "details": [ ... ]
+ * }
+ *
+ * @response 500 - Workflow execution failed
+ * {
+ *   "error": "Failed to execute flow",
+ *   "details": [ ... ]
+ * }
+ */
+import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import { z } from "@medusajs/framework/zod"
+import { executeVisualFlowWorkflow } from "../../../../../workflows/visual-flows"
+import { VISUAL_FLOWS_MODULE } from "../../../../../modules/visual_flows"
+
+const executeSchema = z.object({
+  trigger_data: z.record(z.string(), z.any()).optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+  /** When set, copies trigger_data from the referenced execution instead of running fresh. */
+  replay_execution_id: z.string().optional(),
+})
+
+/**
+ * POST /admin/visual-flows/:id/execute
+ * Manually execute a visual flow using workflow.
+ * Pass replay_execution_id to replay a previous execution's trigger context.
+ */
+export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
+  try {
+    const { id } = req.params
+    const data = executeSchema.parse(req.body)
+    const userId = (req as any).auth_context?.actor_id
+
+    // Replay: copy trigger_data + event_name from a previous execution so
+    // wildcard-listening flows (event_pattern) get the same $trigger.event
+    // they had on the original run. Caller-supplied metadata.event_name still
+    // wins so testers can override.
+    let triggerData = data.trigger_data || {}
+    let replayedFrom: string | undefined
+    let replayedEventName: string | undefined
+    if (data.replay_execution_id) {
+      const service = req.scope.resolve(VISUAL_FLOWS_MODULE) as any
+      const prev = await service.retrieveVisualFlowExecution(data.replay_execution_id, {
+        select: ["id", "trigger_data", "metadata"],
+      }).catch(() => null)
+      if (prev?.trigger_data) {
+        triggerData = prev.trigger_data
+        replayedFrom = data.replay_execution_id
+        replayedEventName = (prev.metadata as Record<string, any> | null)?.event_name
+      }
+    }
+
+    // Execute the flow using workflow
+    const { result, errors } = await executeVisualFlowWorkflow(req.scope).run({
+      input: {
+        flowId: id,
+        triggerData,
+        triggeredBy: userId || "manual",
+        metadata: {
+          ...(replayedEventName ? { event_name: replayedEventName } : {}),
+          ...data.metadata,
+          ...(replayedFrom ? { replayed_from: replayedFrom } : {}),
+        },
+      },
+    })
+    
+    if (errors?.length) {
+      const logger: any = req.scope.resolve(ContainerRegistrationKeys.LOGGER)
+      logger.error(`[visual-flows] Execute workflow errors: ${JSON.stringify(errors)}`)
+      return res.status(500).json({ 
+        error: "Failed to execute flow", 
+        details: errors 
+      })
+    }
+    
+    res.json({
+      execution_id: result.executionId,
+      status: result.status,
+      data_chain: result.dataChain,
+      error: result.error,
+    })
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Validation error", details: error.issues })
+    } else {
+      res.status(400).json({ error: error.message })
+    }
+  }
+}

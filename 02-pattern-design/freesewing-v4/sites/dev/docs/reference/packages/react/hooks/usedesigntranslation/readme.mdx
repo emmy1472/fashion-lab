@@ -1,0 +1,86 @@
+---
+title: useDesignTranslation
+---
+
+import { DocusaurusDoc } from '@freesewing/react/components/Docusaurus'
+import { Popout } from '@freesewing/react/components/Popout'
+import { Tab, Tabs } from '@freesewing/react/components/Tab'
+
+<DocusaurusDoc>
+
+The **useDesignTranslation** hook provides translations for the entire FreeSewing collection of designs.
+
+<Popout type="tip" title="Beware of bundle size">
+Use this hook to load design translations when you plan to use the entire collection. If
+you only plan to use one or a few designs, you may want to load them differently as
+including this hook will include all FreeSewing designs in your code bundle.
+</Popout>
+
+## Example
+
+<Tabs tabs="hook, named export, direct import">
+<Tab>
+Using the hook makes it easy to load a design translations if you want to be able to
+dynamically load a different design, or do not know in advance what designs
+should be made available.
+
+```js
+import { useDesign } from '@freesewing/react/hooks/useDesign'
+import { useDesignTranslation } from '@freesewing/react/hooks/useDesignTranslation'
+
+const MyComponent = ({ name = 'aaron' }) => {
+  const Aaron = useDesign(name)
+  const i18n = useDesignTranslation(name)
+
+  // ...
+}
+```
+</Tab>
+<Tab>
+This hook has a `designTranslations` named export that holds translations for the entire FreeSewing collection.
+
+```js
+import { designs } from '@freesewing/react/hooks/useDesign'
+import { designTranslations } from '@freesewing/react/hooks/useDesignTranslations'
+
+const MyComponent = () => {
+  const Aaron = designs.aaron
+  const i18n = designTranslations.aaron
+
+  // ...
+}
+```
+</Tab>
+<Tab>
+If you know in advance what design you want, importing directly is more efficient.
+```js
+import { Aaron, i18n } from '@freesewing/aaron'
+
+const MyComponent = () => {
+
+  // ...
+}
+```
+</Tab>
+</Tabs>
+
+## Return value
+
+Calling the hook returns an object holding design translations.
+
+## Named exports
+
+You can also load the `designTranslations` named exports from the same import:
+
+```js
+import {
+  designTranslations, // An object where the key is the (lowercase) design name, and the value on object holding the design translations
+  useDesignTranslation, // The hook
+} from '@freesewing/react/hooks/useDesignTranslation'
+```
+
+- `designTranslations` is an object where the key is the (lowercase) design name, and the value on object holding the design translations.
+
+</DocusaurusDoc>
+
+

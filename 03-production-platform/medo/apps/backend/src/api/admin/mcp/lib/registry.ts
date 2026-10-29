@@ -1,0 +1,8766 @@
+/**
+ * Declarative registry of Admin API endpoints exposed as MCP / chat tools.
+ *
+ * Each entry maps one tool -> one `/admin/*` route. The shared mcp-core
+ * dispatcher (see lib/mcp-core) is a thin loopback proxy: it forwards the tool
+ * arguments to the real admin route, so every tool inherits the route's admin
+ * authentication, `validateAndTransformBody` validators, and workflow logic —
+ * for free. Wrapping a new endpoint is one row.
+ *
+ * Three safety rails the dispatcher enforces from these flags:
+ *  - `dry_run` (every tool): preview the planned request — and, for writes with
+ *    a `previewPath`, the current object — WITHOUT executing.
+ *  - `sensitive` (+ every DELETE): require `confirm: true`.
+ *  - `dangerous` (platform-destructive): additionally require a human `reason`;
+ *    hidden + refused unless ADMIN_MCP_ENABLE_DANGEROUS is on.
+ *
+ * Tier 1 is read-only breadth. Tier 2 adds the first writes — catalog updates
+ * (sensitive: require confirm) and the first `dangerous` action (delete_product:
+ * confirm + reason, gated by ADMIN_MCP_ENABLE_DANGEROUS) — plus the
+ * MCP-observability read (`get_mcp_usage`) and the resolver capability carried
+ * over from the deprecated V4 chat (`resolve_admin_query`). Tier 3 covers
+ * partner ops (#843) and then the three operational domains behind it:
+ * orders/fulfillment + order edits (#1165), production-run lifecycle (#1167)
+ * and the design -> production pipeline (#1166). Remaining uncovered domains
+ * are catalogued in #1168 — add them as real demand appears, not ahead of it:
+ * every row here is bound into EVERY admin-assistant turn, so the registry's
+ * size is a per-request token cost.
+ */
+import type { McpToolDef } from "../../../../lib/mcp-core"
+import { DESIGN_PARTNER_STAGE_ROLES } from "../../../../modules/designs/partner-stage-roles"
+/**
+ * The quote vocabulary, shared with the partner surface (#1439). Both surfaces
+ * mint; a body list written out twice is one edit away from the two assistants
+ * believing different things about what a quote is (#1348).
+ */
+import {
+  QUOTE_MINT_BODY_PARAMS,
+  QUOTE_MINT_READINESS_BODY_PARAMS,
+  QUOTE_MINT_WRITE_GUIDANCE,
+  quoteMintSchemaProps,
+  quoteReadinessSchemaProps,
+} from "../../../../modules/partner-quote/tool-schema"
+import {
+  PHYSICAL_AND_CUSTOMS_BODY_PARAMS,
+  physicalAndCustomsSchemaProps,
+} from "../../../../lib/product-attributes/tool-schema"
+import {
+  PRODUCT_SPEC_BODY_PARAMS,
+  PRODUCT_SPEC_WRITE_GUIDANCE,
+  productSpecSchemaProps,
+} from "../../../../modules/product-spec/tool-schema"
+import { CAPABILITY_ACTIONS } from "../../../../modules/partner_capability/lib/actions"
+
+/**
+ * The FORWARD LIST for `create_product_for_partner`.
+ *
+ * `bodyParams` is what the dispatcher actually sends; a field the schema
+ * advertises but this omits is silently STRIPPED, and the caller gets a
+ * successful-looking create missing whatever it named (#1348). Variants and
+ * prices are exactly the fields whose loss is invisible until someone opens
+ * the storefront and finds an unbuyable product.
+ *
+ * `sales_channels` is deliberately ABSENT: the route derives it from the store,
+ * and letting a caller pass one would let a product be created into a partner's
+ * store while pointing somewhere else entirely.
+ */
+const PARTNER_PRODUCT_BODY_PARAMS = [
+  "title",
+  "handle",
+  "status",
+  "description",
+  "subtitle",
+  "thumbnail",
+  "images",
+  "options",
+  "variants",
+  "collection_id",
+  "type_id",
+  "categories",
+  "tags",
+  "metadata",
+]
+
+/** Admin tool definition. Alias of the shared core tool model. */
+export type AdminMcpToolDef = McpToolDef
+
+export { renderToolGuidance } from "../../../../lib/mcp-core"
+
+// ---- Reusable JSON-Schema fragments ---------------------------------------
+
+const STR = (description: string) => ({ type: "string", description })
+const BOOL = (description: string) => ({ type: "boolean", description })
+const INT = (description: string) => ({ type: "integer", description })
+/**
+ * A decimal number, as distinct from INT.
+ *
+ * Cloth is measured in metres and kilograms: an `integer` schema here tells the
+ * model 26.5 is invalid, and the same rounding already cost this codebase a
+ * silent 1.5 → 2 on a delivery (#342).
+ */
+const NUM = (description: string) => ({ type: "number", description })
+
+const obj = (
+  properties: Record<string, any>,
+  required: string[] = []
+): Record<string, any> => ({
+  type: "object",
+  properties,
+  ...(required.length ? { required } : {}),
+  additionalProperties: false,
+})
+
+/**
+ * #2315 — an inventory order's supplier payment terms, shared by the create
+ * tool and set_inventory_order_payment_terms so the two cannot drift.
+ */
+const PAYMENT_TERMS_PARAMS = {
+  payment_terms: {
+    type: "string",
+    enum: ["on_receipt", "advance"],
+    description:
+      "When the supplier is paid. `on_receipt` (default): nothing billable until goods are received. `advance`: `advance_percent` of the payable ceiling may be billed before delivery.",
+  },
+  advance_percent: {
+    type: "integer",
+    minimum: 1,
+    maximum: 100,
+    description:
+      "Share billable before delivery, 1–100. REQUIRED with `advance`; omit with `on_receipt`.",
+  },
+} as const
+
+/** Pagination props shared by list tools. */
+const PAGINATION = {
+  limit: { type: "integer", description: "Max results (default 20)." },
+  offset: { type: "integer", description: "Pagination offset." },
+  q: { type: "string", description: "Free-text search filter." },
+} as const
+
+// The per-assignment material allocation, as the model sees it. Mirrors
+// `RunMaterialSchema` in the production-run validators — the row IS a contract
+// with its validator (#1348/#1361), so `planned_quantity` carries the same
+// "must be positive" limit here rather than letting a model discover it as a 400.
+/**
+ * #2271 — a run's expected split per size/colour. Checked server-side against
+ * the sizes and colours in the run's snapshot, and must add up to the quantity.
+ */
+const RUN_PLANNED_OUTPUT_PARAM = {
+  type: "array",
+  description:
+    "What this run is expected to make, per size/colour, e.g. [{size_label:'S',quantity:1},{size_label:'M',quantity:2}]. Must add up to the quantity and use only the design's sizes (size_sets) and colour names. The partner confirms against it at completion and it decides which variant each piece is stocked as. Omit when the design states at most one size and colour.",
+  items: obj(
+    {
+      size_label: STR("One of the design's size labels."),
+      color: STR("One of the design's colour names."),
+      quantity: { type: "number", description: "Units of this combination." },
+    },
+    ["quantity"]
+  ),
+}
+
+const RUN_MATERIALS_PARAM = {
+  type: "array" as const,
+  description:
+    "The materials THIS assignment is sent: a SUBSET of the design's bill of materials (call list_design_inventory first to see what is available), with how much of each. Omit to leave the run unconstrained — the partner then sees the design's whole BOM, which is the behaviour every run had before this existed. Once set, the partner is REFUSED when logging consumption against anything outside the list.",
+  items: {
+    type: "object" as const,
+    properties: {
+      inventory_item_id: {
+        type: "string",
+        description:
+          "Inventory item id. MUST already be linked to the design — the write is rejected otherwise, it does not link it for you.",
+      },
+      planned_quantity: {
+        type: "number",
+        description:
+          "How much of this item this partner is issued. Must be POSITIVE — 0 is not an allocation, and it is rejected.",
+      },
+      location_id: { type: "string", description: "Stock location to issue from, if not the design's." },
+      resolved_raw_material_id: {
+        type: "string",
+        description:
+          "Which colour/variant of a pinned raw-material group this run uses. Per-run, so two runs of one design can be two colours.",
+      },
+      note: { type: "string", description: "Free note for the partner about this material." },
+    },
+    required: ["inventory_item_id"],
+  },
+}
+
+/**
+ * #1529 / #2111 S1 — the edge that lets a chain OPEN with a supplier.
+ *
+ * The model, the gate (`lib/run-dependencies.ts`), the dispatch guard and the
+ * release subscriber have all honoured this since #1529. The agent surface
+ * simply never offered it, so nothing an assistant created could ever wait on
+ * arriving goods. The field-coverage gate did not catch that because it walks
+ * TOP-LEVEL tool properties only, and this one lives inside `assignments[]`.
+ */
+const RUN_INVENTORY_DEPENDENCY_PARAM = {
+  type: "array" as const,
+  items: { type: "string" as const },
+  description:
+    "Inventory orders whose GOODS this assignment is waiting on (ids from list_inventory_orders). The child run is created approved but is NOT dispatched — it holds until every listed order is delivered, then releases itself and dispatches its templates.\n\n🔴 MET AT `Delivered`, NEVER AT `Shipped`. `Shipped` only says the goods left the supplier; the partner cannot cut cloth that is in a van. A dependency that cannot be READ counts as UNMET, so a lookup failure stalls the chain rather than releasing work whose materials may not exist.\n\n⚠️ NOT interchangeable with the run-to-run edge. Use this when a SUPPLIER feeds the stage (GOF ships cloth → Kiyo makes the tunic). Use assignment `order` when another PARTNER'S RUN feeds it (weaver → embroiderer) — `depends_on_run_ids` is DERIVED from `order` at approval, or attached afterwards with update_production_run.\n\nDeclaring this on ANY child also defers auto-dispatch for the WHOLE approval batch — sequencing then belongs to start_production_run_dispatch and the release subscribers, deliberately, so nothing starts out of order.",
+}
+
+export const ADMIN_MCP_TOOLS: AdminMcpToolDef[] = [
+  // ===== Grounding =========================================================
+  {
+    name: "get_admin_stats",
+    description:
+      "Get a high-level snapshot of the platform: counts of orders (customer sales only), work_orders (partner purchase orders: design runs and inventory), products, partners, designs, production runs and stores. Call this FIRST to ground yourself before answering operational questions.",
+    method: "GET",
+    path: "/admin/mcp/stats",
+    inputSchema: obj({}),
+  },
+  {
+    name: "list_graph_entities",
+    description:
+      "List the REAL query.graph entity names available for stats panels (metric_sections / aggregate_data / time_series), with descriptions and key fields. Call this to pick the correct `entity` value — do NOT invent entity names. Plural snake_case (e.g. 'order_transactions', 'partner_fees', 'partner_subscriptions').",
+    method: "GET",
+    path: "/admin/mcp/graph-entities",
+    inputSchema: obj({}),
+  },
+
+  // ===== Orders ============================================================
+  {
+    name: "list_orders",
+    description:
+      "List orders (paginated). Supports free-text search via q. Defaults to RETAIL orders only — pass kind to see design/inventory orders or all of them. Use to answer 'what orders came in', revenue/volume, and to find an order id.",
+    method: "GET",
+    path: "/admin/orders",
+    queryParams: ["limit", "offset", "q", "status", "kind", "sales_channel_id", "region_id", "customer_id"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR("Optional order status filter."),
+      kind: STR(
+        "Which order family to list: 'retail' (default) | 'design' | 'inventory' | 'all'."
+      ),
+      sales_channel_id: STR("Filter to orders in a specific sales channel id."),
+      region_id: STR("Filter to orders in a specific region id."),
+      customer_id: STR("Filter to orders for a specific customer id."),
+    }),
+  },
+  {
+    name: "get_order",
+    description: "Get a single order by id (line items, totals, fulfillment, payment status).",
+    method: "GET",
+    path: "/admin/orders/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Order id, e.g. 'order_...'.") }, ["id"]),
+  },
+
+  // ===== Catalog ===========================================================
+  {
+    name: "list_products",
+    description:
+      "List products (paginated). Supports free-text search via q. Filter by status, sales channel, collection, category, type, tag or handle to scope results — e.g. pass sales_channel_id to see products in a partner's storefront, or status=published to see only live products.",
+    method: "GET",
+    path: "/admin/products",
+    queryParams: ["limit", "offset", "q", "status", "sales_channel_id", "collection_id", "category_id", "type_id", "tag_id", "handle"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: {
+        /**
+         * 🔴 An ARRAY, because `/admin/products` requires one. Declared as a
+         * string, every natural call (`status: "published"`) came back
+         * `400 Expected type: 'array' for field 'status'` — a documented filter
+         * that had never worked, failing in a way that read as the caller's
+         * mistake. A bare string is still accepted and wrapped; see
+         * `coerceDeclaredArrays` in mcp-core.
+         */
+        type: "array",
+        description:
+          "Product statuses to include, e.g. ['published']. One or more of 'draft' | 'proposed' | 'published' | 'rejected'. A bare string is accepted.",
+        items: {
+          type: "string",
+          enum: ["draft", "proposed", "published", "rejected"],
+        },
+      },
+      sales_channel_id: STR("Filter to products in a specific sales channel id (e.g. a partner store's default_sales_channel_id from list_stores)."),
+      collection_id: STR("Filter to products in a specific collection."),
+      category_id: STR("Filter to products in a specific category."),
+      type_id: STR("Filter to products of a specific type."),
+      tag_id: STR("Filter to products with a specific tag."),
+      handle: STR("Filter to a product by its URL handle."),
+    }),
+  },
+  {
+    name: "get_product",
+    description: "Get a single product by id (variants, options, status).",
+    method: "GET",
+    path: "/admin/products/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Product id, e.g. 'prod_...'.") }, ["id"]),
+  },
+
+  // ---- Production spec (#1342 / #1346): the admin mirror of the partner
+  // tools. Same module, same workflow, same weave catalog — an admin is simply
+  // not scoped to one partner's products. The catalog read is listed first
+  // because the write validates `params` against the chosen technique's ranges.
+  {
+    name: "get_spec_catalog",
+    description:
+      "List the weaving techniques a production spec can use — families, per-technique parameters with min/max/step/default, presets and default finishes. Read this BEFORE calling set_product_spec: the ranges shown here are the ranges the write enforces.",
+    method: "GET",
+    path: "/admin/products/spec-catalog",
+    inputSchema: obj({}),
+    nextSteps: ["get_product_spec", "set_product_spec"],
+  },
+  {
+    name: "get_product_spec",
+    description:
+      "Get a product's production spec — weave technique and parameters, colour palette, custom fields, custom-order availability. Returns null when nobody has written one, which is the normal state for most products.",
+    method: "GET",
+    path: "/admin/products/:id/spec",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Product id, e.g. 'prod_...'.") }, ["id"]),
+    nextSteps: ["set_product_spec", "get_spec_catalog"],
+  },
+  {
+    name: "set_product_spec",
+    description: `Create or update a product's production spec: weave technique + parameters, finishes, colour palette, custom fields, and custom-order availability. ${PRODUCT_SPEC_WRITE_GUIDANCE}`,
+    method: "POST",
+    path: "/admin/products/:id/spec",
+    pathParams: ["id"],
+    write: true,
+    // Confirm-gated like every other admin write, because an admin writes ANY
+    // maker's spec, not their own — the partner tool is ownership-scoped and
+    // needs no such gate. `tier: "write"` keeps that confirm from also costing
+    // a scoped credential access it should have: a spec spends no money, calls
+    // no carrier and messages nobody.
+    sensitive: true,
+    tier: "write",
+    previewPath: "/admin/products/:id/spec",
+    bodyParams: PRODUCT_SPEC_BODY_PARAMS,
+    inputSchema: obj(
+      { id: STR("Product id, e.g. 'prod_...'."), ...productSpecSchemaProps() },
+      ["id"]
+    ),
+    sideEffects:
+      "Replaces the stored palette and custom fields when those keys are passed. The spec is the maker's own record of the product — check with the partner before overwriting one they authored.",
+    nextSteps: ["get_product_spec"],
+  },
+  {
+    name: "bulk_set_product_spec",
+    description: [
+      "Write ONE production spec across MANY products in a single call — the normal case when a run of pieces shares a weave, a parameter set and a palette. Sensitive: requires confirm:true. ALWAYS dry_run first.",
+      "",
+      "TARGETING:",
+      "- `spec` applies to every product listed.",
+      "- `products: [{ product_id, spec }]` — a row's own `spec` wins over the batch-wide one.",
+      "",
+      "Creates a spec where none exists and updates where one does; a mixed batch is fine and each row reports which happened (`created` / `updated`).",
+      "",
+      "⚠️ `colors`, `fields` and `options` REPLACE what is stored when present. The dry-run plan names, per product, which of the three it would replace — read it before confirming.",
+      "",
+      "Returns a PER-ROW outcome: one bad product id never discards the rest. Read `results` and `warnings`, not just the status.",
+      `⚠️ UNSCOPED — this reaches EVERY maker's catalogue, and a spec is the maker's own record of their product. Overwriting a hundred specs someone else authored is not recoverable from here. Capped at 100 products per call. ${PRODUCT_SPEC_WRITE_GUIDANCE}`,
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/products/spec-bulk",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["products", "spec", "dry_run"],
+    inputSchema: obj(
+      {
+        products: {
+          type: "array",
+          description:
+            "Products to write. A row's own `spec` wins over the batch-wide `spec`.",
+          items: {
+            type: "object",
+            properties: {
+              product_id: STR("Product id, e.g. 'prod_...'."),
+              spec: {
+                type: "object",
+                description: "Spec for this product only.",
+                properties: productSpecSchemaProps(),
+                additionalProperties: false,
+              },
+            },
+            required: ["product_id"],
+            additionalProperties: false,
+          },
+        },
+        spec: {
+          type: "object",
+          description:
+            "Applied to every row that carries no `spec` of its own. Provide this, or a `spec` on every row.",
+          properties: productSpecSchemaProps(),
+          additionalProperties: false,
+        },
+        dry_run: BOOL("Return the plan without writing. Do this first."),
+      },
+      ["products"]
+    ),
+    sideEffects:
+      "Replaces the stored palette, custom fields and option groups on EVERY listed product when those keys are passed, across any maker's catalogue.",
+    nextSteps: ["get_product_spec"],
+  },
+
+  // ===== Customers =========================================================
+  {
+    name: "list_customers",
+    description:
+      "List customers (paginated). Supports free-text search via q. Filter by email, name, company or account type.",
+    method: "GET",
+    path: "/admin/customers",
+    queryParams: ["limit", "offset", "q", "email", "has_account", "company_name", "first_name", "last_name"],
+    inputSchema: obj({
+      ...PAGINATION,
+      email: STR("Filter to customers with a specific email."),
+      has_account: BOOL("Filter to registered (true) or guest (false) customers."),
+      company_name: STR("Filter by company name."),
+      first_name: STR("Filter by first name."),
+      last_name: STR("Filter by last name."),
+    }),
+  },
+
+  // ===== Partners & stores =================================================
+  {
+    name: "list_partners",
+    description:
+      "List partners (sellers, manufacturers, makers, designers). Supports free-text search via q. Use to find a partner id or review onboarding status.",
+    method: "GET",
+    path: "/admin/partners",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_partner",
+    description: "Get a single partner by id (profile, handle, workspace_type, status, metadata).",
+    method: "GET",
+    path: "/admin/partners/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+  },
+  {
+    name: "list_partner_products",
+    description:
+      "List a specific partner's products — the sales-channel-scoped catalog that partner sees on their own portal. Use list_stores or get_partner to find the partner's stores first, then pass store_id to scope to a specific storefront. Without store_id, the partner's first store is used.",
+    method: "GET",
+    path: "/admin/partners/:id/products",
+    pathParams: ["id"],
+    queryParams: ["store_id", "q", "limit", "offset"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        store_id: STR("Optional store id to scope to a specific storefront. Defaults to the partner's first store."),
+        ...PAGINATION,
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "list_stores",
+    description: "List storefronts / stores configured on the platform.",
+    method: "GET",
+    path: "/admin/stores",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "disable_store",
+    description:
+      "Disable a store's storefront by disabling its default sales channel (is_disabled=true), so its products stop being purchasable. Reversible — use enable_store to switch it back on. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/stores/:id/disable",
+    pathParams: ["id"],
+    previewPath: "/admin/stores/:id",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      { id: STR("Store id to disable, e.g. 'store_...'. Get it from list_stores.") },
+      ["id"]
+    ),
+    sideEffects:
+      "Sets is_disabled=true on the store's default sales channel. Does NOT delete the store, its products or the channel.",
+    nextSteps: ["enable_store", "list_stores"],
+  },
+  {
+    name: "enable_store",
+    description:
+      "Re-enable a store's storefront by enabling its default sales channel (is_disabled=false). The reverse of disable_store. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/stores/:id/enable",
+    pathParams: ["id"],
+    previewPath: "/admin/stores/:id",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      { id: STR("Store id to enable, e.g. 'store_...'.") },
+      ["id"]
+    ),
+    sideEffects: "Sets is_disabled=false on the store's default sales channel.",
+    nextSteps: ["disable_store", "list_stores"],
+  },
+
+  // ===== Designs & production ==============================================
+  {
+    name: "list_designs",
+    description:
+      "List designs (paginated). Supports free-text search via q. Filter by status, design type, priority, partner or tags.",
+    method: "GET",
+    path: "/admin/designs",
+    queryParams: ["limit", "offset", "q", "status", "design_type", "priority", "partner_id", "tags", "name", "include_partner_owned"],
+    inputSchema: obj({
+      ...PAGINATION,
+      name: STR("Partial or full name match."),
+      status: {
+        type: "string",
+        description: "Design status: 'Conceptual' | 'In_Development' | 'Technical_Review' | 'Sample_Production' | 'Revision' | 'Approved' | 'Rejected' | 'On_Hold' | 'Commerce_Ready' | 'Superseded'.",
+      },
+      design_type: {
+        type: "string",
+        description: "'Original' | 'Derivative' | 'Custom' | 'Collaboration'.",
+      },
+      priority: {
+        type: "string",
+        description: "'Low' | 'Medium' | 'High' | 'Urgent'.",
+      },
+      partner_id: STR("Filter by owning partner id."),
+      include_partner_owned: BOOL("Set to true to include partner-owned (self-serve) designs — these are hidden by default. Pass this when filtering by partner_id, or the result may be empty."),
+      tags: {
+        type: "array",
+        description: "Tag strings to filter by.",
+        items: { type: "string" },
+      },
+    }),
+  },
+  {
+    name: "get_design",
+    description: "Get a single design by id (status, sizes, linked product, metadata).",
+    method: "GET",
+    path: "/admin/designs/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Design id, e.g. 'design_...'.") }, ["id"]),
+  },
+  {
+    name: "list_production_runs",
+    description:
+      "List production runs / work orders (paginated). Free-text search via q (matches run id and the design, partner or product the run is for). Filter by status, partner, design, product, order, run type or parent run. Use to see open runs, their stage and assigned partner. NOTE there are TWO order ids and they are not interchangeable — see order_id vs work_order_id.",
+    method: "GET",
+    path: "/admin/production-runs",
+    // `q` was withheld here until #1172 — the route accepted the param but never
+    // read it, so declaring it silently dropped the model's search term.
+    queryParams: [
+      "limit",
+      "offset",
+      "q",
+      "status",
+      "partner_id",
+      "design_id",
+      "product_id",
+      "order_id",
+      "work_order_id",
+      "parent_run_id",
+      "run_type",
+      "include_tasks",
+    ],
+    inputSchema: obj({
+      limit: { type: "integer", description: "Max results (default 20)." },
+      offset: { type: "integer", description: "Pagination offset." },
+      q: STR(
+        "Free-text search over the run id and the name of the design, partner or product the run is for."
+      ),
+      status: STR(
+        "Run status: 'draft' | 'pending_review' | 'approved' | 'sent_to_partner' | 'in_progress' | 'completed' | 'cancelled' | 'awaiting_reassignment'."
+      ),
+      partner_id: STR("Only runs assigned to this partner."),
+      design_id: STR("Only runs for this design."),
+      product_id: STR("Only runs for this product."),
+      order_id: STR(
+        "Only runs for this COMMISSIONING order — the customer order that caused the work. This is NOT the collated design work-order: passing a work-order id here returns an empty list, which looks exactly like 'that order has no runs'. Use work_order_id for that."
+      ),
+      work_order_id: STR(
+        "Only runs collated under this design WORK-ORDER (the kind=design order from list_design_work_orders). One order can hold many runs — that collation is the whole point of a work-order."
+      ),
+      parent_run_id: STR("Only child runs of this parent run."),
+      run_type: STR("'production' | 'sample'."),
+      include_tasks: STR("Pass 'true' to include each run's tasks."),
+    }),
+  },
+
+  // ===== Inventory =========================================================
+  /**
+   * Stock locations were the one id this registry ASKED FOR and gave no way to
+   * find. `create_inventory_order` requires `stock_location_id`;
+   * `extract_inventory_from_image` and the repair jobs take one too — five
+   * call sites, and nothing that lists them. An agent could only supply an id
+   * it had been handed out of band, which in practice meant the work stopped.
+   *
+   * A tool that demands an identifier must be reachable from a tool that
+   * produces it. When it isn't, the gap is invisible: nothing errors, the
+   * caller simply cannot start.
+   */
+  {
+    name: "list_stock_locations",
+    description:
+      "List stock locations — our own warehouses AND partner-held locations, with their addresses. Read. " +
+      "Start here whenever a tool needs a `stock_location_id` (create_inventory_order, the route-repair jobs, inventory extraction): the id is not guessable and nothing else surfaces it. " +
+      "🔑 The name is the only thing that distinguishes ours from a partner's here — use `set-location-ownership` (Data Plumbing) to read which are core, since consumption is only ever deducted from a core location.",
+    method: "GET",
+    path: "/admin/stock-locations",
+    queryParams: ["limit", "offset", "q"],
+    // Core's default field set omits the provider links, so without this the
+    // answer to "can this warehouse ship with X?" is invisible here (#2023).
+    defaultQuery: { fields: "+fulfillment_providers.id,+fulfillment_providers.is_enabled" },
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_stock_location",
+    description:
+      "Get one stock location by id, with its address and metadata. Read. Use it to confirm a location is the one you meant before pointing an inventory order at it — a reversed route posts stock at the wrong end and reads as a delivery that never arrived.",
+    method: "GET",
+    path: "/admin/stock-locations/:id",
+    pathParams: ["id"],
+    defaultQuery: { fields: "+fulfillment_providers.id,+fulfillment_providers.is_enabled" },
+    inputSchema: obj({ id: STR("Stock location id, e.g. 'sloc_...'.") }, ["id"]),
+  },
+  /**
+   * Linking a CARRIER to a WAREHOUSE (#2023).
+   *
+   * `list_fulfillment_providers` answers "is this provider registered?" - a
+   * process-wide fact. `POST /admin/shipping-options` gates on a different one:
+   * is the provider linked to the stock location behind the zone. Packlink was
+   * `is_enabled: true` and linked to ZERO locations for a day, so every attempt
+   * to create an option on it 400'd while the prescribed check kept passing.
+   */
+  {
+    name: "set_location_fulfillment_providers",
+    description:
+      "Attach or detach fulfillment providers on ONE stock location — which carriers that warehouse may ship with. Sensitive: requires confirm:true. " +
+      "🔴 THIS IS THE FACT `POST /admin/shipping-options` ACTUALLY GATES ON. A provider can be registered and `is_enabled: true` in list_fulfillment_providers and still be linked to NO location, in which case creating a shipping option on it fails with `Providers (x) are not enabled for the service location`. Global registration and per-location enablement are different things, and only this one reaches a zone. " +
+      "🔑 `add` and `remove` are DELTAS, not a replacement set — unlike a shipping option's `prices`, a provider you leave out keeps whatever state it had. So adding one carrier never silently detaches another. " +
+      "Read the current links first with get_stock_location, which now returns them; the response here reports them too, so the change is verifiable without a second call.",
+    method: "POST",
+    path: "/admin/stock-locations/:id/fulfillment-providers",
+    pathParams: ["id"],
+    bodyParams: ["add", "remove"],
+    // The route refetches the location through core's default field set, which
+    // omits the links this tool exists to change - so a bare response could not
+    // show whether the write took.
+    defaultQuery: { fields: "+fulfillment_providers.id,+fulfillment_providers.is_enabled" },
+    write: true,
+    sensitive: true,
+    previewPath: "/admin/stock-locations/:id",
+    sideEffects:
+      "Takes effect immediately: a newly-linked provider becomes selectable for shipping options in zones on this location's fulfillment set, and quoting starts hitting that carrier. Removing one does not delete existing shipping options that name it — those stop being offerable instead.",
+    nextSteps: ["get_stock_location", "create_shipping_option"],
+    inputSchema: obj(
+      {
+        id: STR("Stock location id, e.g. 'sloc_...'. From list_stock_locations."),
+        add: {
+          type: "array",
+          description:
+            "Provider ids to LINK, e.g. ['packlink_packlink']. Each must appear in list_fulfillment_providers — that is necessary but not sufficient, which is why this tool exists.",
+          items: { type: "string" },
+        },
+        remove: {
+          type: "array",
+          description:
+            "Provider ids to UNLINK. Leaves every provider not named here untouched.",
+          items: { type: "string" },
+        },
+      },
+      ["id"]
+    ),
+  },
+  // ---- Id producers: readers for the ids other tools demand --------------
+  // Regions, sales channels and payment submissions were all demanded by
+  // tools here with no way to be found — the same hole the stock locations
+  // above fell into. A region id is needed to price a cart or quote; a
+  // product is only purchasable through a sales channel it is linked to;
+  // and link_payment_to_payout, unlink_payment_from_payout and
+  // apply_partner_credit all take a payment submission id.
+  {
+    name: "list_regions",
+    description:
+      "List sales regions (paginated), each with its currency and the countries it covers. Supports free-text search via q. A region id is needed to price a cart or a quote, and nothing else surfaces it — start here whenever a tool asks for a `region_id`.",
+    method: "GET",
+    path: "/admin/regions",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_region",
+    description:
+      "Get a single sales region by id (currency, countries, metadata).",
+    method: "GET",
+    path: "/admin/regions/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Region id, e.g. 'reg_...'.") }, ["id"]),
+  },
+  {
+    name: "list_payment_providers",
+    description:
+      "List the payment providers registered in the container, so a region can be wired to one that actually EXISTS. 🔴 Region-enabled is not container-registered: naming a provider a region cannot resolve gives a buyer a checkout with no way to pay. Note the path — the route is /admin/payments/payment-providers, NOT /admin/payment-providers. Use before create_region / update_region.",
+    method: "GET",
+    path: "/admin/payments/payment-providers",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "create_region",
+    description:
+      "Create a sales region: a currency, the countries it covers, and the payment providers a buyer there is offered. Sensitive: requires confirm:true.\n\n🔑 A region is what makes a currency BUYABLE. Prices can exist in a currency with no region — on this platform the FX fanout has been minting aed/cad/chf/cny/gbp prices on every variant that nobody could check out in, because no region sold in them. Creating the region is what turns those existing prices into revenue.\n\n⚠️ A country belongs to exactly ONE region. Passing a country already covered elsewhere MOVES it, changing the currency and tax basis that country is sold in — do that deliberately, not as a side effect of adding a neighbour.\n\n⚠️ Payment providers are the difference between a browsable region and a sellable one. Use `pp_stripe_stripe` for international card payments; `pp_stripe-connect_stripe-connect` is the PARTNER payout configuration and is not what a buyer pays through. Call list_payment_providers first.\n\nA region also needs a SHIPPING OPTION that reaches it before anyone can complete checkout — creating the region alone produces countries that can browse and add to cart but fail at the last step.",
+    method: "POST",
+    path: "/admin/regions",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "name",
+      "currency_code",
+      "countries",
+      "payment_providers",
+      "automatic_taxes",
+      "is_tax_inclusive",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        name: STR("Region name as an operator will recognise it, e.g. 'United Kingdom'."),
+        currency_code: STR("3-letter code, lower-case, e.g. 'gbp'. Must be one the STORE supports, or the FX fanout will never price into it."),
+        countries: {
+          type: "array",
+          description: "Lower-case ISO-2 codes, e.g. ['gb']. Each may belong to only one region; listing one that is already covered MOVES it.",
+          items: { type: "string" },
+        },
+        payment_providers: {
+          type: "array",
+          description: "Provider ids from list_payment_providers, e.g. ['pp_stripe_stripe']. Without one, a buyer reaches checkout with nothing to pay with.",
+          items: { type: "string" },
+        },
+        automatic_taxes: {
+          type: "boolean",
+          description: "Let the tax provider calculate tax for this region.",
+        },
+        is_tax_inclusive: {
+          type: "boolean",
+          description: "Whether prices in this region already include tax.",
+        },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["name", "currency_code", "countries"]
+    ),
+  },
+  {
+    name: "update_region",
+    description:
+      "Update a sales region — name, currency, the countries it covers, or its payment providers. Pass only what changes. Sensitive: requires confirm:true.\n\n⚠️ `countries` REPLACES the list wholesale; sending a short list silently drops every country you omitted, and those countries then resolve to no region at all. Read the region first.\n\n⚠️ Moving a country between regions changes the currency and tax basis it is sold in.",
+    method: "POST",
+    path: "/admin/regions/:id",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    previewPath: "/admin/regions/:id",
+    bodyParams: [
+      "name",
+      "currency_code",
+      "countries",
+      "payment_providers",
+      "automatic_taxes",
+      "is_tax_inclusive",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Region id, e.g. 'reg_...'."),
+        name: STR("New region name."),
+        currency_code: STR("3-letter code, lower-case."),
+        countries: {
+          type: "array",
+          description: "REPLACEMENT list of lower-case ISO-2 codes — omitted countries are removed from the region.",
+          items: { type: "string" },
+        },
+        payment_providers: {
+          type: "array",
+          description: "Replacement provider ids, e.g. ['pp_stripe_stripe'].",
+          items: { type: "string" },
+        },
+        automatic_taxes: { type: "boolean" },
+        is_tax_inclusive: { type: "boolean" },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "list_shipping_options",
+    description:
+      "List shipping options — the rates a buyer is actually offered at checkout. 🔴 A REGION IS NOT SELLABLE WITHOUT ONE. Creating a region gives a country prices and a payment provider, but with no shipping option reaching it the buyer browses, adds to cart, and fails at the last step — the same 'exists but cannot be sold' shape as a product with no shipping profile. Use this to answer 'can we actually ship to this region?' before announcing a new territory. Filter by service zone (`service_zone_id`) or, with `q`, by name.",
+    method: "GET",
+    path: "/admin/shipping-options",
+    queryParams: ["limit", "offset", "q", "service_zone_id", "id"],
+    inputSchema: obj({
+      ...PAGINATION,
+      q: STR("Free-text search over the option name."),
+      service_zone_id: STR("Only options in this service zone."),
+      id: STR("A specific shipping option id."),
+    }),
+  },
+  /**
+   * The two shipping-option WRITES.
+   *
+   * Until these existed there was no way to create or amend a shipping option
+   * except the admin UI: no tool wrapped either route, and an authenticated
+   * curl at prod is refused by the permission classifier. So "the flat rate is
+   * loss-making, switch the lane to live rates" was a change nobody could
+   * actually make from here.
+   */
+  {
+    name: "create_shipping_option",
+    description:
+      "Create a shipping option — a rate a buyer can pick at checkout, or a quote-only row. Sensitive: requires confirm:true. Call list_shipping_options on the target `service_zone_id` first: options are what make a zone SELLABLE, and a second one competing with an existing rate is usually not what was wanted. 🔴 `prices` is REQUIRED even for `price_type: \"calculated\"` — send `[]` there; the carrier quotes, so a price row would be a second answer to the same question. 🔑 A FLAT option with no price in the cart's currency is simply not offered; a CALCULATED one has no prices and so is offered EVERYWHERE the zone reaches. That asymmetry is the whole trap: the only way to confine a calculated option to particular lanes is a `rules` entry, and a rule can only name a context key something actually publishes (`enabled_in_store`, `is_return`, `quote_id`, `cart_currency_code` — see the setShippingOptionsContext hook). ⚠️ A rule naming a key nobody publishes does not fail: the matcher stringifies the absent value to \"undefined\", so the option is EXCLUDED from every cart and looks merely unpopular. Exactly one of `type` or `type_id`. 🔴 The `provider_id` must be registered AND LINKED TO THIS ZONE'S STOCK LOCATION — two different facts, and list_fulfillment_providers only sees the first. It reports `is_enabled: true` for a provider attached to no location at all, and this route then fails with `Providers (x) are not enabled for the service location`. Check the location itself with get_stock_location and link it with set_location_fulfillment_providers (#2023). Registration is still worth confirming, since a provider configured in only one medusa-config file does not exist in prod.",
+    method: "POST",
+    path: "/admin/shipping-options",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "name",
+      "service_zone_id",
+      "shipping_profile_id",
+      "provider_id",
+      "price_type",
+      "type",
+      "type_id",
+      "prices",
+      "rules",
+      "data",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        name: STR("Shown to the buyer at checkout, e.g. 'International (Packlink)'."),
+        service_zone_id: STR("Service zone this option serves, e.g. 'serzo_...'. From list_shipping_options or the zone's fulfillment set."),
+        shipping_profile_id: STR("Shipping profile id, e.g. 'sp_...'. From list_shipping_profiles — ⚠️ there is more than one, so do not take whichever comes back first (#1983)."),
+        provider_id: STR("Fulfillment provider, e.g. 'manual_manual', 'packlink_packlink'. Must appear enabled in list_fulfillment_providers."),
+        price_type: {
+          type: "string",
+          enum: ["flat", "calculated"],
+          description:
+            "'flat' prices from the `prices` rows; 'calculated' asks the provider per cart. A calculated option is only as good as its provider's calculatePrice — one that cannot quote a lane falls back or throws.",
+        },
+        type: obj(
+          {
+            label: STR("Short label, e.g. 'International'."),
+            description: STR("What this option is."),
+            code: STR("Stable code, unique per option, e.g. 'international-packlink-Y49EF4ZP'."),
+          },
+          ["label", "code"]
+        ),
+        type_id: STR("Reuse an existing shipping option type instead of creating one. Exactly one of `type` / `type_id`."),
+        prices: {
+          type: "array",
+          description:
+            "Price rows — REQUIRED by the validator; send `[]` for a calculated option. Each row is either { currency_code, amount } or { region_id, amount }, optionally with `rules` (free-shipping bands: only `item_total` is a legal attribute and its `value` is a NUMBER).",
+          items: {
+            type: "object",
+            properties: {
+              currency_code: STR("Lower-case 3-letter code, e.g. 'gbp'. Mutually exclusive with region_id."),
+              region_id: STR("Region id. Mutually exclusive with currency_code."),
+              amount: { type: "number", description: "Amount in the currency's own units, as the admin UI shows it." },
+              rules: {
+                type: "array",
+                description: "Bands, e.g. free shipping between two basket totals.",
+                items: obj(
+                  {
+                    attribute: { type: "string", enum: ["item_total"], description: "Only 'item_total' is accepted." },
+                    operator: { type: "string", description: "gte | lte | gt | lt | eq." },
+                    value: { type: "number", description: "A NUMBER, not a string." },
+                  },
+                  ["attribute", "operator", "value"]
+                ),
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        rules: {
+          type: "array",
+          description:
+            "Who the option is offered to. `{ attribute: 'enabled_in_store', operator: 'eq', value: 'true' }` makes it visible in a cart; 'false' hides it from every cart while leaving it quotable. Values are STRINGS even when they read as booleans or currencies.",
+          items: obj(
+            {
+              attribute: STR("Context key, e.g. 'enabled_in_store', 'is_return', 'cart_currency_code'."),
+              operator: STR("eq | ne | in | nin | gt | gte | lt | lte."),
+              value: {
+                description: "A string, or an array of strings for `in`/`nin`.",
+                anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+              },
+            },
+            ["attribute", "operator", "value"]
+          ),
+        },
+        data: {
+          type: "object",
+          additionalProperties: true,
+          description:
+            "Provider-specific settings, handed to the provider verbatim on every quote — e.g. Packlink's parcel defaults (`default_weight_kg`, `default_length_cm`, …) and `flat_fallback_amounts`. This is how one option differs from another on the SAME provider.",
+        },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["name", "service_zone_id", "shipping_profile_id", "provider_id", "price_type", "prices"]
+    ),
+    sideEffects:
+      "A store-enabled option is offered at checkout immediately. If its provider cannot createFulfillment, orders that pick it cannot be fulfilled from the admin — check before enabling one.",
+    nextSteps: ["list_shipping_options", "update_shipping_option"],
+  },
+  {
+    name: "update_shipping_option",
+    description:
+      "Amend an existing shipping option — its name, provider, price type, provider `data`, prices or rules. Sensitive: requires confirm:true. 🔴🔴 `prices` REPLACES THE WHOLE SET. A row you leave out is DELETED, not left alone — the same shape as a variant price save that hard-deleted 11 rows. So to change ONE currency, read the option with list_shipping_options first and re-send EVERY price you intend to keep, each with its `id`, including the free-shipping bands and their `rules`. Omit `prices` entirely and the set is untouched; that is the safe call when you only mean to rename or repoint something. 🔑 `rules` behaves the same way, so omit it unless you mean to rewrite the rule set. ⚠️ Removing a currency's price row does not disable the option — it makes it unofferable in THAT currency only, which is exactly how you hand a lane over to a calculated option without touching the others.",
+    method: "POST",
+    path: "/admin/shipping-options/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/shipping-options/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "name",
+      "provider_id",
+      "shipping_profile_id",
+      "price_type",
+      "type",
+      "type_id",
+      "prices",
+      "rules",
+      "data",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Shipping option id, e.g. 'so_...'."),
+        name: STR("New name shown at checkout."),
+        provider_id: STR("Repoint at a different fulfillment provider."),
+        shipping_profile_id: STR("Move to a different shipping profile."),
+        price_type: {
+          type: "string",
+          enum: ["flat", "calculated"],
+          description:
+            "⚠️ Turning a flat option calculated makes its price rows meaningless — including any free-shipping bands, which then simply stop applying. Usually you want a SECOND, calculated option instead.",
+        },
+        type: obj(
+          {
+            label: STR("Short label."),
+            description: STR("What this option is."),
+            code: STR("Stable code."),
+          },
+          ["label", "code"]
+        ),
+        type_id: STR("Reuse an existing type. Only one of `type` / `type_id`."),
+        prices: {
+          type: "array",
+          description:
+            "🔴 THE REPLACEMENT SET, not a patch. Re-send every row you are keeping WITH its `id` (and its `rules`, which are likewise replaced per row). Omit the field to leave prices alone.",
+          items: {
+            type: "object",
+            properties: {
+              id: STR("Existing price row id — carry it to keep that row rather than mint a new one."),
+              currency_code: STR("Lower-case 3-letter code."),
+              region_id: STR("Region id. Mutually exclusive with currency_code."),
+              amount: { type: "number", description: "Amount in the currency's own units." },
+              rules: {
+                type: "array",
+                description: "Bands for this row. Only `item_total`, and `value` is a NUMBER.",
+                items: obj(
+                  {
+                    attribute: { type: "string", enum: ["item_total"], description: "Only 'item_total' is accepted." },
+                    operator: STR("gte | lte | gt | lt | eq."),
+                    value: { type: "number", description: "A NUMBER, not a string." },
+                  },
+                  ["attribute", "operator", "value"]
+                ),
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        rules: {
+          type: "array",
+          description:
+            "The replacement rule set. Carry each existing rule's `id` to keep it. Omit the field to leave rules alone.",
+          items: obj(
+            {
+              id: STR("Existing rule id — omit to create a new rule."),
+              attribute: STR("Context key, e.g. 'enabled_in_store', 'cart_currency_code'."),
+              operator: STR("eq | ne | in | nin | gt | gte | lt | lte."),
+              value: {
+                description: "A string, or an array of strings for `in`/`nin`.",
+                anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+              },
+            },
+            ["attribute", "operator", "value"]
+          ),
+        },
+        data: {
+          type: "object",
+          additionalProperties: true,
+          description: "Provider settings, replaced wholesale — re-send the keys you are keeping.",
+        },
+        metadata: { type: "object", additionalProperties: true },
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Takes effect on the next cart that lists options. Dropping a price row makes the option unofferable in that currency; existing orders are unaffected.",
+    nextSteps: ["list_shipping_options"],
+  },
+  {
+    name: "list_shipping_profiles",
+    description:
+      "List shipping profiles. A product without one CANNOT BE FULFILLED: Medusa writes no product↔profile link when the profile is absent, and 22 of 97 prod products were born that way (#1982). Use this to find the profile id a product should carry, and to see how many profiles exist — ⚠️ code that reads 'the' profile with `take:1` silently picks an arbitrary one the moment there is more than one (#1983).",
+    method: "GET",
+    path: "/admin/shipping-profiles",
+    queryParams: ["limit", "offset", "q", "id"],
+    inputSchema: obj({
+      ...PAGINATION,
+      q: STR("Free-text search over the profile name."),
+      id: STR("A specific shipping profile id."),
+    }),
+  },
+  {
+    name: "list_fulfillment_providers",
+    description:
+      "List the fulfillment providers registered in the container — the carriers that can actually move goods. Registered is not the same as reaching a given destination: a provider must also be attached to a service zone that covers the country. Pair with list_shipping_options when asking why a region cannot be shipped to.",
+    method: "GET",
+    path: "/admin/fulfillment-providers",
+    queryParams: ["limit", "offset", "is_enabled"],
+    inputSchema: obj({
+      ...PAGINATION,
+      is_enabled: { type: "boolean", description: "Filter to enabled providers only." },
+    }),
+  },
+  {
+    name: "list_sales_channels",
+    description:
+      "List sales channels (paginated). Supports free-text search via q. A product is only purchasable through a sales channel it is linked to — use this to find a channel id, or to see which storefronts a product can sell through.",
+    method: "GET",
+    path: "/admin/sales-channels",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_sales_channel",
+    description:
+      "Get a single sales channel by id (name, description, is_disabled).",
+    method: "GET",
+    path: "/admin/sales-channels/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Sales channel id, e.g. 'sc_...'.") }, ["id"]),
+  },
+  {
+    name: "list_payment_submissions",
+    description:
+      "List payment submissions — payouts (paginated). Supports free-text search via q and an optional status filter. The payout id this produces is required by link_payment_to_payout, unlink_payment_from_payout and apply_partner_credit — the three tools that act on a payout.",
+    method: "GET",
+    path: "/admin/payment-submissions",
+    queryParams: ["limit", "offset", "q", "status"],
+    inputSchema: obj({ ...PAGINATION, status: STR("Optional status filter.") }),
+  },
+  {
+    name: "get_payment_submission",
+    description:
+      "Get a single payment submission (payout) by id, with its lines, status and the partner it pays.",
+    method: "GET",
+    path: "/admin/payment-submissions/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Payment submission id.") }, ["id"]),
+  },
+  /**
+   * The payout CREATION side of money (#1710 follow-on).
+   *
+   * The reader trio above (`list_payment_submissions`, `get_payment_submission`,
+   * and the payable lookups) can only ever look at what exists. Claiming a
+   * payable run — turning "this partner is owed ₹8,974" into an actual payout
+   * row — had no MCP tool at all; `link_payment_to_payout` settles an EXISTING
+   * payout and needs one first. These two rows wrap the create route and its
+   * Draft→Pending transition, so the whole flow (find payable -> create
+   * submission -> submit) is reachable from the assistant.
+   */
+  {
+    name: "create_payment_submission",
+    description:
+      "Create a payout submission for a partner — the admin-side claim that turns completed production runs / inventory orders into a bill. Sensitive: requires confirm:true. ALWAYS dry_run first. " +
+      "🔑 `status: \"Draft\"` creates the payout WITHOUT submitting it — a draft is the safe shape for preparing a payout for review, and submitting it is a SEPARATE step (submit_payment_submission, which POSTs /admin/payment-submissions/:id/submit). Omit `status` for the workflow default (Pending). " +
+      "🔴 `production_run_ids` is the double-pay guard's EVIDENCE: a map of design id -> array of production run ids being claimed. Omitting it weakens the duplicate-payment check — the workflow cannot then prove which completed runs this payout covers. Read list_payable_runs / list_payable_inventory_orders first to see what can still be billed for this partner.",
+    method: "POST",
+    path: "/admin/payment-submissions",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "partner_id",
+      "design_ids",
+      "task_ids",
+      "notes",
+      "documents",
+      "quantities",
+      "unit_amounts",
+      "cost_overrides",
+      "task_cost_overrides",
+      "rate_breakdown",
+      "production_run_ids",
+      "status",
+      "currency",
+      "run_lines",
+      "inventory_order_lines",
+      "require_design_status",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        partner_id: STR(
+          "Partner id the payout is created for, e.g. 'partner_...'. Required."
+        ),
+        design_ids: {
+          type: "array",
+          description:
+            "Design ids this payout pays for — one line per design. Requires at least one design, task, run_line or inventory_order_line across the whole request.",
+          items: { type: "string" },
+        },
+        task_ids: {
+          type: "array",
+          description: "Task ids this payout pays for.",
+          items: { type: "string" },
+        },
+        notes: STR("Free-text note describing the payout — shown to reviewers."),
+        documents: {
+          type: "array",
+          description: "Attached documents. Each { id?, url, filename?, mimeType? }.",
+          items: {
+            type: "object",
+            properties: {
+              id: STR("Existing document id (optional)."),
+              url: STR("Document URL (required)."),
+              filename: STR("Optional filename."),
+              mimeType: STR("Optional MIME type."),
+            },
+            required: ["url"],
+          },
+        },
+        quantities: {
+          type: "object",
+          description: "Units billed per design, keyed by design id. Absent means 1.",
+          additionalProperties: { type: "number" },
+        },
+        unit_amounts: {
+          type: "object",
+          description:
+            "Agreed rate per unit, keyed by design id. Beats the design's stored cost — the run's partner_cost_estimate is what was agreed with the partner.",
+          additionalProperties: { type: "number" },
+        },
+        cost_overrides: {
+          type: "object",
+          description:
+            "Typed line TOTAL per design. Wins outright; never multiplied by quantity.",
+          additionalProperties: { type: "number" },
+        },
+        task_cost_overrides: {
+          type: "object",
+          description: "Typed line total per task.",
+          additionalProperties: { type: "number" },
+        },
+        rate_breakdown: {
+          type: "object",
+          description:
+            "Per-piece prices within one design's line, keyed by design id (#1596) — '3 at 850 and 1 at 1,200'. Each design maps to an array of { quantity, unit_amount } bands. AT LEAST TWO bands: one band is an ordinary priced line and belongs in quantities + unit_amounts.",
+          additionalProperties: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                quantity: { type: "number", description: "Pieces in this band." },
+                unit_amount: { type: "number", description: "Per-piece rate." },
+              },
+              required: ["quantity", "unit_amount"],
+            },
+          },
+        },
+        production_run_ids: {
+          type: "object",
+          description:
+            "🔴 The double-pay guard's EVIDENCE: a map of design id -> array of production run ids being claimed. Omitting it weakens the duplicate-payment check — the workflow cannot prove which completed runs this payout covers. Read list_payable_runs first and supply the run ids it names.",
+          additionalProperties: { type: "array", items: { type: "string" } },
+        },
+        status: STR(
+          "'Draft' creates the payout WITHOUT submitting it (safe for review); submitting is a separate step (submit_payment_submission). 'Pending' submits immediately. Omit for the workflow default."
+        ),
+        currency: STR(
+          "The payout's currency, e.g. 'inr'. Absent means the partner's own currency, then inr."
+        ),
+        run_lines: {
+          type: "array",
+          description:
+            "Payout lines sourced from production RUNS (#1612) — the only expression for a run with design_id null. Each { run_ids (min 1), amount?, quantity?, order_id?, label?, currency? }.",
+          items: {
+            type: "object",
+            properties: {
+              run_ids: {
+                type: "array",
+                description: "The runs this line pays for.",
+                items: { type: "string" },
+              },
+              amount: { type: "number", description: "Line amount override (optional)." },
+              quantity: { type: "number", description: "Line quantity (optional)." },
+              order_id: STR("Originating order id (optional)."),
+              label: STR("Display label (optional)."),
+              currency: STR("Line currency (optional)."),
+            },
+            required: ["run_ids"],
+          },
+        },
+        inventory_order_lines: {
+          type: "array",
+          description:
+            "Payout lines sourced from INVENTORY ORDERS — material bought from the partner. Each { inventory_order_id (required), amount?, currency? }. Left absent, the amount is derived from what was actually received.",
+          items: {
+            type: "object",
+            properties: {
+              inventory_order_id: STR("Inventory order id (required)."),
+              amount: { type: "number", description: "Amount override (optional)." },
+              currency: STR("Line currency (optional)."),
+            },
+            required: ["inventory_order_id"],
+          },
+        },
+        require_design_status: BOOL(
+          "Skip the design-status gate (must be Approved/Commerce_Ready). An admin paying out a finished run is exactly the position where this is needed."
+        ),
+        metadata: {
+          type: "object",
+          description:
+            "Optional key/value metadata. 🔴 Do NOT put money fields here — use the typed quantities / unit_amounts / cost_overrides / task_cost_overrides fields, or the request is refused.",
+        },
+      },
+      ["partner_id"]
+    ),
+    sideEffects:
+      "Creates a payment submission row (Draft or Pending). With status Pending it also runs the claim guards — a completed run already on another non-Rejected payout is refused. With Draft it records the claim without submitting it.",
+    nextSteps: [
+      "submit_payment_submission",
+      "get_payment_submission",
+      "list_payable_runs",
+      "list_payable_inventory_orders",
+    ],
+  },
+  {
+    name: "submit_payment_submission",
+    description:
+      "Move a payment submission from Draft to Pending, in place (#1604) — the separate step after create_payment_submission created a Draft. Sensitive: requires confirm:true. 🔑 The money, designs and runs already sit on the draft; this transition re-runs the claim guards (a completed run already on another non-Rejected payout is refused) but takes nothing but an optional note. ALWAYS dry_run first to see the draft before submitting it.",
+    method: "POST",
+    path: "/admin/payment-submissions/:id/submit",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["notes"],
+    previewPath: "/admin/payment-submissions/:id",
+    inputSchema: obj(
+      {
+        id: STR("Payment submission id to submit, e.g. the id create_payment_submission returned."),
+        notes: STR("Optional note recorded on the submission."),
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Moves the submission from Draft to Pending in place. A submitted payout becomes visible for review; the claim guards re-run as part of the transition.",
+    nextSteps: ["get_payment_submission", "list_payment_submissions"],
+  },
+  {
+    name: "list_inventory_items",
+    description: "List inventory items (paginated). Supports free-text search via q.",
+    method: "GET",
+    path: "/admin/inventory-items",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  /**
+   * The inventory item's own lifecycle — #1905.
+   *
+   * `list_inventory_items` existed alone: a reader with no way to open one row,
+   * create one, place it at a location, count it, hold it, or divide it. Every
+   * one of those is a real route, and the raw-material tools below demand an
+   * `iitem_` id that only these produce for a good we did not buy on an order.
+   *
+   * ⚠️ The ordinary path to an inventory item is NOT `create_inventory_item`.
+   * A partner-supplied variant carries `manage_inventory: false` and has no
+   * item row at all; adding an inventory-order line that names the variant is
+   * what creates it (`ensureLineInventoryItems`, #1662 — idempotent, and
+   * deliberately not compensated). Reach for `create_inventory_item` only for
+   * stock that arrives outside an order.
+   */
+  {
+    name: "get_inventory_item",
+    description:
+      "Get one inventory item by id, with its location levels and raw-material data. Read. Call it before any level, reservation or split write — the stocked quantity you are about to change is only visible here.",
+    method: "GET",
+    path: "/admin/inventory-items/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Inventory item id, e.g. 'iitem_...'.") }, ["id"]),
+  },
+  {
+    name: "create_inventory_item",
+    description:
+      "Create a standalone inventory item — stock that exists at our end without a product variant or a purchase order behind it. Sensitive: requires confirm:true. " +
+      "🔑 This is the UNUSUAL door. A partner-supplied variant has no inventory item until an inventory-order line names it, and that path also links the item to the variant; an item created here is linked to NOTHING and will not appear against any product. Prefer create_inventory_order / update_inventory_order_lines with a `variant_id` unless the stock genuinely arrived outside an order. " +
+      "`location_levels` places it and counts it in the same call, using a `sloc_` id from list_stock_locations — otherwise the item exists in no warehouse and every consumption read returns zero.",
+    method: "POST",
+    path: "/admin/inventory-items",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "title",
+      "sku",
+      "description",
+      "unit_of_measure",
+      "requires_shipping",
+      "hs_code",
+      "origin_country",
+      "mid_code",
+      "material",
+      "weight",
+      "length",
+      "height",
+      "width",
+      "thumbnail",
+      "metadata",
+      "location_levels",
+    ],
+    inputSchema: obj(
+      {
+        title: STR("What the item is called, e.g. '33s Kala Cotton'."),
+        sku: STR("Optional SKU."),
+        description: STR("Optional longer description."),
+        unit_of_measure: STR("Unit the quantity is counted in, e.g. 'Meter'."),
+        requires_shipping: BOOL("Whether the item physically ships."),
+        hs_code: STR("HS/HSN customs code."),
+        origin_country: STR("ISO-2 country of origin, e.g. 'IN'."),
+        mid_code: STR("Manufacturer Identification (MID) code."),
+        material: STR("Material description for customs."),
+        weight: INT("Weight in grams."),
+        length: INT("Length in centimetres."),
+        height: INT("Height in centimetres."),
+        width: INT("Width in centimetres."),
+        thumbnail: STR("Thumbnail image URL."),
+        metadata: { type: "object", description: "Free-form metadata." },
+        location_levels: {
+          type: "array",
+          description:
+            "Where this stock sits and how much of it, created with the item. Each entry is { location_id (sloc_..., from list_stock_locations), stocked_quantity?, incoming_quantity? }. An item with no level is held nowhere.",
+          items: {
+            type: "object",
+            properties: {
+              location_id: STR("Stock location id, e.g. 'sloc_...'."),
+              stocked_quantity: INT("Units physically on hand at this location."),
+              incoming_quantity: INT("Units expected but not yet received."),
+            },
+            required: ["location_id"],
+            additionalProperties: false,
+          },
+        },
+      },
+      []
+    ),
+    nextSteps: ["set_inventory_level", "add_inventory_raw_material"],
+  },
+  {
+    name: "list_inventory_levels",
+    description:
+      "List an inventory item's location levels — which warehouses hold it, and the stocked / reserved / incoming counts at each. Read. This is the only place the per-location split is visible: `list_inventory_items` shows the item, not where it is.",
+    method: "GET",
+    path: "/admin/inventory-items/:id/location-levels",
+    pathParams: ["id"],
+    queryParams: ["limit", "offset"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory item id, e.g. 'iitem_...'."),
+        limit: INT("Max results (default 20)."),
+        offset: INT("Pagination offset."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "set_inventory_level",
+    description:
+      "Associate an inventory item with a stock location and set its opening counts — the level row that makes the item exist AT a warehouse. Sensitive: requires confirm:true. " +
+      "Read the `sloc_` id from list_stock_locations first: it is not guessable, and a level written at the wrong end reads as a delivery that never arrived. " +
+      "Use this to place stock somewhere for the FIRST time; `update_inventory_level` changes a location it already sits at, and re-creating an existing level is refused. " +
+      "🔑 `stocked_quantity` is an ABSOLUTE count, not a delta.",
+    method: "POST",
+    path: "/admin/inventory-items/:id/location-levels",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-items/:id/location-levels",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["location_id", "stocked_quantity", "incoming_quantity"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory item id, e.g. 'iitem_...'."),
+        location_id: STR(
+          "Stock location id, e.g. 'sloc_...'. Read it from list_stock_locations — it is not guessable, and a level written at the wrong end reads as a delivery that never arrived."
+        ),
+        stocked_quantity: INT("Units physically on hand. ABSOLUTE, not a delta."),
+        incoming_quantity: INT("Units expected but not yet received."),
+      },
+      ["id", "location_id"]
+    ),
+    nextSteps: ["list_inventory_levels"],
+  },
+  {
+    name: "update_inventory_level",
+    description:
+      "Change the counts on a location an inventory item ALREADY sits at. Sensitive: requires confirm:true. " +
+      "🔑 `stocked_quantity` is an ABSOLUTE count, not a delta — sending 10 against a level of 40 sets it to 10 and loses 30 units of stock. Read list_inventory_levels first and send the number you want to end up with. " +
+      "It cannot move stock between locations: that is a split, or a level at each end.",
+    method: "POST",
+    path: "/admin/inventory-items/:id/location-levels/:location_id",
+    pathParams: ["id", "location_id"],
+    previewPath: "/admin/inventory-items/:id/location-levels",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["stocked_quantity", "incoming_quantity"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory item id, e.g. 'iitem_...'."),
+        location_id: STR("Stock location id the level is held at, e.g. 'sloc_...'."),
+        stocked_quantity: INT("Units on hand AFTER this write. Absolute, not a delta."),
+        incoming_quantity: INT("Units expected but not yet received. Absolute."),
+      },
+      ["id", "location_id"]
+    ),
+    sideEffects:
+      "Overwrites the stored count outright. A wrong number here is indistinguishable from a real stock movement afterwards.",
+    nextSteps: ["list_inventory_levels"],
+  },
+  {
+    name: "list_reservations",
+    description:
+      "List stock reservations — quantities held at a location against an order line or held manually, so they cannot be sold twice. Read. Filter by inventory_item_id, location_id or line_item_id. A level's `reserved_quantity` is the sum of these; this is where you see WHO holds it.",
+    method: "GET",
+    path: "/admin/reservations",
+    queryParams: [
+      "limit",
+      "offset",
+      "inventory_item_id",
+      "location_id",
+      "line_item_id",
+    ],
+    inputSchema: obj({
+      limit: INT("Max results (default 20)."),
+      offset: INT("Pagination offset."),
+      inventory_item_id: STR("Filter to one inventory item, e.g. 'iitem_...'."),
+      location_id: STR("Filter to one stock location, e.g. 'sloc_...'."),
+      line_item_id: STR("Filter to the order line the stock is held for."),
+    }),
+  },
+  {
+    name: "create_reservation",
+    description:
+      "Hold a quantity of an inventory item at a location so it cannot be sold or consumed elsewhere. Sensitive: requires confirm:true. " +
+      "The stock stays where it is — a reservation moves nothing and changes no stocked_quantity; it raises `reserved_quantity`, which is what makes the rest unavailable. " +
+      "Leave `line_item_id` unset for a manual hold (a sample pulled for a buyer, cloth set aside for a run); set it to bind the hold to an order line.",
+    method: "POST",
+    path: "/admin/reservations",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "inventory_item_id",
+      "location_id",
+      "quantity",
+      "line_item_id",
+      "description",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        inventory_item_id: STR("Inventory item to hold, e.g. 'iitem_...'."),
+        location_id: STR("Stock location the hold is taken at, e.g. 'sloc_...'."),
+        quantity: INT("Units to hold. Must not exceed what is available at that location."),
+        line_item_id: STR(
+          "Order line this hold is for. Omit for a manual hold with no order behind it."
+        ),
+        description: STR("Why the stock is held — the only record a later reader gets."),
+        metadata: { type: "object", description: "Free-form metadata." },
+      },
+      ["inventory_item_id", "location_id", "quantity"]
+    ),
+    nextSteps: ["list_reservations"],
+  },
+  {
+    name: "delete_reservation",
+    description:
+      "Release a reservation, returning the held quantity to available stock. DELETE, so sensitive: requires confirm:true. Deleting the hold does NOT change stocked_quantity — nothing is consumed, the stock simply stops being spoken for.",
+    method: "DELETE",
+    path: "/admin/reservations/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/reservations/:id",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    inputSchema: obj({ id: STR("Reservation id, e.g. 'res_...'.") }, ["id"]),
+    nextSteps: ["list_reservations"],
+  },
+  {
+    name: "split_inventory_item",
+    description:
+      "Divide an inventory item in two: `quantity` units leave the source and become a NEW item titled `new_title`, carrying a copy of the source's raw-material record. Sensitive: requires confirm:true. " +
+      "This is how one bolt of greige becomes 'dyed' and 'undyed', or how a partner's delivery is separated into gradings — the two halves then price, move and get consumed independently. " +
+      "🔑 `location_id` takes the whole split from that ONE location; omit it and the split is taken proportionally across every location the item sits at. " +
+      "`raw_material_overrides` is what makes the new half a different material (its colour, grade or name) rather than a second row of the same thing — without it the copy is indistinguishable from its source.",
+    method: "POST",
+    path: "/admin/inventory-items/:id/split",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-items/:id",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["quantity", "new_title", "location_id", "raw_material_overrides"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory item to split, e.g. 'iitem_...'."),
+        quantity: INT(
+          "Units to move OUT of the source into the new item. Positive, and no more than the source holds."
+        ),
+        new_title: STR("Title of the item created by the split."),
+        location_id: STR(
+          "Take the whole split from this location only. Omit to split proportionally across every location."
+        ),
+        raw_material_overrides: {
+          type: "object",
+          description:
+            "What differs about the new half: { name?, color?, composition?, grade?, description?, extra? } — `extra` is a flat string map merged into the copied specifications. Anything omitted is inherited from the source.",
+        },
+      },
+      ["id", "quantity", "new_title"]
+    ),
+    sideEffects:
+      "Creates a second inventory item and decrements the source. The two are not linked afterwards — nothing records that they were once one lot beyond the titles you give them.",
+    nextSteps: ["list_inventory_levels", "get_inventory_item"],
+  },
+  {
+    name: "get_raw_material",
+    description:
+      "Get one raw material by id, with its material type. Read. The id comes from list_raw_materials or get_inventory_item. Call this before update_inventory_raw_material — the update is a partial, but `specifications` and `media` REPLACE wholesale, so you cannot write a correct partial without seeing what is stored.",
+    method: "GET",
+    path: "/admin/inventory-items/:id/rawmaterials/:rawMaterialId",
+    pathParams: ["id", "rawMaterialId"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory item id, e.g. 'iitem_...'."),
+        rawMaterialId: STR("Raw material id (from list_raw_materials / get_inventory_item)."),
+      },
+      ["id", "rawMaterialId"]
+    ),
+    nextSteps: ["update_inventory_raw_material"],
+  },
+  {
+    name: "update_inventory_raw_material",
+    description:
+      "Update an existing raw material — its attributes (colour, grade, width, weight, composition), its specifications, its cost, and its photos. Sensitive: requires confirm:true. " +
+      "A PARTIAL update: fields you omit are left alone. But `specifications` and `media` are whole values, so passing either REPLACES what is stored — read get_raw_material first and send the merged object, or you will delete the keys you did not resend. " +
+      "🔑 Photos live at `media.files`, an array of URLs: `{ \"files\": [\"https://...jpg\"] }`. `{ \"files\": [] }` is the shape a material gets when someone opened the media form and saved nothing — it is NOT a photographed material, though it passes any `media != null` check. " +
+      "🔑 The free-form attribute store is `specifications` (the fabrics here use gi_status / technique / weave_type, and often comb, loom, pick, artist, weight). The `attributes` column is unused — do not reach for it.",
+    method: "PUT",
+    path: "/admin/inventory-items/:id/rawmaterials/:rawMaterialId",
+    pathParams: ["id", "rawMaterialId"],
+    previewPath: "/admin/inventory-items/:id/rawmaterials/:rawMaterialId",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["rawMaterialData"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory item id, e.g. 'iitem_...'."),
+        rawMaterialId: STR("Raw material id to update."),
+        rawMaterialData: {
+          type: "object",
+          description:
+            "The fields to change. Any of: name, description, composition, color, grade, width, weight, unit_of_measure (Meter|Yard|Kilogram|Gram|Piece|Roll|Other), unit_cost, cost_currency, minimum_order_quantity, lead_time_days, certification, usage_guidelines, storage_requirements, status (Active|Discontinued|Under_Review|Development), material_type or material_type_id, metadata, specifications (REPLACES), media (REPLACES; { files: [url] }).",
+        },
+      },
+      ["id", "rawMaterialId", "rawMaterialData"]
+    ),
+    sideEffects:
+      "Replaces `specifications` and `media` outright when either is passed. Omit a key to leave it untouched.",
+    nextSteps: ["get_raw_material"],
+  },
+  // ── Inbox (#2377 S3): company email, read by the assistant and turned
+  // into records. The first action: a shop's order confirmation becomes
+  // inventory items + an inventory order.
+  {
+    name: "list_inbound_emails",
+    description:
+      "List emails that reached our company mailboxes (iCloud; every @jaalyantra.com address lands there and mail rules sort it into folders such as JYT_INBOUND_ORDERS). Newest first. Read. Filter by `folder`, `status` (received | action_pending | processed | ignored) or a `q` search over subject and sender. Rows carry no body: open one with get_inbound_email.",
+    method: "GET",
+    path: "/admin/inbound-emails",
+    queryParams: ["limit", "offset", "q", "status", "folder"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR("Optional: received | action_pending | processed | ignored."),
+      folder: STR("Optional: the mailbox folder, e.g. 'JYT_INBOUND_ORDERS'."),
+    }),
+    nextSteps: ["get_inbound_email"],
+  },
+  {
+    name: "get_inbound_email",
+    description:
+      "Read one inbound email: sender, subject, date, folder, status, `body_text` (the body as plain text, table rows kept as lines, cells joined with ' | ') and `inventory_order_ids` (the orders it ALREADY became). Read. " +
+      "🔑 TURNING A SUPPLIER'S ORDER CONFIRMATION INTO AN INVENTORY ORDER: " +
+      "(1) Read it here. If `inventory_order_ids` is not empty, STOP: it is done; say which order. " +
+      "(2) Judge from the BODY, not the From address (shops send from no-reply and people forward): the supplier/shop name, their order number, the order date, each line (name, variant such as colour/size, quantity, unit price), pack sizes (a 'pack of 100' bought ×2 is 200 pieces; record the quantity in the unit the item is counted in and the price per that unit), the currency (₹ / Rs / INR is inr), shipping, tax and the total. Show the operator what you read and ask about anything unclear before writing. " +
+      "(3) For each line find an existing inventory item with list_inventory_items (search the name); create only the missing ones with create_inventory_item. " +
+      "(4) create_inventory_order with status 'Pending', the operator's receiving stock_location_id (ask; list_stock_locations), currency_code, per-unit prices, tax_amount, and metadata { source: 'inbound_email', inbound_email_id, supplier_name, supplier_order_number }. It posts NO stock: stock arrives when the parcel is counted with receive_inventory_order. " +
+      "(5) link_inbound_email_inventory_order so the email shows as done.",
+    method: "GET",
+    path: "/admin/inbound-emails/:id",
+    pathParams: ["id"],
+    defaultQuery: { body: "text" },
+    inputSchema: obj({ id: STR("Inbound email id.") }, ["id"]),
+    nextSteps: ["list_inventory_items", "create_inventory_item", "create_inventory_order", "link_inbound_email_inventory_order"],
+  },
+  {
+    name: "link_inbound_email_inventory_order",
+    description:
+      "Record that an inbound email became an inventory order: links the two and marks the email processed (it then shows as done in the Inbox, and get_inbound_email reports the order). Write; sensitive: requires confirm:true. Changes no stock, money or order. Linking the same pair again is a no-op.",
+    method: "POST",
+    path: "/admin/inbound-emails/:id/link-inventory-order",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["inventory_order_id"],
+    inputSchema: obj(
+      {
+        id: STR("Inbound email id."),
+        inventory_order_id: STR("The inventory order it became, e.g. 'inv_order_...'."),
+      },
+      ["id", "inventory_order_id"]
+    ),
+    nextSteps: ["get_inventory_order"],
+  },
+  {
+    name: "ignore_inbound_email",
+    description:
+      "Mark an inbound email as ignored (nothing to do: a newsletter, a duplicate, spam). Write; sensitive: requires confirm:true. It stays readable in the Inbox under Ignored.",
+    method: "POST",
+    path: "/admin/inbound-emails/:id/ignore",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: [],
+    inputSchema: obj({ id: STR("Inbound email id.") }, ["id"]),
+  },
+  {
+    name: "list_inventory_orders",
+    description:
+      "List inventory orders (raw-material purchase orders / stock movements), paginated.",
+    method: "GET",
+    path: "/admin/inventory-orders",
+    queryParams: ["limit", "offset", "q", "status"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR("Optional status filter."),
+    }),
+  },
+  {
+    name: "create_inventory_order",
+    description:
+      "Create an inventory order (a raw-material purchase / stock movement) with its order lines. Each line carries a per-unit `price` and an optional per-unit `extra_cost` (a colour/dye job or other finishing a partner charges on top); `tax_amount` is an ORDER-LEVEL tax recorded as a charge and must NOT be folded into `total_price`. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/inventory-orders",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "order_lines",
+      "quantity",
+      "total_price",
+      "currency_code",
+      "status",
+      "expected_delivery_date",
+      "order_date",
+      "shipping_address",
+      "stock_location_id",
+      "from_stock_location_id",
+      "to_stock_location_id",
+      "is_sample",
+      "tax_amount",
+      "payment_terms",
+      "advance_percent",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        order_lines: {
+          type: "array",
+          description:
+            "The order lines. Each names an existing inventory item (inventory_item_id) OR an untracked product variant (variant_id), with quantity, per-unit price, and optional per-unit extra_cost (colour job).",
+          items: {
+            type: "object",
+            properties: {
+              inventory_item_id: STR(
+                "Existing inventory item id. Exactly one of inventory_item_id or variant_id."
+              ),
+              variant_id: STR(
+                "Untracked product variant id (the order write establishes its inventory item). Exactly one of inventory_item_id or variant_id."
+              ),
+              quantity: { type: "number", description: "Quantity to order." },
+              price: { type: "number", description: "Per-unit price." },
+              extra_cost: {
+                type: "number",
+                description:
+                  "Per-unit extra charge on top of price (colour/dye job, finishing). Defaults to 0.",
+              },
+              batch_number: {
+                type: "integer",
+                description: "Optional batch tag for separate-batch lines.",
+              },
+            },
+            required: ["quantity", "price"],
+            additionalProperties: false,
+          },
+        },
+        quantity: {
+          type: "number",
+          description: "Total quantity — the sum of line quantities.",
+        },
+        total_price: {
+          type: "number",
+          description:
+            "Total goods price: Σ (price + extra_cost) × quantity. Do NOT include tax here.",
+        },
+        currency_code: STR("ISO currency code, e.g. 'inr'. Defaults to inr."),
+        status: STR(
+          "Order status: Pending, Processing, Ready for Delivery, Shipped, Delivered, Cancelled. Typically 'Pending'."
+        ),
+        expected_delivery_date: STR("ISO date the order is expected to arrive."),
+        order_date: STR("ISO date of the order."),
+        shipping_address: {
+          type: "object",
+          description: "Shipping address object. Usually {} when unknown.",
+        },
+        stock_location_id: STR("Destination ('to') stock location id (required)."),
+        from_stock_location_id: STR("Optional source ('from') stock location id."),
+        to_stock_location_id: STR(
+          "Alias for the destination ('to') stock location — omit if stock_location_id is given."
+        ),
+        is_sample: BOOL(
+          "Whether this is a sample/swatch order (defaults false). 🔑 A sample is the ONE kind that may be created with NO `order_lines` and quantity 0 — it is ordered precisely because nobody knows yet what will arrive. Fill the lines in afterwards with update_inventory_order_lines, which stays available at any status except Cancelled and posts no stock."
+        ),
+        metadata: { type: "object", description: "Free-form metadata." },
+        tax_amount: {
+          type: "number",
+          description:
+            "Order-level tax, recorded as a charge of type 'tax'. Raises the payable ceiling; never folded into total_price.",
+        },
+        ...PAYMENT_TERMS_PARAMS,
+      },
+      [
+        "order_lines",
+        "quantity",
+        "total_price",
+        "status",
+        "expected_delivery_date",
+        "order_date",
+        "shipping_address",
+        "stock_location_id",
+      ]
+    ),
+    nextSteps: ["list_inventory_orders"],
+  },
+  {
+    name: "set_inventory_order_ship_from",
+    description:
+      "Set or correct WHERE an inventory order ships from — its `from` stock location, usually the supplier's warehouse. Sensitive: requires confirm:true. " +
+      "The shipment and carrier-rate flows refuse to guess an origin, so an order with no `from` cannot book a pickup. Repoints the order's from-link; no stock moves. " +
+      "Read the id from list_stock_locations, or create_partner_warehouse if the supplier has none. Must differ from the order's destination.",
+    method: "PUT",
+    path: "/admin/inventory-orders/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["from_stock_location_id"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        from_stock_location_id: STR("Stock location id ('sloc_...') the goods ship FROM."),
+      },
+      ["id", "from_stock_location_id"]
+    ),
+    nextSteps: ["get_inventory_order"],
+  },
+  {
+    name: "set_inventory_order_payment_terms",
+    description:
+      "Set WHEN a supplier is paid for an inventory order (#2315): `on_receipt` (the default — nothing is billable until goods are received) or `advance` with `advance_percent` 1–100 (that share of the payable ceiling may be billed before delivery, through the normal payout flow). Sensitive: requires confirm:true. " +
+      "🔑 The advance is an early PAYOUT (create_payment_submission), not a standalone payment: once billed it counts in the order's claimed total, so when the goods arrive only the remainder is offered — nothing is netted by hand. " +
+      "⚠️ Terms change what may be billed from now on; a payout already raised is not re-checked. Read list_payable_inventory_orders afterwards to see the offer.",
+    method: "PUT",
+    path: "/admin/inventory-orders/:id",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["payment_terms", "advance_percent"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        ...PAYMENT_TERMS_PARAMS,
+      },
+      ["id", "payment_terms"]
+    ),
+    nextSteps: ["list_payable_inventory_orders", "create_payment_submission"],
+  },
+
+  // ===== Money =============================================================
+  {
+    name: "list_payments",
+    description:
+      "List payments / payout records (paginated). Read-only view of money movement; settling is a later, dangerous tier.",
+    method: "GET",
+    path: "/admin/payments",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+
+  /**
+   * The partner money surface (#1710/#1712).
+   *
+   * These five rows are one question asked five ways — "what does this partner
+   * still have coming, and what has already moved" — and each wraps a route
+   * whose answer is NOT reproducible by reading a table. `list_payments` above
+   * shows rows; none of these do. They show the FOLD, which is where the
+   * double-pay traps live.
+   */
+  {
+    name: "get_partner_ledger",
+    description:
+      "The whole money record for one partner: every payout (billed / paid / outstanding) plus every payment recorded against them, from all THREE homes a payment can live in (the partner link, the inventory-order link, and the payment method's `paid_to`). Read this BEFORE answering 'has this partner been paid' — the payout list alone said `recorded: 0` for a partner holding INR 121,777. 🔑 The figures are nested under `.totals`, not at the top level: a read of `.billed` returns undefined, which is a confident nothing. `recorded_against_open` is money already sitting against a source an UNPAID payout bills — reported BESIDE `outstanding`, never subtracted from it; whether it discharges the payout is a human decision, recorded with link_payment_to_payout.",
+    method: "GET",
+    path: "/admin/payments/partners/:id/ledger",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+    nextSteps: [
+      "list_payable_runs",
+      "list_payable_inventory_orders",
+      "get_partner_credits",
+      "link_payment_to_payout",
+    ],
+  },
+  {
+    name: "list_payable_runs",
+    description:
+      "The completed production runs this partner can still be billed for — WORK, as opposed to goods. One row per run, carrying its billing status (`clear` / `partly_billed` / `billed` / `unknown`), produced vs ordered quantity, the agreed rate and how much of the run a prior payout already claimed. ⚠️ `unknown` means the run's billing history could not be verified, NOT that it is unbilled: billing it is how the same garments get paid for twice.",
+    method: "GET",
+    path: "/admin/payment-submissions/payable-runs",
+    queryParams: ["partner_id"],
+    inputSchema: obj(
+      {
+        partner_id: STR(
+          "Partner id. REQUIRED — this endpoint answers 'what can I pay THIS partner for', and the route refuses without it rather than returning every completed run on the platform."
+        ),
+      },
+      ["partner_id"]
+    ),
+    nextSteps: [
+      "list_payable_inventory_orders",
+      "create_payment_submission",
+      "get_partner_ledger",
+    ],
+  },
+  {
+    name: "update_inventory_order_lines",
+    description:
+      "Change an existing inventory order's lines — quantity, per-unit price, per-unit extra_cost (the colour/dye job), batch tag — add new lines, or remove one. Sensitive: requires confirm:true. ALWAYS dry_run first. " +
+      "🔑 The `order_lines` array is the DESIRED FINAL STATE of the lines you send: keep an existing line by sending its `id`, add one by omitting `id`, and remove one with `{ id, remove: true }`. ⚠️ EVERY line you keep or add must ALSO carry its `inventory_item_id` (or `variant_id`) — the validator rejects the whole request without it, `id` alone is not enough. Read the ids off get_order/list_inventory_orders and send them back. Do NOT respond to that 400 by dropping the `id`: that stops being an edit and becomes a delete-and-recreate of the line. " +
+      "⚠️ `data.quantity` and `data.total_price` are NOT recomputed for you — send the new totals, where total_price is Σ (price + extra_cost) × quantity across the lines you are left with. " +
+      "🔑 SAMPLE/SWATCH orders (`is_sample: true`) are the exception to two rules: they may have started with NO lines at all, and they stay editable at any status except Cancelled — that is the point, since the box has to arrive before anyone can say what is in it. Filling a sample's lines posts NO stock. " +
+      "🔑 For a swatch of cloth we have never stocked, a new line may carry `new_material: { name, color?, composition? }` INSTEAD of inventory_item_id/variant_id — the write creates the inventory item and its raw-material record as the line is written. Send it only when the line names neither an item nor a variant; sending both would duplicate the item you picked. " +
+      "Use get_order/list_inventory_orders first to read the current line ids.",
+    method: "PUT",
+    path: "/admin/inventory-orders/:id/order-lines",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["data", "order_lines"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        data: {
+          type: "object",
+          description:
+            "Order-level totals AFTER the change: { quantity, total_price }. Not derived from the lines — a stale total here is what makes an order disagree with its own lines.",
+          properties: {
+            quantity: { type: "number", description: "Sum of the resulting line quantities." },
+            total_price: {
+              type: "number",
+              description: "Σ (price + extra_cost) × quantity. Excludes tax.",
+            },
+          },
+        },
+        order_lines: {
+          type: "array",
+          description:
+            "The resulting lines. Existing line -> include its `id`; new line -> omit `id` and name inventory_item_id OR variant_id; removal -> { id, remove: true }.",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Existing order-line id. Omit for a new line." },
+              inventory_item_id: {
+                type: "string",
+                description: "Existing inventory item id (new lines).",
+              },
+              variant_id: {
+                type: "string",
+                description:
+                  "Untracked product variant id (new lines) — the write establishes its inventory item.",
+              },
+              quantity: { type: "number", description: "Line quantity." },
+              price: { type: "number", description: "Per-unit price." },
+              extra_cost: {
+                type: "number",
+                description: "Per-unit extra charge on top of price (colour/dye job, finishing).",
+              },
+              batch_number: { type: "number", description: "Optional batch tag." },
+              new_material: {
+                type: "object",
+                description:
+                  "Create the inventory item as the line is written — for a swatch of cloth with no catalogue entry yet. Use INSTEAD of inventory_item_id/variant_id, never alongside one.",
+                properties: {
+                  name: { type: "string", description: "Material name, e.g. 'Tangaliya Weave'." },
+                  color: { type: "string", description: "Colour; folded into the item title so gradings stay distinguishable." },
+                  composition: { type: "string", description: "Fibre composition, if known." },
+                  unit_of_measure: { type: "string", description: "e.g. 'meter'." },
+                },
+                required: ["name"],
+              },
+              remove: {
+                type: "boolean",
+                description: "Soft-delete this existing line and dismiss its links. Needs `id`.",
+              },
+            },
+          },
+        },
+      },
+      ["id", "order_lines"]
+    ),
+  },
+  {
+    name: "assign_inventory_order_partner",
+    description:
+      "Record WHICH partner supplied an inventory order, and nothing else — the link that makes it appear in their portal and their payables. Sensitive: requires confirm:true. " +
+      "🔴 This COMMISSIONS NOTHING. No message, no event, no workflow, no status change: the partner is not told the order exists. It is for backfilling work that is already done or already agreed offline. " +
+      "🔑 To actually give a partner NEW work, use `send_inventory_order_to_partner` — that one writes the same link AND messages them AND starts the await-start/await-completion workflow. Reaching for this tool when you meant that one leaves an order that looks assigned in every view and that the partner has never heard of. " +
+      "An order with neither is unassigned outright: the goods are recorded, nobody is billed, and list_payable_inventory_orders will not show it.",
+    method: "POST",
+    path: "/admin/inventory-orders/:id/assign-partner",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["partner_id"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        partner_id: STR("Partner supplying the goods, e.g. '01K77...'. Both ends are validated."),
+      },
+      ["id", "partner_id"]
+    ),
+    sideEffects:
+      "Writes the partner link only. The partner receives no notification and no workflow is started.",
+    nextSteps: ["list_payable_inventory_orders"],
+  },
+  {
+    name: "send_inventory_order_to_partner",
+    description:
+      "Commission an inventory order to a partner: writes the partner link, MESSAGES the partner, and starts the await-start / await-completion workflow that tracks their progress. Sensitive: requires confirm:true. " +
+      "🔴 This one reaches a REAL PERSON outside the platform — a partner is notified that they owe us these goods. It is not undoable by deleting a row. " +
+      "🔑 Only valid from status `Pending`; the workflow refuses anything else. It is the tool that moves an order into production. " +
+      "Use `assign_inventory_order_partner` instead when recording work already done or agreed offline — that one writes the same link and tells nobody. " +
+      "⚠️ Confirm the LINES are final first (update_inventory_order_lines): the partner is messaged about the order as it stands, and a later edit does not re-notify them.",
+    method: "POST",
+    path: "/admin/inventory-orders/:id/send-to-partner",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-orders/:id",
+    write: true,
+    sensitive: true,
+    // Deliberately NOT `tier: "write"`. The roster is limited to tools with no
+    // money, no carrier and no third-party message; this one messages a
+    // partner, so a write-scoped credential must not reach it.
+    bodyParams: ["partnerId", "notes"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'. Must be in Pending status."),
+        partnerId: STR(
+          "Partner to commission, e.g. '01K77...'. NOTE the camelCase — this route takes `partnerId`, while assign_inventory_order_partner takes `partner_id`."
+        ),
+        notes: STR("Optional instructions included in the message to the partner."),
+      },
+      ["id", "partnerId"]
+    ),
+    sideEffects:
+      "Notifies the partner and parks a workflow awaiting their start and completion. The notification cannot be recalled.",
+    nextSteps: ["list_inventory_orders", "list_payable_inventory_orders"],
+  },
+  {
+    name: "mark_inventory_order_ready_for_delivery",
+    description:
+      "Mark an inventory order 'Ready for Delivery' — goods packed, before any shipment or AWB exists. Sensitive: requires confirm:true. " +
+      "🔑 Allowed ONLY from status `Partial`: completion must be recorded first. From `Processing` it is refused, because that means started with nothing yet fulfilled, and marking it ready would claim goods are packed before any were produced. A fully completed order goes straight to `Shipped` on its own and never passes through here.",
+    method: "POST",
+    path: "/admin/inventory-orders/:id/ready-for-delivery",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-orders/:id",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      { id: STR("Inventory order id, e.g. 'inv_order_...'. Must be in Partial status.") },
+      ["id"]
+    ),
+  },
+  {
+    name: "receive_inventory_order",
+    description:
+      "Record that an inventory order's goods ACTUALLY TURNED UP, and put them on the books at the order's destination. Sensitive: requires confirm:true. " +
+      "🔑 `Delivered` is a CARRIER event, not a receipt. It comes from the Shiprocket webhook and proves a parcel reached a door; it moves NO stock and means nobody counted what was inside. Until this tool is called, the level reads 0 however OTP-verified the scan was. " +
+      "🔴 The goods land at the ORDER's destination, which on a consignment order is a PARTNER's location — that is deliberate: material we procured, stocked where the partner will cut it (#2111). " +
+      "Omit `lines` to receive everything still outstanding, which is the ordinary case. Calling it twice is safe: receipts are cumulative against the order's fulfillment record, so a fully-received order receives nothing rather than posting the stock twice. Read the levels back with list_inventory_levels. " +
+      "🔑 SPLIT a delivery by listing the SAME `order_line_id` twice with different `stock_location_id`s — the partner keeps what they will cut and the balance goes to our own warehouse. Both halves arrived; this is not a short delivery. The portions are summed per line, so a split cannot receive the same goods twice.",
+    method: "POST",
+    path: "/admin/inventory-orders/:id/receive",
+    pathParams: ["id"],
+    // Without this the dispatcher sends an EMPTY body, which the route reads
+    // as "receive everything outstanding"; a partial count became a full one.
+    bodyParams: ["lines", "stock_location_id", "notes"],
+    previewPath: "/admin/inventory-orders/:id",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        id: STR(
+          "Inventory order id, e.g. 'inv_order_...'. Receivable from Processing, Ready for Delivery, Shipped, Partial or Delivered — NOT from Pending (nothing has left the supplier) or Cancelled."
+        ),
+        lines: {
+          type: "array" as const,
+          description:
+            "What actually arrived, line by line. OMIT to receive everything still outstanding — do that unless a short delivery or a split has to be recorded. A quantity above what is outstanding is REFUSED, not clamped. List a line MORE THAN ONCE with different `stock_location_id`s to split it across destinations.",
+          items: {
+            type: "object" as const,
+            properties: {
+              order_line_id: {
+                type: "string",
+                description: "Order line id, from get_inventory_order.",
+              },
+              quantity: {
+                type: "number",
+                description:
+                  "Quantity received on this line. 0 means this line brought nothing and is skipped.",
+              },
+              stock_location_id: {
+                type: "string",
+                description:
+                  "Where THIS portion lands. Omit and it follows the order's destination (a partner's location on a consignment order). Name it to send part of the delivery elsewhere — typically our own warehouse for the balance the partner will not cut. Get ids from list_stock_locations.",
+              },
+            },
+            required: ["order_line_id", "quantity"],
+            additionalProperties: false,
+          },
+        },
+        stock_location_id: STR(
+          "Override the destination for the WHOLE receipt. Rarely correct — goods go where the order says they go, and a per-portion `lines[].stock_location_id` beats this. Use only when the order names no destination at all."
+        ),
+        notes: STR("Free-text note recorded against the receipt."),
+      },
+      ["id"]
+    ),
+    nextSteps: [
+      "list_inventory_levels",
+      "get_inventory_order",
+      "list_inventory_order_activities",
+    ],
+  },
+  {
+    name: "list_inventory_order_shipping_rates",
+    description:
+      "List the courier options (rate, ETA, recommended flag) for moving an inventory order's goods from its source to its destination location. Read. Call this before create_inventory_order_shipment to pick a preferred_courier_id. " +
+      "🔑 Quote the REAL parcel: send weight_grams and all three sides of the box. The carrier bills the greater of actual and volumetric weight, and a quote at the wrong weight can offer a courier that will not carry the parcel. Book with the SAME weight and box so the quote and the booking agree.",
+    method: "GET",
+    path: "/admin/inventory-orders/:id/shiprocket-rates",
+    pathParams: ["id"],
+    queryParams: [
+      "carrier",
+      "weight_grams",
+      "length",
+      "breadth",
+      "height",
+      "pickup_stock_location_id",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        carrier: STR("Optional carrier to scope the quote to (e.g. 'shiprocket'). Omit for the configured default."),
+        weight_grams: { type: "number", description: "Real parcel weight in grams." },
+        length: { type: "number", description: "Box length in cm. Send all three sides or none." },
+        breadth: { type: "number", description: "Box breadth (width) in cm." },
+        height: { type: "number", description: "Box height in cm." },
+        pickup_stock_location_id: STR(
+          "Quote from this ship-from location instead of the order's own source. Use only when the goods are physically somewhere else; get ids from list_stock_locations."
+        ),
+      },
+      ["id"]
+    ),
+    nextSteps: ["create_inventory_order_shipment"],
+  },
+  {
+    name: "create_inventory_order_shipment",
+    description:
+      "Book a real carrier shipment for an inventory order: creates the forward shipment, gets the AWB and buys the label. Sensitive: requires confirm:true. " +
+      "🔑 Allowed ONLY from Processing, Ready for Delivery, Partial or Shipped. A Pending order is refused, and admin has no Start: the partner must start the order first. " +
+      "Call list_inventory_order_shipping_rates first with the same weight and box, and pass its courier id. " +
+      "🔴 The carrier's `pickup_scheduled_date` in the response can differ from the pickup_date asked for. Read it, and tell the person to check the pickup in Shiprocket when it does. " +
+      "🔴 A shipment is NOT a receipt. No stock moves until the goods are received (receive_inventory_order).",
+    method: "POST",
+    path: "/admin/inventory-orders/:id/shipment",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "carrier",
+      "preferred_courier_id",
+      "weight_grams",
+      "dimensions_cm",
+      "pickup_date",
+      "pickup_stock_location_id",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        carrier: STR("Carrier to book with (e.g. 'shiprocket'). Omit for the configured default."),
+        preferred_courier_id: STR("Courier id from list_inventory_order_shipping_rates."),
+        weight_grams: {
+          type: "number",
+          description: "Real parcel weight in grams. ALWAYS send it, and use the weight you quoted.",
+        },
+        dimensions_cm: {
+          type: "object",
+          description:
+            "Box size in CENTIMETRES: { length, breadth, height }. Send all three; volumetric weight can exceed actual weight and decide the price.",
+          properties: {
+            length: { type: "number", description: "Length in cm." },
+            breadth: { type: "number", description: "Breadth (width) in cm." },
+            height: { type: "number", description: "Height in cm." },
+          },
+        },
+        pickup_date: STR(
+          "Requested pickup date, 'YYYY-MM-DD'. Omit to let the carrier pick the earliest slot. A pickup is a promise to a driver: only ask for a day the goods will be packed."
+        ),
+        pickup_stock_location_id: STR(
+          "Ship from this location instead of the order's own source. Use the same one you quoted from."
+        ),
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Calls the live carrier API, books a real shipment and buys a label. This costs money and sends a courier to the pickup address.",
+    nextSteps: ["get_inventory_order", "receive_inventory_order"],
+  },
+  {
+    name: "cancel_inventory_order_shipment",
+    description:
+      "Void one carrier shipment (AWB) on an inventory order when it cannot go out as booked: a supplier pickup that failed, a date the supplier cannot make, a wrong box. Cancels at the CARRIER first, then marks the shipment cancelled and logs it on the order's timeline. The order and its lines are untouched. " +
+      "🔑 Cancel BEFORE rebooking. A rebook on top of a live carrier order is a no-op: the carrier hands back the old booking. Then book again with create_inventory_order_shipment. " +
+      "Get `shipmentId` from get_inventory_order → shipments[].id. A shipment the carrier reports as picked up or later is refused unless force:true. No message goes to the supplier. " +
+      "PLATFORM-DESTRUCTIVE: requires confirm:true AND a human reason, which is stored on the cancellation. Always dry_run first.",
+    method: "POST",
+    path: "/admin/inventory-orders/:id/shipments/:shipmentId/cancel",
+    pathParams: ["id", "shipmentId"],
+    previewPath: "/admin/inventory-orders/:id",
+    write: true,
+    dangerous: true,
+    // The dangerous rail's `reason` doubles as the route's cancellation
+    // reason, same as cancel_order_shipment.
+    bodyParams: ["reason", "force"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        shipmentId: STR("Shipment id from get_inventory_order → shipments[].id (not the AWB)."),
+        force: {
+          type: "boolean",
+          description:
+            "Cancel even though the carrier reports the parcel picked up. Off by default: voiding a waybill for a parcel already moving strands a box nobody can route.",
+        },
+      },
+      ["id", "shipmentId"]
+    ),
+    sideEffects:
+      "Cancels the waybill at the live carrier (irreversible there; Shiprocket refunds the freight to the wallet in 3-4 working days), sets the shipment to cancelled, archives metadata.shipment into metadata.cancelled_shipments and writes a shipment_cancelled activity.",
+    nextSteps: ["create_inventory_order_shipment", "get_inventory_order"],
+  },
+  {
+    name: "attach_inventory_order_awb",
+    description:
+      "Attach a waybill (AWB) that was booked OUTSIDE the system — on the carrier's portal, by a direct API call, or at a counter — to an inventory order, so the order lists the shipment like one booked with create_inventory_order_shipment. Sensitive: requires confirm:true. " +
+      "NO carrier API is called and nothing is booked or charged. Use create_inventory_order_shipment to BOOK; use this only when the waybill already exists. The same AWB cannot be attached twice. " +
+      "🔴 A shipment is NOT a receipt: no stock moves until receive_inventory_order.",
+    method: "POST",
+    path: "/admin/inventory-orders/:id/external-awb",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "awb",
+      "carrier",
+      "tracking_url",
+      "label_url",
+      "weight_grams",
+      "dimensions_cm",
+      "pickup_stock_location_id",
+      "notes",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        awb: STR("The waybill / AWB number exactly as the carrier issued it."),
+        carrier: STR("Carrier id, e.g. 'dtdc', 'delhivery', 'shiprocket', or a name for one we do not integrate."),
+        tracking_url: STR("Where a human can follow the parcel (optional)."),
+        label_url: STR("Public URL of the label, if there is one (optional)."),
+        weight_grams: { type: "number", description: "Parcel weight in grams (optional)." },
+        dimensions_cm: {
+          type: "object",
+          description: "Box size in CENTIMETRES: { length, breadth, height } (optional).",
+          properties: {
+            length: { type: "number" },
+            breadth: { type: "number" },
+            height: { type: "number" },
+          },
+        },
+        pickup_stock_location_id: STR("Stock location the parcel was picked up from (optional)."),
+        notes: STR("Why it was booked outside the system. Kept on the shipment and the timeline."),
+      },
+      ["id", "awb", "carrier"]
+    ),
+    sideEffects:
+      "Creates an inventory_shipment row (status created) linked to the order, sets metadata.shipment + partner_tracking_number to the AWB, and writes a shipment_attached activity. No carrier call, no stock movement.",
+    nextSteps: ["get_inventory_order", "receive_inventory_order"],
+  },
+  {
+    name: "link_raw_material_group_colors",
+    description:
+      "Put existing raw materials into a raw material group as its colours, by setting each one's group_id. Sensitive: requires confirm:true. " +
+      "No stock item is created: each colour keeps its own inventory item. A colour already in another group MOVES to this one. " +
+      "Use this to group colours that already exist; add_inventory_raw_material can also take a group_id when it creates a new one. Read the group's colour list back from the response.",
+    method: "POST",
+    path: "/admin/raw-material-groups/:id/colors/link",
+    pathParams: ["id"],
+    previewPath: "/admin/raw-material-groups/:id",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["raw_material_ids"],
+    inputSchema: obj(
+      {
+        id: STR("Raw material group id (from list_raw_material_groups)."),
+        raw_material_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Raw material ids to put in the group (not inventory item ids). Get them from list_raw_materials.",
+        },
+      },
+      ["id", "raw_material_ids"]
+    ),
+    nextSteps: ["list_raw_material_groups"],
+  },
+  {
+    name: "list_location_ownership",
+    description:
+      "Which stock locations are OURS, and which are a partner's. Read. " +
+      "🔑 This is the flag that decides whether consumption may deduct stock AT ALL. Material at a partner's bench is still our cloth (the consignment path), but the BUILDING is theirs — `is_core` answers whose building it is, and deducting from a non-core location is refused. " +
+      "🔴 `recorded: false` is not an unknown. A location with no row is treated as NOT ours on purpose, because defaulting an unknown to 'ours' would deduct partner-held stock. On prod exactly two locations are core: Dharamshala and JYT HQ Delhi. " +
+      "🔴 Read `source` before trusting the list: `recorded` means the table is authoritative; `inferred` means it is EMPTY and one brand location is being guessed at, so nobody has decided anything. Use this before create_material_transfer or receive_inventory_order to say where goods are actually going.",
+    method: "GET",
+    path: "/admin/location-ownership",
+    queryParams: ["is_core"],
+    inputSchema: obj(
+      {
+        is_core: STR(
+          "Filter to 'true' (ours) or 'false' (a partner's, or unrecorded). Omit for every location."
+        ),
+      },
+      []
+    ),
+    nextSteps: ["list_stock_locations", "list_inventory_levels", "create_material_transfer"],
+  },
+  {
+    name: "create_material_transfer",
+    description:
+      "Move MATERIAL we already own from one stock location to another — a partner's bench to our warehouse, or on to a second partner. Sensitive: requires confirm:true. " +
+      "🔑 This is NOT a receipt and NOT a purchase. The inventory order's receipt records what arrived from the SUPPLIER; this records material we already hold moving onward. Cloth delivered to a partner who keeps what they will cut and sends the rest on is exactly this. " +
+      "🔴 Nothing moves when you create it. Stock stays counted at the ORIGIN for the whole journey and moves in one step when receive_material_transfer is called — a decrement on dispatch would make the material exist nowhere while it is on a van, and 'nowhere' is what makes a consumption log go negative. " +
+      "🔴 There is NO approval gate here. That gate exists for a production run's output, where partner completion is a claim and admin approval accepts it. Nothing was produced here, so the only gate is somebody at the far end counting it. Get location ids from list_stock_locations and the item id from list_inventory_items.",
+    method: "POST",
+    path: "/admin/inventory-transfers",
+    // `reason` is also a dispatcher control arg; listing it here still
+    // forwards it (pick reads the raw args), so the transfer keeps its reason.
+    bodyParams: [
+      "inventory_item_id",
+      "from_location_id",
+      "to_location_id",
+      "quantity",
+      "reason",
+      "source_inventory_order_id",
+      "notes",
+    ],
+    previewPath: "/admin/inventory-transfers",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        inventory_item_id: STR("The material being moved, e.g. 'iitem_...'. From list_inventory_items."),
+        from_location_id: STR("Where the material is NOW, e.g. 'sloc_...'. From list_stock_locations."),
+        to_location_id: STR("Where it is going. Must differ from the origin — a move to the same place moves nothing."),
+        quantity: NUM("How much is moving. Decimals are expected — cloth is metres, not units."),
+        reason: STR("Why it is moving: 'finishing', 'qc', 'packaging', 'stock' (parking it there, the default) or 'other'."),
+        source_inventory_order_id: STR("The inventory order this material originally arrived on, kept for the trail."),
+        notes: STR("Free-text note recorded against the transfer."),
+      },
+      ["inventory_item_id", "from_location_id", "to_location_id", "quantity"]
+    ),
+    nextSteps: ["receive_material_transfer", "list_inventory_levels", "list_stock_locations"],
+  },
+  {
+    name: "receive_material_transfer",
+    description:
+      "Record that material sent on a transfer was COUNTED at the destination, and move the stock. Sensitive: requires confirm:true. " +
+      "🔑 This is the step that actually moves the inventory: it decrements the origin level and increments the destination in one act. Until it runs, the material is still counted where it started, however long ago it left. " +
+      "Omit `received_quantity` to accept what was sent, which is the ordinary case. A short count is recorded as a shortfall and only what arrived is posted — goods that did not turn up are never posted because the paperwork said they were sent. " +
+      "🔴 Receiving twice is REFUSED, not repeated: it would move the same material twice. A correction is a new transfer, not a second receipt. Read the levels back with list_inventory_levels.",
+    method: "POST",
+    path: "/admin/inventory-transfers/:id/receive",
+    pathParams: ["id"],
+    bodyParams: ["received_quantity", "notes"],
+    previewPath: "/admin/inventory-transfers",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        id: STR("Material transfer id, e.g. 'gtrf_...'. Must not already be delivered or cancelled."),
+        received_quantity: NUM("What was actually counted. Omit to accept what was sent. 0 is legitimate — 'the box came and was empty' is a fact worth recording, and it still closes the transfer."),
+        notes: STR("What the count found."),
+      },
+      ["id"]
+    ),
+    nextSteps: ["list_inventory_levels", "list_stock_locations"],
+  },
+  {
+    name: "list_partner_payment_methods",
+    description:
+      "Where this partner gets PAID — their bank accounts, cash accounts and wallets. Read. "
+      + "🔑 One of them may be `is_default: true`, and that is the method a payout falls back to when the reviewer names none. A partner with two accounts and no default used to be paid to whichever row came back first, silently — so read this before approving a payment submission, not after.",
+    method: "GET",
+    path: "/admin/payments/partners/:id/methods",
+    pathParams: ["id"],
+    queryParams: ["limit", "offset"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        limit: INT("Max results (default 50)."),
+        offset: INT("Pagination offset."),
+      },
+      ["id"]
+    ),
+    nextSteps: ["add_partner_payment_method", "get_partner_ledger", "create_payment_submission"],
+  },
+  {
+    name: "add_partner_payment_method",
+    description:
+      "Record a bank account, cash account or wallet a partner should be PAID into. Sensitive: requires confirm:true. "
+      + "🔴 This is where real money will be sent. Read the details back and check them against what the partner actually gave you — a transposed account number or IFSC is indistinguishable from a correct one until a payout fails or, worse, succeeds to a stranger. "
+      + "`is_default` is EXCLUSIVE per partner: setting it here unsets their other methods. Call list_partner_payment_methods first to see whether they already have one.",
+    method: "POST",
+    path: "/admin/payments/partners/:id/methods",
+    pathParams: ["id"],
+    previewPath: "/admin/payments/partners/:id/methods",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "type",
+      "account_name",
+      "account_number",
+      "bank_name",
+      "ifsc_code",
+      "wallet_id",
+      "is_default",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        type: STR("'bank_account' | 'cash_account' | 'digital_wallet'."),
+        account_name: STR(
+          "The name the account is held in. REQUIRED. Use the LEGAL entity name exactly as the bank has it — a transfer to a mismatched name is rejected or, in India, may silently credit whoever the number belongs to."
+        ),
+        account_number: STR("Account number, for a bank account."),
+        bank_name: STR("Bank name, and branch if the partner gave one."),
+        ifsc_code: STR("IFSC code, for an Indian bank account. 11 characters, e.g. 'BDBL0002217' — note the 5th character is a ZERO, not the letter O, in every IFSC."),
+        wallet_id: STR("Wallet identifier, for a digital wallet."),
+        is_default: BOOL(
+          "Make this the method payouts fall back to when a reviewer names none. EXCLUSIVE — setting it unsets the partner's other methods."
+        ),
+        metadata: { type: "object", description: "Anything else worth recording against the method (branch, notes)." },
+      },
+      ["id", "type", "account_name"]
+    ),
+    nextSteps: ["list_partner_payment_methods", "get_partner_ledger"],
+  },
+  {
+    name: "create_partner_warehouse",
+    description:
+      "Give a partner a warehouse — a stock location linked to them — without a store, sales channel or currency (#2061). Sensitive: requires confirm:true. " +
+      "Use when list_stock_locations shows nothing for a supplier, e.g. an inventory order's `from` location is empty because the supplier has nowhere to ship from. " +
+      "🔴 Refused if the partner already has a warehouse (one per partner; the error names it). " +
+      "⚠️ Creating it also registers the address as a PICKUP point with the carriers (Shiprocket/Delhivery) — an outward-facing call, so get the address right first. " +
+      "Then set it as an order's ship-from with set_inventory_order_ship_from.",
+    method: "POST",
+    path: "/admin/partners/:id/warehouses",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["name", "address", "metadata", "currency_code"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id."),
+        name: STR("Warehouse name, e.g. '<Partner> Warehouse' — the name is how list_stock_locations tells partner buildings from ours."),
+        address: obj(
+          {
+            address_1: STR("Street address (required — carriers need it to register a pickup)."),
+            address_2: STR("Second address line."),
+            city: STR("City."),
+            province: STR("State / province."),
+            postal_code: STR("Postal code."),
+            country_code: STR("ISO-2 country code, e.g. 'IN'. Decides which carriers are registered."),
+            phone: STR("Contact phone for pickups."),
+            company: STR("Company / legal name on the pickup."),
+          },
+          ["address_1", "country_code"]
+        ),
+        metadata: { type: "object", description: "Optional metadata." },
+        currency_code: STR("Optional ISO-3; read only by carrier auto-registration."),
+      },
+      ["id", "name", "address"]
+    ),
+    nextSteps: ["list_stock_locations", "set_inventory_order_ship_from"],
+  },
+  {
+    name: "set_stock_location_sales_channels",
+    description:
+      "Link or unlink sales channels to a stock location — i.e. which storefronts can sell (and fulfil) stock held there. `add`/`remove` are arrays of sales channel ids; other links are left alone. "
+      + "🔑 Use it when a product tracked at OUR warehouse is also sold on a partner's store: Medusa only checks stock at locations linked to the cart's sales channel, so without the link checkout refuses the item. "
+      + "⚠️ The link also exposes that location's shipping options on the linked store. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/stock-locations/:id/sales-channels",
+    pathParams: ["id"],
+    previewPath: "/admin/stock-locations/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["add", "remove"],
+    inputSchema: obj(
+      {
+        id: STR("Stock location id, e.g. 'sloc_...'."),
+        add: { type: "array", description: "Sales channel ids to link.", items: { type: "string" } },
+        remove: { type: "array", description: "Sales channel ids to unlink.", items: { type: "string" } },
+      },
+      ["id"]
+    ),
+    sideEffects: "Links/unlinks sales channels to the location; the location's stock and shipping options become available to (or leave) those storefronts.",
+    nextSteps: ["get_stock_location", "set_sales_channel_products"],
+  },
+  {
+    name: "update_stock_location",
+    description:
+      "Rename a stock location, or change its address. Sensitive: requires confirm:true. "
+      + "🔑 The NAME is the only thing that tells our warehouses apart from a partner's in list_stock_locations, so it is worth keeping true to who actually holds the building. "
+      + "🔴 Renaming here does NOT rename the carrier's pickup location: `metadata.shiprocket_pickup_location` is the carrier's own handle and keeps its old value, which is correct — changing it would break existing shipments.",
+    method: "POST",
+    path: "/admin/stock-locations/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/stock-locations/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["name", "address", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Stock location id, e.g. 'sloc_...'. Read it from list_stock_locations."),
+        name: STR("New display name for the location."),
+        address: {
+          type: "object",
+          description:
+            "Replace the location's address. Omit to leave it alone — sending a partial address REPLACES the whole thing, it does not merge.",
+        },
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id"]
+    ),
+    nextSteps: ["list_stock_locations", "get_stock_location"],
+  },
+  {
+    name: "list_payable_inventory_orders",
+    description:
+      "The inventory (purchase) orders this partner can still be billed for — GOODS, as opposed to work. Rows carry what the order is worth by RECEIPTS, what earlier payouts already claimed, and the remaining billable amount. 🔑 A `count: 0` here does NOT mean the partner is owed nothing: this route answers only about ORDERS, and their unbilled work may all be in runs (call list_payable_runs too). A partially received order is billable only for what actually arrived.",
+    method: "GET",
+    path: "/admin/payment-submissions/payable-inventory-orders",
+    queryParams: ["partner_id"],
+    inputSchema: obj(
+      {
+        partner_id: STR(
+          "Partner id. REQUIRED — the route refuses without it rather than listing every partner's orders."
+        ),
+      },
+      ["partner_id"]
+    ),
+    nextSteps: ["list_payable_runs", "create_payment_submission", "get_partner_ledger"],
+  },
+  {
+    name: "get_partner_credits",
+    description:
+      "Money this partner ALREADY HOLDS that no payout has consumed — an overpayment, an adjustment or a goodwill credit. Returns the credit rows plus `open_total` (only `Open` credits; an `Applied` one has already reduced a payout). 🔑 Reported beside `outstanding`, never netted against it: applying a credit is a deliberate act, and a partner can hold a credit on one order while being genuinely owed money on another — use apply_partner_credit to make that decision. Each row carries `inventory_order_id`: the order the credit is EARMARKED against, or null when it is partner-wide. An earmark is where the founder decided the credit should be consumed; it does not restrict which payout it may be applied to.",
+    method: "GET",
+    path: "/admin/partners/:id/credits",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+    nextSteps: ["apply_partner_credit", "get_partner_ledger"],
+  },
+  {
+    name: "apply_partner_credit",
+    description:
+      "Consume an Open credit against a specific payout — the deliberate act that turns money the partner already holds into a reduction of what they are still owed. The credit becomes `Applied`, stamps the payout it discharged, and the ledger's `credited` rises while `outstanding` falls by the same amount. Sensitive: requires confirm:true. 🔑 `paid` does NOT move — that figure means money that transferred, and a founder reconciling the ledger against a bank statement must not find a number no statement explains. 🔴 This is the SAFE way to carry a surplus forward; never link one payment to two payouts to do it, because `paid` sums per payout with only a per-payout clamp and the same money would count in full against both. ⚠️ A credit applies WHOLE — there is no partial application — so it is refused if it is larger than what the payout still claims, if the credit is not Open, or if the payout is Paid or Rejected. The refusal names both numbers.",
+    method: "POST",
+    path: "/admin/partners/:id/credits/:creditId/apply",
+    pathParams: ["id", "creditId"],
+    bodyParams: ["submission_id"],
+    previewPath: "/admin/partners/:id/credits",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        id: STR("Partner id who holds the credit."),
+        creditId: STR(
+          "The credit to consume. Must belong to this partner — the route reads it through the partner link and 404s otherwise, because `partner_credit` has no partner column and an id alone would happily apply someone else's money."
+        ),
+        submission_id: STR(
+          "The payout (payment submission) this credit discharges. Must belong to the SAME partner. Required — a credit applied to a partner in general reduces nothing and stamps a decision nobody can audit."
+        ),
+      },
+      ["id", "creditId", "submission_id"]
+    ),
+    sideEffects:
+      "Sets the credit to `Applied` and stamps `applied_to_submission_id` + `applied_at`. Moves `credited` and `outstanding` on the partner ledger; leaves `paid`, every payment, and the payout's own status and amount untouched. Forward-only — there is no unapply, because reversing a settled money decision is a new decision that belongs in a credit of its own.",
+    nextSteps: ["get_partner_ledger", "get_partner_credits"],
+  },
+  {
+    name: "link_payment_to_payout",
+    description:
+      "Record that an existing payment SETTLES a payout — the only way a payout can be settled in PART (the payout keeps its status; `paid` on the ledger moves by the payment's amount). Sensitive: requires confirm:true. 🔴 Never link one payment to TWO payouts to carry a surplus forward: `paid` sums per payout with only a per-payout clamp, so the same money would count in full against both. Record the surplus as a credit instead. 🔴 Only a `Completed` payment settles anything — two production rows are COMMITMENT rows (the exact ordered total, filed the day the order was created) and are not money that moved.",
+    method: "POST",
+    path: "/admin/payments/:id/settles",
+    pathParams: ["id"],
+    bodyParams: ["payment_submission_id"],
+    previewPath: "/admin/payments/:id",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        id: STR("Payment id (an `internal_payments` row) whose money settles the payout."),
+        payment_submission_id: STR(
+          "The payout (payment submission) this payment settles. Must belong to the SAME partner as the payment — the route refuses otherwise, because a payment discharging another partner's payout pays the wrong person and leaves a link nobody would question."
+        ),
+      },
+      ["id", "payment_submission_id"]
+    ),
+    sideEffects:
+      "Creates the payment↔payout link and moves `paid` / `outstanding` on the partner ledger. Repeating the same link is a no-op, not an error. Writes no payment and changes no payout status.",
+    nextSteps: ["get_partner_ledger"],
+  },
+  {
+    name: "unlink_payment_from_payout",
+    description:
+      "Undo a link_payment_to_payout — the payment no longer settles that payout, and the payout's `paid` falls back by that amount. Sensitive (every DELETE is): requires confirm:true. Use it when a payment was attributed to the wrong payout; it deletes no payment and no payout.",
+    method: "DELETE",
+    path: "/admin/payments/:id/settles",
+    pathParams: ["id"],
+    /**
+     * Query, not body: the route reads `payment_submission_id` from the query
+     * FIRST and its middleware entry registers no body validator. A DELETE body
+     * would work today and is one middleware edit away from being ignored.
+     */
+    queryParams: ["payment_submission_id"],
+    previewPath: "/admin/payments/:id",
+    write: true,
+    inputSchema: obj(
+      {
+        id: STR("Payment id whose settlement link is being removed."),
+        payment_submission_id: STR("The payout the payment should no longer settle."),
+      },
+      ["id", "payment_submission_id"]
+    ),
+    sideEffects:
+      "Removes the payment↔payout link and lowers `paid` on the partner ledger by that payment's amount.",
+    nextSteps: ["get_partner_ledger"],
+  },
+
+  // ===== Marketing & analytics ============================================
+  {
+    name: "list_publishing_campaigns",
+    description: "List publishing / newsletter campaigns (paginated).",
+    method: "GET",
+    path: "/admin/publishing-campaigns",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  // ===== Messaging =========================================================
+  // WhatsApp (and future channel) conversations with partners. Reads only.
+  //
+  // 🔴 These deliberately do NOT point at `/admin/messaging/:conversationId`.
+  // That route is a GET that WRITES — it zeroes `unread_count` and sends
+  // WhatsApp READ RECEIPTS for up to ten unread inbound messages. An agent
+  // looking something up would tell a partner their message had been read.
+  // `/admin/messages` is the read-only surface built for exactly this.
+  {
+    name: "request_partner_photos",
+    description:
+      "Ask a partner for photos AND record what they will be for, in ONE action. Sensitive: requires confirm:true. #2138 — a photo carries no evidence of its own purpose (fabric being sold to us looks exactly like fabric we are having made), so the purpose is taken from the admin who asked rather than guessed from the image. Pass kind: 'inventory_offer' (they are offering us stock or material), 'product_submission' (photos for a storefront product), or 'run_progress' (progress on work they are making for us). `note` is your own words about what this is about and beats the generic sentence. The request is written for this partner in the language they chose at registration, sent as free text inside Meta's 24-hour window and via the approved prose carrier outside it. 🔑 The context is stamped ONLY if the send succeeds — a context live for a request that never arrived would reinterpret photos under an intent nobody communicated. 'document' is deliberately REFUSED: proof of dispatch and invoices have no typed destination yet, so accepting it would file them in a catchall while looking filed.",
+    method: "POST",
+    path: "/admin/messaging/:conversationId/request-photos",
+    pathParams: ["conversationId"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["kind", "note", "message", "ttl_hours"],
+    inputSchema: obj(
+      {
+        conversationId: STR("Conversation id — a bare ULID, from list_messages or the inbox."),
+        kind: STR(
+          "'inventory_offer' | 'product_submission' | 'run_progress'. Required."
+        ),
+        note: STR(
+          "What this is about, in your own words (e.g. 'the leftover pashmina we discussed yesterday'). Used verbatim to write the request."
+        ),
+        message: STR(
+          "Override the written request entirely with your own text. Leave empty to have it composed."
+        ),
+        ttl_hours: INT(
+          "How long the context stays live. Default 72, capped at 168 (7 days)."
+        ),
+      },
+      ["conversationId", "kind"]
+    ),
+  },
+  {
+    name: "get_message",
+    description:
+      "Get ONE message by its id — the answer to 'what is message X'. Returns the message plus the identity of the conversation it belongs to (partner, phone, title), because a message id alone never answers the question actually being asked. Message ids are bare ULIDs with no prefix (e.g. '01KPX...'), which is why they are easy to mistake for a partner or design id. Read-only: unlike opening a conversation, this sends no read receipts and marks nothing read.",
+    method: "GET",
+    path: "/admin/messages/:id",
+    pathParams: ["id"],
+    inputSchema: obj(
+      { id: STR("Message id — a bare ULID, no prefix.") },
+      ["id"]
+    ),
+  },
+  {
+    name: "list_messages",
+    description:
+      "List messages across conversations, newest first. Filter by conversation_id, direction (inbound/outbound), status (pending/sent/delivered/read/failed/queued), message_type, context_type/context_id (how a message is tied to a run or order), wa_message_id, or q for a substring of the content. Use it to answer what we actually sent someone and what came back — e.g. status='failed' to find deliveries Meta rejected, or q='[template:' to count template sends. Read-only: sends no read receipts.",
+    method: "GET",
+    path: "/admin/messages",
+    queryParams: [
+      "conversation_id",
+      "direction",
+      "status",
+      "message_type",
+      "context_type",
+      "context_id",
+      "wa_message_id",
+      "q",
+      "limit",
+      "offset",
+    ],
+    inputSchema: obj({
+      conversation_id: STR("Only messages in this conversation."),
+      direction: STR("'inbound' | 'outbound'."),
+      status: STR("'pending' | 'sent' | 'delivered' | 'read' | 'failed' | 'queued'."),
+      message_type: STR("'text' | 'interactive' | 'template' | 'media' | 'context_card'."),
+      context_type: STR("What the message is about, e.g. 'production_run'."),
+      context_id: STR("The id within context_type, e.g. '<run_id>:reminder:<date>'."),
+      wa_message_id: STR("Meta's own wamid, when chasing a delivery."),
+      ...PAGINATION,
+      // After the spread on purpose: PAGINATION carries its own generic `q`,
+      // and here it means one specific thing — a substring of the content.
+      q: STR("Case-insensitive substring of the message content."),
+    }),
+  },
+
+  {
+    name: "list_notifications",
+    description: "List platform notifications (paginated). Use to review recent system events.",
+    method: "GET",
+    path: "/admin/notifications",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+
+  // ===== Email templates ===================================================
+  // The outbound email surface: the DB-stored templates the senders render
+  // and dispatch (jobs/process-email-queue, agreement/blog/digest workflows,
+  // task-assigned notifications). Senders resolve a template by template_key
+  // + is_active — see EmailTemplatesService.getTemplateByKey — so a template
+  // that is not ACTIVE is invisible to every sender, and a key no row holds
+  // makes the send fail outright. These tools let the assistant do exactly
+  // what the admin UI's email-templates pages do.
+  {
+    name: "list_email_templates",
+    description:
+      "List email templates (paginated) — the stored subjects/bodies the platform emails from: order updates, partner task notifications, blog broadcasts. Filter by template_key (the exact key senders resolve), template_type, is_active, or free-text search on name. Use it to find a template id, or to check which template a key will actually hit — a key with more than one active row makes which one sends depend on list order.",
+    method: "GET",
+    path: "/admin/email-templates",
+    // ONLY the filters the handler actually forwards. `order` and `fields`
+    // are accepted by the route and then DROPPED — the handler destructures
+    // them but never passes them on — so declaring them would silently
+    // ignore the model's sort, the same defect as #1172.
+    queryParams: ["limit", "offset", "q", "is_active", "template_type", "template_key"],
+    inputSchema: obj({
+      ...PAGINATION,
+      is_active: BOOL("Filter by active state. Only is_active:true rows are ever sent — false rows exist but no sender resolves them."),
+      template_type: STR("Filter by template type, e.g. 'general' | 'transactional' | 'marketing'."),
+      template_key: STR("Filter by the exact lookup key senders use, e.g. 'partner-task-assigned'."),
+    }),
+  },
+  {
+    name: "get_email_template",
+    description:
+      "Get a single email template by id — subject, html_content, from/to/cc/bcc, its documented variables and its active state. Use to review a template's body before editing or deactivating it.",
+    method: "GET",
+    path: "/admin/email-templates/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Email template id.") }, ["id"]),
+  },
+  {
+    name: "create_email_template",
+    description:
+      "Create a new email template. 🔑 Call list_email_templates FIRST: senders resolve the FIRST active row for a template_key, so creating a second active row for a key that already has one makes which one sends depend on list order — create a key variant only deliberately. `variables` is the documentation of what the body substitutes: list the {{placeholders}} the subject and html_content actually use, e.g. {'order_id': 'The order number'}. is_active defaults to TRUE — the template becomes sendable the moment it exists. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/email-templates",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "name",
+      "description",
+      "to",
+      "cc",
+      "bcc",
+      "from",
+      "template_key",
+      "subject",
+      "html_content",
+      "variables",
+      "is_active",
+      "template_type",
+    ],
+    inputSchema: obj(
+      {
+        name: STR("Human-readable template name, e.g. 'Partner task assigned'. Required."),
+        template_key: STR(
+          "The lookup key senders resolve, snake_case, e.g. 'partner-task-assigned'. Must be unique among ACTIVE rows to be predictable. Required."
+        ),
+        subject: STR("Email subject line. May carry {{placeholders}}. Required."),
+        html_content: STR(
+          "Email body as HTML. May carry {{placeholders}} the sender substitutes at send time. Required."
+        ),
+        from: STR("From address, a valid email, e.g. 'no-reply@jyt.com'. Required."),
+        to: STR("Fixed recipient address for single-recipient templates; senders usually override this. Pass null to clear."),
+        cc: STR("Fixed CC address. Pass null to clear."),
+        bcc: STR("Fixed BCC address. Pass null to clear."),
+        description: STR("What this template is for and when it fires."),
+        variables: {
+          type: "object",
+          description:
+            "The {{placeholders}} the subject/body use, as documentation for whoever edits the template next: {'order_id': 'The order number'}. Not enforced at send time.",
+          additionalProperties: true,
+        },
+        is_active: BOOL("Whether senders can resolve this template. Defaults to true."),
+        template_type: STR("Template type, e.g. 'general' | 'transactional' | 'marketing'. Required by the route."),
+      },
+      ["name", "template_key", "subject", "html_content", "from", "template_type"]
+    ),
+    sideEffects:
+      "Creates a template row. Nothing sends at creation — a send only happens when a sender (a job, workflow or notification) resolves the key later.",
+    nextSteps: ["get_email_template", "update_email_template"],
+  },
+  {
+    name: "update_email_template",
+    description:
+      "Update an email template by id — partial: only the fields you pass change. Use to edit subject/html_content, fix a from address, document the variables, or retire a template with is_active:false (deactivation is reversible and leaves the content auditable). ⚠️ Changing template_key orphans every sender still referencing the old one — they stop finding the template and the send fails. There is no draft/publish step: the next email sent with the key picks the change up immediately. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/email-templates/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/email-templates/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "name",
+      "description",
+      "to",
+      "cc",
+      "bcc",
+      "from",
+      "template_key",
+      "subject",
+      "html_content",
+      "variables",
+      "is_active",
+      "template_type",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Email template id to update."),
+        name: STR("New template name."),
+        template_key: STR(
+          "New lookup key. ⚠️ Renaming the key orphans every sender still referencing the old one — they stop finding the template."
+        ),
+        subject: STR("New subject line."),
+        html_content: STR("New HTML body."),
+        from: STR("New from address (must be a valid email)."),
+        to: STR("New fixed recipient, or null to clear."),
+        cc: STR("New fixed CC, or null to clear."),
+        bcc: STR("New fixed BCC, or null to clear."),
+        description: STR("New description."),
+        variables: {
+          type: "object",
+          description: "New {{placeholder}} documentation object.",
+          additionalProperties: true,
+        },
+        is_active: BOOL(
+          "Activate or deactivate the template. false retires it for every sender WITHOUT deleting it — the preferred way to stop a template being used."
+        ),
+        template_type: STR("New template type."),
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Rewrites the template row in place, effective on the very next send that resolves its key. Compensation restores the prior row if the workflow fails.",
+    nextSteps: ["get_email_template"],
+  },
+  {
+    name: "delete_email_template",
+    description:
+      "Delete an email template by id. 🔑 Prefer update_email_template with is_active:false — deactivation is reversible and leaves the row auditable; deletion is neither, and every sender still holding the key fails with 'Email template with key ... not found'. Dry-run first to see the template you are about to remove. Sensitive: requires confirm:true.",
+    method: "DELETE",
+    path: "/admin/email-templates/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/email-templates/:id",
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Email template id to delete.") }, ["id"]),
+  },
+
+  // ===== Social posts & platforms =========================================
+  // Social-platform integrations (Facebook, Instagram, Twitter/X, LinkedIn)
+  // are stored as SocialPlatform rows with category "social". These tools let
+  // the assistant list the configured social platforms, create draft posts,
+  // and publish them — the same surface the admin UI exposes.
+  {
+    name: "list_social_platforms",
+    description:
+      "List the configured platform integrations. ALWAYS pass category:'social' for social-media work (Facebook, Instagram, Twitter/X, LinkedIn, FBINSTA) — the route applies NO default, so omitting it returns every integration, including payment, shipping, email, SMS, analytics, CRM and storage rows. Each row carries the platform id, name, auth type and status. Use to find a platform_id for create_social_post. Secrets are stripped from the response.",
+    method: "GET",
+    path: "/admin/social-platforms",
+    queryParams: ["limit", "offset", "q", "category", "status"],
+    inputSchema: obj({
+      ...PAGINATION,
+      category: STR("Filter by category. Pass 'social' to list only social-media platforms; omitted means NO filter, not 'social'."),
+      status: STR("Filter by platform status: 'active' | 'inactive' | 'error' | 'pending'."),
+    }),
+  },
+  {
+    name: "list_social_posts",
+    description:
+      "List social posts (paginated). Filter by status (draft/scheduled/posted/failed/archived) or free-text search by name. Use to see what's queued, published or failed.",
+    method: "GET",
+    path: "/admin/social-posts",
+    queryParams: ["limit", "offset", "q", "status", "posted_at", "error_message"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR("Post status: 'draft' | 'scheduled' | 'posted' | 'failed' | 'archived'."),
+      posted_at: STR("Filter by posted date (ISO string or partial match)."),
+      error_message: STR("Filter by error message."),
+    }),
+  },
+  {
+    name: "get_social_post",
+    description:
+      "Get a single social post by id (status, caption, media attachments, platform, publish results). Use before publish_social_post to review the post.",
+    method: "GET",
+    path: "/admin/social-posts/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Social post id, e.g. 'spost_...'.") }, ["id"]),
+  },
+  {
+    name: "create_social_post",
+    description:
+      "Create a new social post (draft by default). Sensitive: requires confirm:true. Pass platform_id (from list_social_platforms), a name, and a message/caption. For Facebook/FBINSTA, pass page_id and/or ig_user_id in metadata, and set post_type (photo/feed/reel). Pass media_urls for image/video posts. Set metadata.auto_publish to publish immediately after creation. Use dry_run first to review the payload.",
+    method: "POST",
+    path: "/admin/social-posts",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "name",
+      "platform_id",
+      "caption",
+      "message",
+      "link",
+      "media_urls",
+      "post_type",
+      "status",
+      "scheduled_at",
+      "platform_name",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        name: STR("Post name (required)."),
+        platform_id: STR("Social platform id from list_social_platforms (required)."),
+        caption: STR("Post caption text."),
+        message: STR("Post message text (alias for caption; preferred by the UI)."),
+        link: STR("Optional URL for link/feed posts."),
+        media_urls: {
+          type: "array",
+          items: { type: "string" },
+          description: "Media URLs for photo/reel posts (1-10 images or 1 video).",
+        },
+        post_type: STR("'photo' | 'feed' | 'reel'. Required for Facebook/Instagram."),
+        status: STR("'draft' (default) | 'scheduled' | 'posted' | 'failed' | 'archived'."),
+        scheduled_at: STR("ISO datetime for scheduled publishing."),
+        platform_name: STR("Platform name (e.g. 'facebook', 'instagram', 'FBINSTA'). Set for the workflow's platform detection."),
+        metadata: {
+          type: "object",
+          description:
+            "Platform-specific fields: { page_id, ig_user_id, publish_target ('facebook'|'instagram'|'both'), auto_publish (boolean) }. The workflow reads these to route the post.",
+        },
+      },
+      ["name", "platform_id"]
+    ),
+    sideEffects:
+      "Creates a draft social post linked to the configured platform. With metadata.auto_publish, also triggers the publish workflow immediately.",
+    nextSteps: ["get_social_post", "publish_social_post"],
+  },
+  {
+    name: "publish_social_post",
+    description:
+      "Publish a social post to its configured platform(s) — goes LIVE publicly. PLATFORM-DESTRUCTIVE: requires confirm:true AND a human reason, and is only available when ADMIN_MCP_ENABLE_DANGEROUS is enabled. This calls the real Facebook/Instagram/Twitter/LinkedIn API and creates a public post. Always dry_run first to review the post content and target. Pass override_page_id or override_ig_user_id to redirect to a different account than the one stored on the post.",
+    method: "POST",
+    path: "/admin/social-posts/:id/publish",
+    pathParams: ["id"],
+    previewPath: "/admin/social-posts/:id",
+    write: true,
+    dangerous: true,
+    bodyParams: ["override_page_id", "override_ig_user_id"],
+    inputSchema: obj(
+      {
+        id: STR("Social post id to publish, e.g. 'spost_...'."),
+        override_page_id: STR("Override the Facebook Page ID to publish to."),
+        override_ig_user_id: STR("Override the Instagram Business account ID to publish to."),
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Calls the live social platform API and creates a public post. Failed publishes are recorded on the post for retry; partial successes (e.g. Facebook ok, Instagram failed) are reported per-platform.",
+    nextSteps: ["get_social_post", "list_social_posts"],
+  },
+
+  // ===== Observability (#844) =============================================
+  {
+    name: "get_mcp_usage",
+    description:
+      "Read the MCP observability ledger: totals plus per-surface and per-tool counts, error count, and the most recent tool calls across the store/partner/admin MCP surfaces. Use to answer 'how is the MCP being used' or 'what's failing'. The ledger is TIME-FILTERABLE: pass `days` (last N days from now) or explicit `from`/`to` ISO dates (`from`/`to` win when both are given), and the effective window is echoed back on the payload so you know which period a number describes. 🔑 An EMPTY result for a window means no rows IN that window — it is NOT evidence that no usage ever happened; the ledger only holds rows whose `created_at` falls inside the filter.",
+    method: "GET",
+    path: "/admin/mcp/usage",
+    queryParams: ["surface", "limit", "days", "from", "to"],
+    inputSchema: obj({
+      surface: STR("Optional surface filter: 'store' | 'partner' | 'admin'."),
+      limit: { type: "integer", description: "Max rows to scan (default 50, max 200). Also sets how many recent calls are returned." },
+      days: {
+        type: "number",
+        description: "Convenience window: the last N days from now (e.g. 7 for the week). Alternatives to explicit from/to; if both are given, from/to win.",
+      },
+      from: STR("Explicit window start, ISO 8601 (e.g. 2026-09-01T00:00:00Z)."),
+      to: STR("Explicit window end, ISO 8601 (e.g. 2026-09-08T23:59:59Z)."),
+    }),
+  },
+
+  // ===== Assistant capability (carried over from the deprecated V4 chat) ===
+  {
+    name: "resolve_admin_query",
+    description:
+      "Resolve a natural-language question about the platform's data/code into an execution plan (hybrid BM25 code search + LLM). This is the query-resolution capability from the retired V4 admin chat. Read-only: it plans, it does not mutate anything.",
+    method: "POST",
+    path: "/admin/mcp/resolve-query",
+    bodyParams: ["query"],
+    inputSchema: obj(
+      { query: STR("The natural-language query to resolve into an execution plan.") },
+      ["query"]
+    ),
+  },
+
+  // ===== Tier 2: catalog writes ==========================================
+  // Writes are gated by ADMIN_MCP_ENABLE_WRITE (default on) and flagged
+  // `sensitive` so the dispatcher requires the admin's explicit confirm:true.
+  // Each declares a previewPath so dry_run / the confirmation card can show the
+  // current object before the change. They wrap Medusa's built-in admin routes.
+  {
+    name: "create_product",
+    description:
+      "Create a new product. Sensitive: requires confirm:true. Prefer dry_run first to review the payload.",
+    method: "POST",
+    path: "/admin/products",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "title",
+      "status",
+      "description",
+      "subtitle",
+      "handle",
+      "thumbnail",
+      "images",
+      "categories",
+      "collection_id",
+      "type_id",
+      "tags",
+      ...PHYSICAL_AND_CUSTOMS_BODY_PARAMS,
+      "discountable",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        title: STR("Product title (required)."),
+        status: STR("Product status: 'draft' | 'proposed' | 'published' | 'rejected'."),
+        description: STR("Product description."),
+        subtitle: STR("Optional subtitle."),
+        handle: STR("Optional URL handle (auto-derived from title if omitted)."),
+        thumbnail: STR("Optional thumbnail image URL."),
+        images: {
+          type: "array",
+          description: "Optional array of image URLs.",
+          items: { type: "string" },
+        },
+        categories: {
+          type: "array",
+          description:
+            "Category ids to assign this product to. Pass as [{ id: 'pcat_...' }]. A product can belong to multiple categories. Use create_product_category / list_product_categories to manage categories first.",
+          items: { type: "object", properties: { id: STR("Category id.") }, required: ["id"] },
+        },
+        collection_id: STR("Optional collection id. A product belongs to at most ONE collection."),
+        type_id: STR("Optional product type id."),
+        tags: {
+          type: "array",
+          description: "Tag ids to assign. Pass as [{ id: 'ptag_...' }].",
+          items: { type: "object", properties: { id: STR("Tag id.") }, required: ["id"] },
+        },
+        ...physicalAndCustomsSchemaProps(),
+        discountable: BOOL("Whether the product can be discounted (default true)."),
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["title"]
+    ),
+    sideEffects: "Creates a new product in 'draft' status unless status is set.",
+    nextSteps: ["get_product", "update_product", "set_category_products"],
+  },
+  {
+    // Creating a product for someone ELSE, into their live shop. Core
+    // `create_product` above wraps Medusa's `/admin/products`, which binds no
+    // sales channel and seeds no inventory levels — the product is invisible on
+    // every storefront and every variant reads 0 stock. Every store-scoped
+    // product route lived under `/partners/*` behind partner auth, so an admin
+    // had no way to do this at all.
+    name: "create_product_for_partner",
+    description:
+      "Create a product INSIDE a partner's store, on their behalf — binds it to the store's sales channel, seeds inventory levels and materialises FX prices, so it actually appears on their storefront. Use this instead of create_product whenever the product belongs in a partner shop; create_product makes a product that is in NO sales channel and therefore invisible. The act is recorded against the partner and announced to them. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/stores/:id/products",
+    pathParams: ["id"],
+    write: true,
+    // Sensitive because it publishes into someone else's business, not merely
+    // because it writes: the product lands on the partner's public storefront
+    // and is attributed to them.
+    sensitive: true,
+    bodyParams: PARTNER_PRODUCT_BODY_PARAMS,
+    inputSchema: obj(
+      {
+        id: STR("Store id to create the product in, e.g. 'store_...'. Get it from list_stores."),
+        title: STR("Product title (required)."),
+        handle: STR("URL handle. Derived from the title when omitted."),
+        status: STR("'draft' | 'proposed' | 'published' | 'rejected'. Defaults to draft — publish deliberately."),
+        description: STR("Product description."),
+        subtitle: STR("Optional subtitle."),
+        thumbnail: STR("Thumbnail URL."),
+        images: {
+          type: "array",
+          description: "Images as [{ url }].",
+          items: {
+            type: "object",
+            properties: { url: { type: "string" } },
+            required: ["url"],
+          },
+        },
+        options: {
+          type: "array",
+          description:
+            "PRODUCT options (the variant axes, e.g. Size). NOT the made-to-order choices — those are spec option groups, set with set_product_spec.",
+          items: {
+            type: "object",
+            properties: {
+              title: { type: "string" },
+              values: { type: "array", items: { type: "string" } },
+            },
+            required: ["title", "values"],
+          },
+        },
+        variants: {
+          type: "array",
+          description:
+            "Variants with prices, e.g. [{ title, options: { Size: 'M' }, prices: [{ amount, currency_code }] }]. A product with no variant cannot be bought.",
+          items: { type: "object", additionalProperties: true },
+        },
+        collection_id: STR("Optional collection id."),
+        type_id: STR("Optional product type id."),
+        categories: {
+          type: "array",
+          description: "Categories as [{ id }].",
+          items: {
+            type: "object",
+            properties: { id: { type: "string" } },
+            required: ["id"],
+          },
+        },
+        tags: {
+          type: "array",
+          description: "Tags as [{ id }].",
+          items: {
+            type: "object",
+            properties: { id: { type: "string" } },
+            required: ["id"],
+          },
+        },
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["id", "title"]
+    ),
+    sideEffects:
+      "Creates the product in the partner's store bound to its default sales channel, seeds 0-quantity inventory levels at the store location, and fans out FX prices. Records who created it on the partner-product ownership link and emits product.created_for_partner so the partner can be told. Refuses if the store has no sales channel or no linked partner.",
+    nextSteps: ["set_product_spec", "get_product", "update_product"],
+  },
+  {
+    name: "update_product",
+    description:
+      "Update an existing product (title, status, description, handle, categories, collection, metadata and more). Sensitive: requires confirm:true. Use dry_run to see the current product first.",
+    method: "POST",
+    path: "/admin/products/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/products/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "title",
+      "status",
+      "description",
+      "subtitle",
+      "handle",
+      "thumbnail",
+      "images",
+      "categories",
+      "collection_id",
+      "type_id",
+      "tags",
+      ...PHYSICAL_AND_CUSTOMS_BODY_PARAMS,
+      "discountable",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Product id, e.g. 'prod_...'."),
+        title: STR("New title."),
+        status: STR("New status: 'draft' | 'proposed' | 'published' | 'rejected'."),
+        description: STR("New description."),
+        subtitle: STR("New subtitle."),
+        handle: STR("New URL handle."),
+        thumbnail: STR("New thumbnail image URL."),
+        images: {
+          type: "array",
+          description:
+            "🔴 The product's WHOLE image gallery, in order: the list REPLACES what is stored, so resend every image you mean to keep. Pass as [{ url }]. Omit to leave images alone. To serve a HEIC browsers cannot show, pass its Cloudflare JPEG URL: https://automatic.jaalyantra.com/cdn-cgi/image/format=jpeg,width=1600/<path>.",
+          items: { type: "object", properties: { url: STR("Image URL.") }, required: ["url"] },
+        },
+        categories: {
+          type: "array",
+          description:
+            "Category ids to assign. Pass as [{ id: 'pcat_...' }]. Replaces the existing category assignments.",
+          items: { type: "object", properties: { id: STR("Category id.") }, required: ["id"] },
+        },
+        collection_id: STR("New collection id. Set to null to remove from collection."),
+        type_id: STR("New product type id."),
+        tags: {
+          type: "array",
+          description: "Tag ids to assign. Pass as [{ id: 'ptag_...' }].",
+          items: { type: "object", properties: { id: STR("Tag id.") }, required: ["id"] },
+        },
+        ...physicalAndCustomsSchemaProps(),
+        discountable: BOOL("Whether the product can be discounted."),
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id"]
+    ),
+    sideEffects: "Publishing a product makes it live on the storefront.",
+    nextSteps: ["get_product", "list_product_categories", "set_category_products"],
+  },
+  {
+    name: "list_design_products",
+    description: [
+      "Which products were created FROM a design — the reverse lookup that did not exist.",
+      "`create_product_from_design` writes a product↔design link and stamps `metadata.design_id`, but nothing read either direction: get_design returns no products and list_products cannot filter on metadata. Finding a design's product meant free-text searching titles, which silently misses any product whose title was edited.",
+      "Use it before approving a run: approval REUSES an existing product for the design rather than creating another, so what this returns is what the approval will bless — including its price.",
+    ].join("\n"),
+    method: "GET",
+    path: "/admin/designs/:id/products",
+    pathParams: ["id"],
+    inputSchema: obj(
+      { id: STR("Design id, e.g. '01KWKHSQ8FDGSKNW4FNY3K5FF0'.") },
+      ["id"]
+    ),
+    nextSteps: ["get_product", "get_design", "list_production_runs"],
+  },
+  {
+    name: "review_production_run_output",
+    description: [
+      "Decide whether what a COMPLETED production run produced is acceptable — the output review queue (#1805). Sensitive: requires confirm:true.",
+      "🔑 ALWAYS pass `preview: true` first. The preview resolves which runs map to which designs, which designs ALREADY have a product and so will be skipped, and what each would be listed at — and creates nothing. Approving blind is a bulk write on the live catalogue.",
+      "⚠️ `preview`, NOT `dry_run`: `dry_run` is this MCP's own flag and never reaches the route, so it returns the planned request instead of the report.",
+      "Approve creates the catalogue product ONCE PER DESIGN however many of its runs are selected, and reuses the design's existing product if it has one — so a design whose product is mispriced is blessed, not corrected. Check list_design_products first.",
+      "Reject records the refusal and creates nothing. A rejected run STAYS `completed`: the partner made the goods and is still owed for `produced_quantity`. A reason is required to reject.",
+      "Runs with no `design_id` can only be rejected, never approved — they come back `skipped`.",
+      "Answers with a PER-RUN report, not a bare success: read it rather than assuming the whole batch landed.",
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/production-runs/approvals",
+    write: true,
+    sensitive: true,
+    bodyParams: ["run_ids", "decision", "reason", "preview"],
+    inputSchema: obj(
+      {
+        run_ids: {
+          type: "array",
+          description: "Production run ids to decide on, 1-200.",
+          items: { type: "string" },
+        },
+        decision: STR("'approve' | 'reject'."),
+        reason: STR(
+          "Why the output was refused. REQUIRED to reject (unless previewing) — it is the only record the partner who made the goods can be shown."
+        ),
+        preview: BOOL(
+          "Resolve and report what the decision would do, changing nothing. Do this first."
+        ),
+      },
+      ["run_ids", "decision"]
+    ),
+    sideEffects:
+      "Approve creates a product per design (reusing an existing one) and stamps approval_decision on every selected run. Reject stamps the refusal only. Neither changes run status, and neither affects payout — billing keys on `completed`.",
+    nextSteps: ["list_production_runs", "list_design_products", "get_product"],
+  },
+  {
+    name: "update_product_option",
+    description: [
+      "Add or remove the values a product option allows — the '33s', '60lea Colour' choices a variant is matched to. Sensitive: requires confirm:true.",
+      "🔑 This is the tool that unblocks `create_product_variant`. That tool matches a variant to option values that ALREADY EXIST and core will not invent one, so a variant naming a new value cannot be created until the value is added here first.",
+      "✅ ADDITIVE, not a rewrite: `add` appends and `remove` deletes. Values you do not mention are untouched, so there is no need to resend the existing list and no way to drop one by omission.",
+      "🔴 `add` entries must be OBJECTS — `add: [{ value: '33s' }]`. A bare string is read as the id of an ALREADY-EXISTING value, so `add: ['33s']` fails with \"you tried to set relationship product_option_value_id: 33s, but such entity does not exist\": an error naming a relationship the caller never mentioned, which reads like a data problem rather than a shape problem.",
+      "⚠️ `remove` takes option-value IDs (`optval_...`), not the value strings. Removing a value that a variant is matched to leaves that variant without its option.",
+      "Find the option id under `product.options[].id` and the value ids under `product.options[].values[].id`, both from `get_product`.",
+    ].join("\n"),
+    method: "POST",
+    // The batch endpoint is the only route core exposes for editing an
+    // option's VALUES. There is no `/admin/products/:id/options/:option_id`
+    // — this row pointed at one until #1907, which is why every call 404'd
+    // while every registry test stayed green: they check the registry's own
+    // consistency and its prose, never that the route on the other end exists.
+    //
+    // 🔑 The option's TITLE is a different resource entirely: the top-level
+    // `/admin/product-options/:id` (see `rename_product_option`). Probed on
+    // prod 2026-09-10 with a 404 control — the nested path 404s, the
+    // top-level one returns 200. Reading this comment as "options cannot be
+    // renamed" is how a catalogue accumulates options titled `Original`,
+    // `Type` and `Default option`: 47 of them on prod today.
+    path: "/admin/products/:id/options/batch",
+    pathParams: ["id"],
+    previewPath: "/admin/products/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["update"],
+    inputSchema: obj(
+      {
+        id: STR("Product id, e.g. 'prod_...'."),
+        update: {
+          type: "array",
+          description:
+            "One entry per option being edited. Each is { product_option_id: 'opt_...', add?: [{ value: '33s' }], remove?: ['optval_...'] }. `add` entries are OBJECTS carrying the new value string; a bare string there means an existing value ID and fails. `remove` takes value IDs.",
+          items: {
+            type: "object",
+            properties: {
+              product_option_id: STR("Option id, e.g. 'opt_...'."),
+              add: {
+                type: "array",
+                description:
+                  "New values to add, each as an OBJECT: [{ value: '33s' }]. A bare string is interpreted as an existing option-value id, not as a new value.",
+                items: {
+                  type: "object",
+                  properties: { value: STR("The new option value, e.g. '33s'.") },
+                  required: ["value"],
+                  additionalProperties: false,
+                },
+              },
+              remove: {
+                type: "array",
+                description:
+                  "Option-value IDs to delete, e.g. ['optval_...']. NOT the value strings.",
+                items: { type: "string" },
+              },
+            },
+            required: ["product_option_id"],
+            additionalProperties: false,
+          },
+        },
+      },
+      ["id", "update"]
+    ),
+    sideEffects:
+      "Adds or deletes option values in place. Adding one is inert until a variant claims it; deleting one strips that option from any variant matched to it.",
+    nextSteps: ["create_product_variant", "get_product"],
+  },
+  {
+    name: "bulk_update_products",
+    description: [
+      "Update MANY products, their variants and their stock levels in one call. Sensitive: requires confirm:true. ALWAYS rehearse with `preview: true` first — the plan names every product and variant it would touch, with the before/after quantity at each location, and there is no undo once it fires. Use `preview`, NOT `dry_run`: `dry_run` is this surface's own flag and is intercepted before the route runs, so it returns a planned request rather than the real change set. Unlike the maintenance jobs, this tool APPLIES when neither flag is given.",
+      "Returns a PER-ROW outcome: one bad id never discards the rest of the batch, so read `variants`, `products` and `warnings` rather than just the status.",
+      "",
+      "TARGETING — combine freely:",
+      "- `products: [{ product_id, update, variants }]` for named products. Omit a product's `variants` key to mean EVERY variant of it.",
+      "- `selector` for filter-based batches: `{ all: true }`, `collection_id`, `category_id`, `status`, `product_ids`. This is how 'zero the whole catalogue' is one call. `all: true` must be passed explicitly — the selector will not default to everything.",
+      "- `product_update` / `variant_update` apply to everything selected; a per-row `update` wins over them.",
+      "",
+      "INVENTORY — `set_inventory: { quantity, ensure_managed, location_ids }`:",
+      "- `quantity` is ABSOLUTE, not a delta. 0 zeroes the stock.",
+      "- 🔑 `ensure_managed: true` is what makes this work on untracked variants. Medusa CANNOT turn inventory tracking on for a variant that already exists — core only ever turns it off — so a variant with `manage_inventory: false` has no inventory item and nothing to stock. With this flag the tool creates the inventory item, links it to the variant, seeds the levels, then writes the quantity. Without it, untracked variants come back `skipped` and their stock is untouched.",
+      "- `location_ids` defaults to every location on the scoping sales channel.",
+      "",
+      "⚠️ `manage_inventory: false` is REFUSED here. Core dismisses the variant's inventory item and its levels with it, with no undo, so it is not something to do to a whole selector. Use `update_product_variant` one variant at a time.",
+      "",
+      "CATEGORIES & COLLECTIONS — the `selector` accepts `category_id` and `collection_id` as FILTERS to scope which products to update. You CANNOT set categories or collections via `product_update` or per-row `update` — those fields are not in the allow-list. To assign products to categories/collections in bulk, use `set_category_products` / `set_collection_products` after updating.",
+      "Capped at 200 products per call.",
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/products/bulk-update",
+    write: true,
+    sensitive: true,
+    // `preview`, NOT `dry_run`. The dispatcher consumes `dry_run` itself and
+    // answers with a planned HTTP request, so the route's real per-row plan —
+    // the before/after this tool's description promises — never reaches the
+    // caller through that spelling (#1877). Kept in the list so an explicit
+    // `dry_run: true` still fails safe rather than writing.
+    bodyParams: [
+      "products",
+      "selector",
+      "product_update",
+      "variant_update",
+      "set_inventory",
+      "preview",
+      "dry_run",
+    ],
+    inputSchema: obj({
+      preview: {
+        type: "boolean",
+        description:
+          "Rehearse without writing — returns the route's REAL per-row plan (every product and variant touched, with before/after quantities). Use this, not `dry_run`, which the dispatcher intercepts before the route runs. Defaults to false: omitting it APPLIES.",
+      },
+      products: {
+        type: "array",
+        description:
+          "Named products. Omit a row's `variants` to target every variant of it.",
+        items: {
+          type: "object",
+          properties: {
+            product_id: STR("Product id, e.g. 'prod_...'."),
+            update: {
+              type: "object",
+              description:
+                "Product fields to change (title, subtitle, description, handle, status, material, hs_code, weight, metadata, …).",
+              additionalProperties: true,
+            },
+            variants: {
+              type: "array",
+              description:
+                "Specific variants only. Omit the key entirely to mean all of them.",
+              items: {
+                type: "object",
+                properties: {
+                  variant_id: STR("Variant id, e.g. 'variant_...'."),
+                  update: {
+                    type: "object",
+                    description:
+                      "Variant fields to change (title, sku, hs_code, origin_country, material, allow_backorder, weight, metadata, …).",
+                    additionalProperties: true,
+                  },
+                },
+                required: ["variant_id"],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ["product_id"],
+          additionalProperties: false,
+        },
+      },
+      selector: {
+        type: "object",
+        description:
+          "Filter-based targeting. Must narrow something; pass all: true to mean the whole catalogue.",
+        properties: {
+          all: BOOL("Every product in scope. Say this explicitly."),
+          product_ids: { type: "array", items: { type: "string" }, description: "Specific product ids." },
+          collection_id: { type: "array", items: { type: "string" }, description: "Restrict to these collections." },
+          category_id: { type: "array", items: { type: "string" }, description: "Restrict to these categories." },
+          status: { type: "array", items: { type: "string" }, description: "Restrict to these product statuses." },
+        },
+        additionalProperties: false,
+      },
+      product_update: {
+        type: "object",
+        description: "Product fields applied to every selected product.",
+        additionalProperties: true,
+      },
+      variant_update: {
+        type: "object",
+        description:
+          "Variant fields applied to every selected variant. manage_inventory: false is refused.",
+        additionalProperties: true,
+      },
+      set_inventory: {
+        type: "object",
+        description: "Stock to write on every selected variant.",
+        properties: {
+          quantity: INT("Absolute on-hand quantity. NOT a delta; 0 zeroes it."),
+          ensure_managed: BOOL(
+            "Turn inventory tracking on where it is off, creating the inventory item, link and levels core never makes for an existing variant. Untracked variants are skipped without this."
+          ),
+          location_ids: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Stock locations to write. Defaults to every location on the sales channel.",
+          },
+        },
+        required: ["quantity"],
+        additionalProperties: false,
+      },
+      dry_run: BOOL("Return the plan without writing. Do this first."),
+    }),
+    sideEffects:
+      "Overwrites live catalogue fields and on-hand stock across many products at once. Enabling tracking creates inventory items and levels. Setting a quantity below a variant's reserved stock oversells open orders — the response warns, it does not block.",
+    nextSteps: ["list_products", "get_product"],
+  },
+  // ===== Product categories (nested tree) =================================
+  // Medusa's product_category model is self-referential (parent_category /
+  // category_children) with a materialised path, so categories nest to any
+  // depth. The admin MCP had no category CRUD tools — only the partner MCP
+  // did. These mirror the partner surface but hit the Medusa built-in admin
+  // routes (no store scoping).
+  {
+    name: "list_product_categories",
+    description:
+      "List product categories (paginated). Supports free-text search via q. Filter by parent_category_id to list children of a node, or pass include_descendants_tree / include_ancestors_tree to retrieve the full tree. Use is_active to see only visible categories.",
+    method: "GET",
+    path: "/admin/product-categories",
+    queryParams: [
+      "q",
+      "limit",
+      "offset",
+      "parent_category_id",
+      "is_active",
+      "is_internal",
+      "include_ancestors_tree",
+      "include_descendants_tree",
+    ],
+    inputSchema: obj({
+      ...PAGINATION,
+      parent_category_id: STR("Filter to children of this parent category (for navigating the tree)."),
+      is_active: BOOL("Filter to active/inactive categories."),
+      is_internal: BOOL("Filter to internal-only categories."),
+      include_ancestors_tree: BOOL("Include all ancestor categories in the response (walk up the tree)."),
+      include_descendants_tree: BOOL("Include all descendant categories in the response (walk down the tree)."),
+    }),
+  },
+  {
+    name: "get_product_category",
+    description:
+      "Get a single product category by id. Pass include_ancestors_tree to see the full path from root, or include_descendants_tree to see all sub-categories.",
+    method: "GET",
+    path: "/admin/product-categories/:id",
+    pathParams: ["id"],
+    queryParams: ["include_ancestors_tree", "include_descendants_tree"],
+    inputSchema: obj({
+      id: STR("Category id."),
+      include_ancestors_tree: BOOL("Include all ancestor categories (walk up to root)."),
+      include_descendants_tree: BOOL("Include all descendant categories (walk down the tree)."),
+    }),
+  },
+  {
+    name: "create_product_category",
+    description:
+      "Create a product category. Categories can be NESTED: pass parent_category_id to make this a child of an existing category. Set is_active to true to make it visible on the storefront. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/product-categories",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "name",
+      "description",
+      "handle",
+      "is_active",
+      "is_internal",
+      "parent_category_id",
+      "external_id",
+      "metadata",
+      "rank",
+    ],
+    inputSchema: obj(
+      {
+        name: STR("Category name (required)."),
+        description: STR("Optional description."),
+        handle: STR("Optional URL handle (auto-derived from name if omitted)."),
+        is_active: BOOL("Whether the category is active/visible on the storefront."),
+        is_internal: BOOL("Internal-only category (not shown to customers)."),
+        parent_category_id: STR(
+          "Parent category id for NESTING. Omit for a root-level category. Pass an existing category's id to make this a sub-category."
+        ),
+        external_id: STR("Optional external id for syncing with an external system."),
+        metadata: { type: "object", additionalProperties: true, description: "Optional key/value metadata." },
+        rank: INT("Sort rank within the parent (0 = first)."),
+      },
+      ["name"]
+    ),
+    nextSteps: ["list_product_categories", "update_product_category", "set_category_products"],
+  },
+  {
+    name: "update_product_category",
+    description:
+      "Update a product category. Pass only the fields to change. To move a category in the tree, pass a new parent_category_id (or null to make it root). Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/product-categories/:id",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    previewPath: "/admin/product-categories/:id",
+    bodyParams: [
+      "name",
+      "description",
+      "handle",
+      "is_active",
+      "is_internal",
+      "parent_category_id",
+      "external_id",
+      "metadata",
+      "rank",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Category id."),
+        name: STR("New name."),
+        description: STR("New description."),
+        handle: STR("New URL handle."),
+        is_active: BOOL("Active/visible on storefront."),
+        is_internal: BOOL("Internal-only."),
+        parent_category_id: STR(
+          "New parent category id to MOVE this category in the tree. Pass null to make it root-level."
+        ),
+        external_id: STR("External id."),
+        metadata: { type: "object", additionalProperties: true, description: "Metadata to merge." },
+        rank: INT("New sort rank within the parent."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "delete_product_category",
+    description:
+      "Delete a product category. Cascades to child categories. Products in the category are unlinked, not deleted. Sensitive: requires confirm:true.",
+    method: "DELETE",
+    path: "/admin/product-categories/:id",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    previewPath: "/admin/product-categories/:id",
+    inputSchema: obj({ id: STR("Category id to delete.") }, ["id"]),
+  },
+  {
+    name: "set_category_products",
+    description:
+      "Add and/or remove products from a category in one call. `add` and `remove` are arrays of product ids. A product can belong to multiple categories. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/product-categories/:id/products",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["add", "remove"],
+    inputSchema: obj(
+      {
+        id: STR("Category id."),
+        add: { type: "array", description: "Product ids to add to this category.", items: { type: "string" } },
+        remove: {
+          type: "array",
+          description: "Product ids to remove from this category.",
+          items: { type: "string" },
+        },
+      },
+      ["id"]
+    ),
+  },
+  // ===== Product collections ==============================================
+  // Collections are FLAT merchandising groups (no nesting, unlike categories).
+  // A product belongs to at most ONE collection (collection_id on the product).
+  // Use categories for hierarchical organisation; use collections for
+  // curated groups like "Summer Sale" or "New Arrivals".
+  {
+    name: "list_product_collections",
+    description:
+      "List product collections (paginated). Supports free-text search via q.",
+    method: "GET",
+    path: "/admin/collections",
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "get_product_collection",
+    description: "Get a single product collection by id.",
+    method: "GET",
+    path: "/admin/collections/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Collection id.") }, ["id"]),
+  },
+  {
+    name: "create_product_collection",
+    description:
+      "Create a product collection (a flat merchandising group, NOT nested). A product belongs to at most one collection. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/collections",
+    write: true,
+    sensitive: true,
+    bodyParams: ["title", "handle", "external_id", "metadata"],
+    inputSchema: obj(
+      {
+        title: STR("Collection title (required)."),
+        handle: STR("Optional URL handle (auto-derived from title if omitted)."),
+        external_id: STR("Optional external id for syncing with an external system."),
+        metadata: { type: "object", additionalProperties: true, description: "Optional key/value metadata." },
+      },
+      ["title"]
+    ),
+    nextSteps: ["list_product_collections", "update_product_collection", "set_collection_products"],
+  },
+  {
+    name: "update_product_collection",
+    description: "Update a product collection. Pass only the fields to change. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/collections/:id",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    previewPath: "/admin/collections/:id",
+    bodyParams: ["title", "handle", "external_id", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Collection id."),
+        title: STR("New title."),
+        handle: STR("New URL handle."),
+        external_id: STR("External id."),
+        metadata: { type: "object", additionalProperties: true, description: "Metadata to merge." },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "delete_product_collection",
+    description:
+      "Delete a product collection. Products are unlinked, not deleted. Sensitive: requires confirm:true.",
+    method: "DELETE",
+    path: "/admin/collections/:id",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    previewPath: "/admin/collections/:id",
+    inputSchema: obj({ id: STR("Collection id to delete.") }, ["id"]),
+  },
+  {
+    name: "set_collection_products",
+    description:
+      "Add and/or remove products from a collection. `add`/`remove` are arrays of product ids. A product can belong to only ONE collection, so adding it to a new collection removes it from its previous one. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/collections/:id/products",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["add", "remove"],
+    inputSchema: obj(
+      {
+        id: STR("Collection id."),
+        add: { type: "array", description: "Product ids to add to this collection.", items: { type: "string" } },
+        remove: {
+          type: "array",
+          description: "Product ids to remove from this collection.",
+          items: { type: "string" },
+        },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "set_sales_channel_products",
+    description:
+      "Add and/or remove products from a sales channel — i.e. which storefronts can sell them. `add`/`remove` are arrays of product ids. Unlike a collection, a product can be in MANY sales channels, so adding one leaves its other channels alone. Use it to sell one product on a second partner store. 🔑 A product with managed inventory is only purchasable on a channel whose stock location holds it: check the channel's locations (list_stock_locations) before expecting checkout to work. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/sales-channels/:id/products",
+    pathParams: ["id"],
+    previewPath: "/admin/sales-channels/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["add", "remove"],
+    inputSchema: obj(
+      {
+        id: STR("Sales channel id, e.g. 'sc_...' (a partner store's default channel from get_storefront_key / list_stores)."),
+        add: { type: "array", description: "Product ids to add to this channel.", items: { type: "string" } },
+        remove: {
+          type: "array",
+          description: "Product ids to remove from this channel. The product stays in its other channels.",
+          items: { type: "string" },
+        },
+      },
+      ["id"]
+    ),
+    sideEffects: "Links or unlinks the products from the sales channel; a published product appears on (or disappears from) that channel's storefront.",
+    nextSteps: ["list_products", "get_product"],
+  },
+  // ===== Customs / HS codes ===============================================
+  // Shiprocket rejects EVERY international shipment whose lines lack an HSN,
+  // and the manual fix is one variant at a time. These two make it a bulk job.
+  {
+    name: "list_missing_hs_codes",
+    description:
+      "List catalogue items that have NO HS/HSN customs code at any level and would therefore fail an international shipping label. Each row carries the product title, description, material, type and categories so you can propose an accurate code, plus `suggested_target` telling you exactly which level and id to write it to. Read-only.",
+    method: "GET",
+    path: "/admin/customs/hs-codes/missing",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({
+      limit: { type: "integer", description: "Max products to scan (default 50, max 200)." },
+      offset: { type: "integer", description: "Pagination offset over products." },
+    }),
+    nextSteps: ["bulk_set_hs_codes"],
+  },
+  {
+    name: "bulk_set_hs_codes",
+    description: [
+      "Assign HS/HSN customs codes to many catalogue items in one call. Sensitive: requires confirm:true. Use dry_run first to review the batch. Returns a PER-ROW outcome — a bad id never discards the rest of the batch, so read `results`, not just the status.",
+      "",
+      "WHERE to write a code matters: a label reads the levels in a fixed order (variant → the variant's inventory item → the product), so a code written at the wrong level is invisible to it.",
+      "- Variant manages its own inventory → write at `inventory_item`.",
+      "- Product HAS variants but none of them manage inventory → write at `product`. The code then covers every sibling variant at once; writing per-variant there means N rows to maintain and N chances for one to drift.",
+      "- Write at `variant` only when one specific variant genuinely differs from its siblings.",
+      "`list_missing_hs_codes` already computes this for you as `suggested_target` — prefer it over deciding yourself.",
+      "",
+      "NEVER guess a code from an id or a SKU. Classify from the product title, description, material and category. If those don't identify the goods well enough, say so and ask — this is a customs declaration, and a wrong one is a misdeclaration.",
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/customs/hs-codes",
+    write: true,
+    sensitive: true,
+    bodyParams: ["assignments"],
+    inputSchema: obj(
+      {
+        assignments: {
+          type: "array",
+          description: "The codes to write (max 200 per call).",
+          items: {
+            type: "object",
+            properties: {
+              level: {
+                type: "string",
+                enum: ["variant", "inventory_item", "product"],
+                description: "Which catalogue level to write the code to.",
+              },
+              id: STR("Id of the variant / inventory item / product."),
+              hs_code: STR(
+                "The HS/HSN code. 6 digits internationally; India's HSN runs to 8 and some tariff lines to 10."
+              ),
+              origin_country: STR("Optional ISO-2 country of manufacture."),
+              material: STR("Optional material description for customs."),
+            },
+            required: ["level", "id", "hs_code"],
+            additionalProperties: false,
+          },
+        },
+      },
+      ["assignments"]
+    ),
+    sideEffects:
+      "Writes customs codes onto live catalogue records. Labels resolve HSN from the DB at generation time, so this immediately affects EXISTING orders too — no backfill needed.",
+  },
+  {
+    name: "create_product_variant",
+    description:
+      "Add a NEW variant to an existing product (title, options, prices, sku, inventory flags). Sensitive: requires confirm:true. " +
+      "Use this when a product needs another colourway/count/size — `create_product` makes a whole new product, and `update_product_variant` can only change one that already exists. " +
+      "🔑 `options` must name values the product's options ALREADY have: core matches the variant to existing option values and will not invent one, so add the value to the product option first if it is new. " +
+      "🔴 Pass `manage_inventory: false` EXPLICITLY for a variant a partner supplies. Core defaults it to TRUE, so omitting the flag does NOT leave it off — and a tracked variant with no stock is refused at checkout, where its untracked siblings sell freely. An inventory order line naming the variant is what creates its inventory item at our end.",
+    method: "POST",
+    path: "/admin/products/:product_id/variants",
+    pathParams: ["product_id"],
+    previewPath: "/admin/products/:product_id",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "title",
+      "sku",
+      "options",
+      "prices",
+      "manage_inventory",
+      "allow_backorder",
+      "variant_rank",
+      "metadata",
+      ...PHYSICAL_AND_CUSTOMS_BODY_PARAMS,
+    ],
+    inputSchema: obj(
+      {
+        product_id: STR("Product to add the variant to, e.g. 'prod_...'."),
+        title: STR("Variant title, e.g. '33s Kala Cotton'."),
+        sku: STR("Optional SKU."),
+        options: {
+          type: "object",
+          description:
+            "Option values for this variant, keyed by OPTION TITLE — e.g. { \'HandSpun HandWoven\': \'33s\' }. Each value must already exist on that product option.",
+        },
+        prices: {
+          type: "array",
+          description:
+            "Prices per currency, e.g. [{ amount: 165, currency_code: \'inr\' }]. REQUIRED by core even when the variant has no price: send [] rather than omitting the key, or the call is refused with \"Field 'prices' is required\". A variant with no price cannot be sold, but can still be ordered on an inventory order (the line carries its own price).",
+          items: {
+            type: "object",
+            properties: {
+              amount: { type: "number", description: "Price amount." },
+              currency_code: { type: "string", description: "ISO currency, e.g. 'inr'." },
+            },
+            required: ["amount", "currency_code"],
+          },
+        },
+        ...physicalAndCustomsSchemaProps(),
+        manage_inventory: BOOL(
+          "Track stock for this variant. Leave false/unset for partner-supplied goods."
+        ),
+        allow_backorder: BOOL("Allow ordering beyond stock."),
+        variant_rank: { type: "number", description: "Display order among the product's variants." },
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["product_id", "title"]
+    ),
+  },
+  {
+    name: "rename_product_option",
+    description: [
+      "Rename a product option — the AXIS a variant varies along ('Fabric', 'Colour', 'Size'). Sensitive: requires confirm:true.",
+      "🔑 A DIFFERENT resource from the option's values. `update_product_option` edits which values an option allows, via `/admin/products/:id/options/batch`; this edits the option itself, via the top-level `/admin/product-options/:id`. The nested `/admin/products/:id/options/:option_id` does NOT exist and 404s.",
+      "🔴 CHECK `is_exclusive` FIRST, with get_product_option. An option with `is_exclusive: false` is SHARED across products, and renaming it renames it on every one of them — silently, with no indication in the response that more than one product changed. On prod today 114 options are exclusive and 1 is shared, so the odds say safe and the exception says catastrophic.",
+      "Why this matters: a design auto-minted into a product gets one option titled after the garment ('Original', 'Type', 'Default option') whose only value is the product's own name. That is not an axis, so no second variant can be hung off it until the option is renamed to something real.",
+      "⚠️ Renaming does NOT update variants' option VALUES. After renaming, a variant update that sets `options` must key on the NEW title.",
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/product-options/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/product-options/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["title"],
+    inputSchema: obj(
+      {
+        id: STR("Product option id, e.g. 'opt_...'. From `product.options[].id` via get_product."),
+        title: STR("The new option title, e.g. 'Fabric', 'Colour', 'Size'."),
+      },
+      ["id", "title"]
+    ),
+  },
+  {
+    name: "get_product_option",
+    description:
+      "Get a single product option — its title, its values, and crucially `is_exclusive`. Read. 🔴 Call this before `rename_product_option`: `is_exclusive: false` means the option is SHARED and renaming it changes every product that uses it.",
+    method: "GET",
+    path: "/admin/product-options/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Product option id, e.g. 'opt_...'.") }, ["id"]),
+  },
+  {
+    name: "update_product_variant",
+    description: [
+      "Update a single product variant (sku, title, customs fields, inventory flags, prices). Sensitive: requires confirm:true. For filling HS codes across many items use bulk_set_hs_codes instead.",
+      "🔴🔴 `prices` REPLACES THE WHOLE SET. A currency you leave out is DELETED, not left alone — this is the save that hard-deleted 11 price rows in one request. To change ONE currency, read the variant with get_product first and re-send EVERY price you intend to keep. Omit `prices` entirely and the set is untouched; that is the safe call when you only mean to rename or re-measure something.",
+      "⚠️ A variant with no price cannot be sold: it renders a dead buy button rather than an error. `prices: []` on a live variant is how a product goes quietly unbuyable.",
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/products/:product_id/variants/:id",
+    pathParams: ["product_id", "id"],
+    previewPath: "/admin/products/:product_id/variants/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "title",
+      "sku",
+      "manage_inventory",
+      "allow_backorder",
+      "metadata",
+      // Core's UpdateProductVariant validator accepts all of these; they were
+      // simply never advertised, and the dispatcher drops unlisted keys in
+      // silence. `weight` in particular blocked every freight quote.
+      //
+      // `prices` is the same omission with a sharper edge: there was NO tool
+      // that could price an EXISTING variant (create_product_variant takes
+      // prices but only mints new ones), so a variant shipped unpriced stayed
+      // unbuyable and no amount of MCP could fix it. Found on a live one —
+      // HandWoven Linen "Linen 40 lea", a weave a customer could select and
+      // then not buy.
+      "prices",
+      ...PHYSICAL_AND_CUSTOMS_BODY_PARAMS,
+    ],
+    inputSchema: obj(
+      {
+        product_id: STR("Product id, e.g. 'prod_...'."),
+        id: STR("Variant id, e.g. 'variant_...'."),
+        title: STR("New variant title."),
+        sku: STR("New SKU."),
+        prices: {
+          type: "array",
+          description:
+            "🔴 THE REPLACEMENT SET, not a patch. Every currency you want the variant to keep must be in this array — anything omitted is deleted. Omit the field entirely to leave prices alone. e.g. [{ amount: 700, currency_code: 'inr' }].",
+          items: {
+            type: "object",
+            properties: {
+              amount: { type: "number", description: "Price amount, in the currency's own units." },
+              currency_code: { type: "string", description: "ISO currency, e.g. 'inr'." },
+            },
+            required: ["amount", "currency_code"],
+          },
+        },
+        ...physicalAndCustomsSchemaProps(),
+        manage_inventory: { type: "boolean", description: "Track stock for this variant." },
+        allow_backorder: { type: "boolean", description: "Allow ordering beyond stock." },
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["product_id", "id"]
+    ),
+  },
+  {
+    name: "update_customer",
+    description:
+      "Update a customer's profile (name, email, phone, company, metadata). Sensitive: requires confirm:true. Use dry_run to see the current customer first.",
+    method: "POST",
+    path: "/admin/customers/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/customers/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["first_name", "last_name", "email", "phone", "company_name", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Customer id, e.g. 'cus_...'."),
+        first_name: STR("First name."),
+        last_name: STR("Last name."),
+        email: STR("Email address."),
+        phone: STR("Phone number."),
+        company_name: STR("Company name."),
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id"]
+    ),
+  },
+
+  // ===== Partner ops (#843): inspect + act on a partner's sub-resources ===
+  // These wrap ALREADY-EXISTING /admin/partners/:id/* routes — no new backend
+  // surface, just registry rows exposing what admins can already do via the
+  // partner detail page as chat-invokable tools (read + write).
+  {
+    name: "list_partner_tasks",
+    description: "List all tasks assigned to a partner.",
+    method: "GET",
+    path: "/admin/partners/:id/tasks",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+  },
+  {
+    name: "get_partner_task",
+    description: "Get a single task assigned to a partner by task id.",
+    method: "GET",
+    path: "/admin/partners/:id/tasks/:taskId",
+    pathParams: ["id", "taskId"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        taskId: STR("Task id, e.g. 'task_...'."),
+      },
+      ["id", "taskId"]
+    ),
+  },
+  {
+    name: "list_partner_feedbacks",
+    description: "List feedback entries linked to a partner.",
+    method: "GET",
+    path: "/admin/partners/:id/feedbacks",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+  },
+  {
+    name: "list_partner_people",
+    description: "List persons (contacts) linked to a partner.",
+    method: "GET",
+    path: "/admin/partners/:id/people",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+  },
+  {
+    name: "get_partner_fees",
+    description:
+      "Get a partner's transaction-fee (commission) ledger and roll-up summary (totals, by-status, by-currency).",
+    method: "GET",
+    path: "/admin/partners/:id/fees",
+    pathParams: ["id"],
+    queryParams: ["limit", "offset", "status"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        limit: { type: "integer", description: "Max results (default 50)." },
+        offset: { type: "integer", description: "Pagination offset." },
+        status: STR("Optional fee status filter."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "get_partner_subscription",
+    description: "Get a partner's subscriptions (with plan and payments) plus the list of active plans.",
+    method: "GET",
+    path: "/admin/partners/:id/subscription",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+  },
+
+  // ---- Partner ops writes -------------------------------------------------
+  {
+    name: "create_partner_task",
+    description:
+      "Create a new task and assign it to a partner. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/tasks",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "title",
+      "description",
+      "status",
+      "priority",
+      "start_date",
+      "end_date",
+      "estimated_cost",
+      "cost_currency",
+      "cost_type",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        title: STR("Task title (required)."),
+        description: STR("Task description."),
+        status: STR("Task status."),
+        priority: STR("Task priority: 'low' | 'medium' | 'high'."),
+        start_date: STR("Start date (ISO string)."),
+        end_date: STR("Due date (ISO string)."),
+        estimated_cost: { type: "number", description: "Estimated cost, set at creation." },
+        cost_currency: STR("Currency code for estimated/actual cost."),
+        cost_type: STR("'per_unit' | 'total'."),
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["id", "title"]
+    ),
+    sideEffects: "Creates and assigns a new task to the partner.",
+    nextSteps: ["get_partner_task", "update_partner_task"],
+  },
+  {
+    name: "update_partner_task",
+    description:
+      "Update a task assigned to a partner (title/description/status/priority/dates/cost fields). Sensitive: requires confirm:true. Use dry_run to see the current task first.",
+    method: "PATCH",
+    path: "/admin/partners/:id/tasks/:taskId",
+    pathParams: ["id", "taskId"],
+    previewPath: "/admin/partners/:id/tasks/:taskId",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "title",
+      "description",
+      "status",
+      "priority",
+      "start_date",
+      "end_date",
+      "estimated_cost",
+      "actual_cost",
+      "cost_currency",
+      "cost_type",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        taskId: STR("Task id, e.g. 'task_...'."),
+        title: STR("New title."),
+        description: STR("New description."),
+        status: STR("New status."),
+        priority: STR("New priority: 'low' | 'medium' | 'high'."),
+        start_date: STR("New start date (ISO string)."),
+        end_date: STR("New due date (ISO string)."),
+        estimated_cost: { type: "number", description: "New estimated cost." },
+        actual_cost: { type: "number", description: "New actual cost (recorded at finish)." },
+        cost_currency: STR("Currency code for cost fields."),
+        cost_type: STR("'per_unit' | 'total'."),
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id", "taskId"]
+    ),
+  },
+  {
+    name: "create_partner_feedback",
+    description:
+      "Create a feedback entry linked to a partner. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/feedbacks",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "rating",
+      "comment",
+      "status",
+      "submitted_by",
+      "submitted_at",
+      "reviewed_by",
+      "reviewed_at",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        rating: STR("'one' | 'two' | 'three' | 'four' | 'five' (required)."),
+        comment: STR("Feedback comment."),
+        status: STR("'pending' | 'reviewed' | 'resolved' (required)."),
+        submitted_by: STR("Who submitted the feedback (required)."),
+        submitted_at: STR("Submission timestamp (ISO string, required)."),
+        reviewed_by: STR("Who reviewed the feedback."),
+        reviewed_at: STR("Review timestamp (ISO string)."),
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["id", "rating", "status", "submitted_by", "submitted_at"]
+    ),
+    sideEffects: "Creates a feedback record linked to the partner.",
+  },
+  {
+    name: "link_partner_people",
+    description:
+      "Link existing persons (contacts) to a partner by id. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/people",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["person_ids"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        person_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Person ids to link to the partner (required, non-empty).",
+        },
+      },
+      ["id", "person_ids"]
+    ),
+    sideEffects: "Links the given persons to the partner as contacts.",
+  },
+  {
+    name: "create_partner_subscription",
+    description:
+      "Assign a subscription plan to a partner (admin can comp/trial via skip_payment). Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/subscription",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["plan_id", "payment_provider", "skip_payment", "notes"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        plan_id: STR("Plan id to assign (required)."),
+        payment_provider: STR("Payment provider, e.g. 'manual' (defaults to 'manual')."),
+        skip_payment: {
+          type: "boolean",
+          description: "If true and the plan has a cost, record a manual comp/trial payment instead of requiring real payment.",
+        },
+        notes: STR("Optional admin notes, recorded on the payment/metadata."),
+      },
+      ["id", "plan_id"]
+    ),
+    sideEffects: "Creates an active subscription for the partner, optionally recording a manual payment.",
+  },
+
+  // ===== Partner ops (#843 tier 3): CRUD parity + admins/comms/artisan ===
+  // Round 2 of partner coverage: the core partner record (create/update/
+  // delete), task-assign, person-types, unlinking contacts, partner-admin
+  // user management, WhatsApp connect/disconnect, the email-verification
+  // bypass, and the artisan product approve/reject/proposal trio. Same
+  // wrap-an-existing-route pattern as the #1164 tier.
+  {
+    name: "create_partner",
+    description:
+      "Create a new partner (seller/manufacturer/individual/designer). WITH `admin`: registers real auth credentials for that admin and EMAILS them a temp password. WITHOUT `admin`: creates the partner only, with no login and no email. Use that for a supplier we only buy from; add_partner_admin can invite someone to the portal later. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners",
+    write: true,
+    sensitive: true,
+    bodyParams: ["partner", "admin"],
+    inputSchema: obj(
+      {
+        partner: {
+          type: "object",
+          description: "Partner data: { name (required), handle, logo, status, is_verified, workspace_type }.",
+          properties: {
+            name: STR("Partner name (required)."),
+            handle: STR(
+              "Unique handle. Omitted/blank derives one as partner_<name-slug> (suffixed -2, -3, … if taken); an explicit handle that already exists is a 422."
+            ),
+            logo: STR("Logo URL."),
+            status: STR("'active' | 'inactive' | 'pending' (defaults to 'pending')."),
+            is_verified: { type: "boolean", description: "Verification flag (defaults to false)." },
+            workspace_type: STR("'seller' | 'manufacturer' | 'individual' | 'designer' (defaults to 'manufacturer')."),
+          },
+          required: ["name"],
+        },
+        admin: {
+          type: "object",
+          description: "Optional primary admin: { email, first_name, last_name (required), phone, role }. Sending it emails that address a temp password. Omit it for a partner nobody signs in to.",
+          properties: {
+            email: STR("Admin email (required)."),
+            first_name: STR("Admin first name (required)."),
+            last_name: STR("Admin last name (required)."),
+            phone: STR("Admin phone number."),
+            role: STR("'owner' | 'admin' | 'manager' (defaults to 'owner')."),
+          },
+          required: ["email", "first_name", "last_name"],
+        },
+      },
+      ["partner"]
+    ),
+    sideEffects: "Creates the partner record. Only when `admin` is sent: registers an auth identity for the admin and emails a temp password.",
+    nextSteps: ["get_partner", "add_partner_admin"],
+  },
+  {
+    name: "update_partner",
+    description:
+      "Update a partner's profile (name, handle, logo, status, verification, workspace type, metadata). Sensitive: requires confirm:true. Use dry_run to see the current partner first.",
+    method: "PUT",
+    path: "/admin/partners/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/partners/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "name",
+      "handle",
+      "logo",
+      "status",
+      "is_verified",
+      "workspace_type",
+      "tax_id",
+      "tax_id_type",
+      "country_code",
+      "currency_code",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        name: STR("New name. Use the LEGAL entity name — this is what invoices and shipping labels carry."),
+        handle: STR("New handle. Safe to change while the partner has no storefront_domain/custom_domain; a live storefront URL depends on it."),
+        logo: STR("New logo URL."),
+        status: STR("New status: 'active' | 'inactive' | 'pending'."),
+        is_verified: { type: "boolean", description: "New verification flag." },
+        workspace_type: STR("New workspace type: 'seller' | 'manufacturer' | 'individual' | 'designer'. 🔑 Do NOT 'correct' this to describe what a partner does — the enum conflates 'sells direct' with 'handles physical goods', which are independent (#2061/#2067)."),
+        tax_id: STR(
+          "The partner's own tax registration number — a GSTIN in India. 🔴 Load-bearing for compliance, NOT decoration: while it is null, invoice and label generation falls back to the PLATFORM's tax ID (#348), so every document raised for this partner silently carries OUR registration instead of theirs. Send tax_id_type with it."
+        ),
+        tax_id_type: STR(
+          "What kind of number tax_id is: 'GSTIN' | 'VAT' | 'PAN'. Send it alongside tax_id — a bare number cannot be validated or printed correctly without knowing what it is."
+        ),
+        country_code: STR(
+          "The partner's home country, ISO-3166 alpha-2 upper case, e.g. 'IN', 'DE'."
+        ),
+        currency_code: STR(
+          "The partner's currency, ISO-4217 lower case, e.g. 'inr', 'eur'."
+        ),
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "disable_partner",
+    description:
+      "Disable a partner WITHOUT deleting them: detach their storefront domain(s) (provider domain + our DNS) and set status to 'inactive', so the storefront goes dark. Reversible — products, orders, admins and the hosting project all survive, and the partner can be re-enabled by setting status back to 'active' via update_partner. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/disable",
+    pathParams: ["id"],
+    previewPath: "/admin/partners/:id",
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Partner id to disable, e.g. 'partner_...'.") }, ["id"]),
+    sideEffects:
+      "Detaches the partner's storefront subdomain and custom domain from the hosting provider, removes our DNS record, clears the storefront domain columns, and sets status='inactive'. Does NOT delete products, orders, admins or the hosting project.",
+    nextSteps: ["get_partner", "update_partner"],
+  },
+  {
+    name: "delete_partner",
+    description:
+      "Permanently delete a partner. PLATFORM-DESTRUCTIVE: requires confirm:true AND a human reason, and is only available when ADMIN_MCP_ENABLE_DANGEROUS is enabled. Always dry_run first.",
+    method: "DELETE",
+    path: "/admin/partners/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/partners/:id",
+    write: true,
+    dangerous: true,
+    inputSchema: obj({ id: STR("Partner id to delete, e.g. 'partner_...'.") }, ["id"]),
+    sideEffects: "Irreversibly removes the partner and its admin/auth records.",
+  },
+  {
+    name: "assign_partner_task",
+    description:
+      "Assign an existing task to a partner (notifies the partner and starts the assignment workflow). Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/tasks/:taskId/assign",
+    pathParams: ["id", "taskId"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        taskId: STR("Task id, e.g. 'task_...'."),
+      },
+      ["id", "taskId"]
+    ),
+    sideEffects: "Links the task to the partner and notifies them; starts the assignment/acceptance workflow.",
+  },
+  {
+    name: "list_partner_person_types",
+    description: "List the person types (roles/categories) linked to a partner.",
+    method: "GET",
+    path: "/admin/partners/:id/person-types",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+  },
+  {
+    name: "set_partner_person_types",
+    description:
+      "Set (replace) the person types linked to a partner. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/person-types",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["person_type_ids"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        person_type_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Person type ids to set on the partner (required; replaces the existing set).",
+        },
+      },
+      ["id", "person_type_ids"]
+    ),
+    sideEffects: "Replaces the partner's full set of linked person types.",
+  },
+  {
+    name: "unlink_partner_people",
+    description:
+      "Unlink persons (contacts) from a partner. Sensitive: requires confirm:true.",
+    method: "DELETE",
+    path: "/admin/partners/:id/people",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["person_ids"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        person_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Person ids to unlink from the partner (required, non-empty).",
+        },
+      },
+      ["id", "person_ids"]
+    ),
+    sideEffects: "Removes the contact link between the given persons and the partner.",
+  },
+  {
+    name: "list_partner_admins",
+    description: "List the admin users (owner/admin/manager) belonging to a partner.",
+    method: "GET",
+    path: "/admin/partners/:id/admins",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+  },
+  {
+    name: "add_partner_admin",
+    description:
+      "Add a new admin user to an existing partner. Registers auth credentials and emails them a temp password. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/admins",
+    pathParams: ["id"],
+    previewPath: "/admin/partners/:id/admins",
+    write: true,
+    sensitive: true,
+    bodyParams: ["email", "first_name", "last_name", "phone", "role"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        email: STR("Admin email (required)."),
+        first_name: STR("Admin first name."),
+        last_name: STR("Admin last name."),
+        phone: STR("Admin phone number."),
+        role: STR("'owner' | 'admin' | 'manager' (defaults to 'admin')."),
+      },
+      ["id", "email"]
+    ),
+    sideEffects: "Creates an auth identity for the new admin and emails a temp password.",
+    nextSteps: ["list_partner_admins", "update_partner_admin"],
+  },
+  {
+    name: "update_partner_admin",
+    description:
+      "Update a partner admin's profile (name, phone, role, preferred language, active flag). Sensitive: requires confirm:true. Use dry_run to see the partner's admins first.",
+    method: "PATCH",
+    path: "/admin/partners/:id/admins/:adminId",
+    pathParams: ["id", "adminId"],
+    previewPath: "/admin/partners/:id/admins",
+    write: true,
+    sensitive: true,
+    bodyParams: ["first_name", "last_name", "phone", "role", "preferred_language", "is_active"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        adminId: STR("Partner admin id to update."),
+        first_name: STR("New first name."),
+        last_name: STR("New last name."),
+        phone: STR("New phone number."),
+        role: STR("New role: 'owner' | 'admin' | 'manager'."),
+        preferred_language: STR("New preferred language code."),
+        is_active: { type: "boolean", description: "Whether the admin account is active." },
+      },
+      ["id", "adminId"]
+    ),
+  },
+  {
+    name: "connect_partner_whatsapp",
+    description:
+      "Set a partner's WhatsApp number and send the welcome template to start onboarding. Sensitive: requires confirm:true. Pass use_prose:true to send the PROSE carrier for this one call — a sentence written for this partner instead of the fixed welcome — which is how the carrier gets tested on a real number without flipping it on for every new partner. 🔴 REFUSED (409, naming the holder) when ANOTHER partner already has this number — one number belongs to one partner (#2350: Embroprint was once connected to Lucknavi boutique's number and its job alerts went there). Before connecting, compare with list_partner_admins phones and the partner's existing conversation; if they disagree, ask — a message to the wrong phone cannot be recalled.",
+    method: "POST",
+    path: "/admin/partners/:id/whatsapp-verify",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["phone", "use_prose"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        phone: STR("WhatsApp number with country code, e.g. '919876543210' (required)."),
+        use_prose: BOOL(
+          "Force the prose carrier (jyt_partner_message_v1) for this send. Cannot opt OUT of a rollout that is already on."
+        ),
+      },
+      ["id", "phone"]
+    ),
+    sideEffects: "Sends a WhatsApp welcome template to the partner and records the conversation.",
+  },
+  {
+    name: "disconnect_partner_whatsapp",
+    description: "Disconnect WhatsApp from a partner. Sensitive: requires confirm:true.",
+    method: "DELETE",
+    path: "/admin/partners/:id/whatsapp-verify",
+    pathParams: ["id"],
+    write: true,
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+    sideEffects: "Clears the partner's WhatsApp number and verification flag.",
+  },
+  {
+    name: "bypass_partner_email_verification",
+    description:
+      "Mark a partner admin's email as verified, bypassing the login gate. Idempotent. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/bypass-email-verification",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+    sideEffects: "Marks the partner admin's email verified so they can log in without clicking the email link.",
+  },
+
+  // ---- Capability library + onboarding questionnaire: the admin half of the
+  // partner surfaces (#1531 / #648). Until these existed, "what can this
+  // partner make" and "how far did onboarding get" were questions the admin
+  // assistant could not touch — the capability library and the questionnaire
+  // were reachable only behind partner auth, so an operator onboarding a
+  // partner over WhatsApp had no way to file what was said.
+  {
+    name: "list_partner_capabilities",
+    description:
+      "List a partner's capability samples — photographs of things they have actually made, with the technique, material, product_type and actions (spin/weave/dye/print/embroider/stitch/…) beside each, plus the KNOWLEDGE learned about each one and partner_knowledge for partner-wide facts. Read this BEFORE asking a partner for a new photograph: they have usually already shown you the thing they are being asked about. Filter by technique or material to answer 'who can do kani in pashmina' style questions for THIS partner. Each row carries captured_at — when the work was actually on the loom, NOT when it was recorded — and the source (partner wizard/WhatsApp, a website scan, or an admin typing it up).",
+    method: "GET",
+    path: "/admin/partners/:id/capabilities",
+    pathParams: ["id"],
+    queryParams: ["technique", "material", "product_type", "limit", "offset"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        technique: STR("Filter by technique, e.g. 'kani twill'."),
+        material: STR("Filter by material, e.g. 'pashmina'."),
+        product_type: STR("Filter by product type, e.g. 'stole'."),
+        limit: { type: "integer", description: "Max results (default 20, max 100)." },
+        offset: { type: "integer", description: "Pagination offset." },
+      },
+      ["id"]
+    ),
+    nextSteps: ["create_partner_capability", "delete_partner_capability"],
+  },
+  {
+    name: "create_partner_capability",
+    description:
+      "Record a capability sample for a partner: a photograph of something they have made, with the textile facts beside it (technique, material, notes). Use when a partner shows work in a conversation and you are filing it as evidence — the sample OUTLIVES the conversation and is what future 'can they make this' searches run against. The photograph must be UPLOADED FIRST — pass the resulting media ids as media_file_ids, this tool cannot receive a file. 🔑 ASK when the photo was taken and pass it as captured_at: a photo typed up three weeks later describes a capability that may already be gone, and when it is omitted the route defaults it to now and says so in captured_at_defaulted. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/capabilities",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["title", "technique", "material", "product_type", "actions", "media_file_ids", "notes", "captured_at"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        title: STR("What this is, in the partner's own words (required), e.g. 'kani twill, off-white'."),
+        technique: STR("The weaving technique, e.g. 'kani twill'."),
+        material: STR("The material, e.g. 'pashmina'."),
+        product_type: STR("The kind of product, e.g. 'stole', 'saree', 'yardage'."),
+        actions: {
+          type: "array",
+          items: { type: "string", enum: [...CAPABILITY_ACTIONS] },
+          description: "What the partner DOES for this item, from a fixed list. Unknown words are dropped.",
+        },
+        media_file_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Ids of already-uploaded photographs. 🔴 There is no way to pass a file through this tool. Without ids the sample is a title with no evidence, which is exactly what the library exists to stop.",
+        },
+        notes: STR("Free-form notes about this sample."),
+        captured_at: STR("ISO date the photograph was TAKEN (ask, do not default silently)."),
+      },
+      ["id", "title"]
+    ),
+    sideEffects:
+      "Adds a permanent sample to the partner's library, stamped source='admin'. Does NOT attach itself to anything; it is searchable by technique and material from then on.",
+    nextSteps: ["list_partner_capabilities"],
+  },
+  {
+    name: "delete_partner_capability",
+    description:
+      "Delete a capability sample from a partner's library — a wrong or obsolete entry. Sensitive (every DELETE is): requires confirm:true. Use list_partner_capabilities first to find the sample id. The sample must belong to the named partner; another partner's id is a 404, not a deletion. The uploaded photographs are NOT deleted.",
+    method: "DELETE",
+    path: "/admin/partners/:id/capabilities/:sampleId",
+    pathParams: ["id", "sampleId"],
+    previewPath: "/admin/partners/:id/capabilities",
+    write: true,
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        sampleId: STR("Capability sample id, e.g. 'pcap_...'. Get it from list_partner_capabilities."),
+      },
+      ["id", "sampleId"]
+    ),
+    sideEffects: "Removes the sample row. The uploaded photographs survive — other samples may reference them.",
+    nextSteps: ["list_partner_capabilities"],
+  },
+  // Website scan → capability library (#2249). Scan proposes and stores;
+  // commit files chosen proposals by KEY, copying photos into media.
+  {
+    name: "scan_partner_website",
+    description:
+      "Read a partner's own website (Shopify /products.json, else the page's product data and text) and PROPOSE capability samples — product type, technique, material, actions, photos, publish date — plus knowledge facts. Writes NOTHING to the library: it stores a scan and returns its proposals with keys (s1, s2… for samples, k1… for knowledge). Show the proposals to the admin, then call commit_partner_capability_scan with the keys they approve. `grouped_by: 'fallback'` means the model did not run and technique/material were NOT read — say so. Only public http(s) sites; private/internal addresses are refused. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/capabilities/scan",
+    pathParams: ["id"],
+    write: true,
+    // Sensitive although it files nothing: it makes outbound requests on our
+    // behalf and spends a model call, and every admin write is gated.
+    sensitive: true,
+    bodyParams: ["url"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id."),
+        url: STR("The partner's website, e.g. 'gof.asia' or 'https://www.jphandloom.com/'. A product page is fine; the whole store is read."),
+      },
+      ["id", "url"]
+    ),
+    sideEffects:
+      "Fetches the site and calls a model; stores one partner_capability_scan row. Creates no capability, knowledge or media.",
+    nextSteps: ["commit_partner_capability_scan", "get_partner_capability_scan"],
+  },
+  {
+    name: "scan_partner_records",
+    description:
+      "PROPOSE capability samples for a partner from OUR OWN records: production runs they COMPLETED (design, tasks done → actions like stitch/embroider/print, quantity, date, and the photos they sent for that run), cloth they SUPPLIED us on Shipped/Delivered inventory orders (material, colour), and products they list with us. The strongest evidence we hold — prefer this over a website scan, and it works for partners with no website. Writes NOTHING to the library: stores a scan and returns keyed proposals (s1…, k1…); show them to the admin, then commit_partner_capability_scan with the approved keys. `weave` is only credited for supplied cloth when the partner told us they weave. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/capabilities/scan-records",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Partner id.") }, ["id"]),
+    sideEffects:
+      "Reads runs, inventory orders and products; may call a model; stores one partner_capability_scan row (kind='records'). Creates no capability, knowledge or media.",
+    nextSteps: ["commit_partner_capability_scan", "get_partner_capability_scan"],
+  },
+  {
+    name: "list_partner_capability_scans",
+    description:
+      "List a partner's capability scans (website or records), newest first, without their proposals: id, kind, status, grouped_by and proposal counts. Use it to find a scan whose request timed out at the gateway — the server usually finished and stored it — then read it with get_partner_capability_scan.",
+    method: "GET",
+    path: "/admin/partners/:id/capabilities/scans",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id.") }, ["id"]),
+    nextSteps: ["get_partner_capability_scan", "commit_partner_capability_scan"],
+  },
+  {
+    name: "get_partner_capability_scan",
+    description:
+      "Read a stored capability scan (website or records): its proposals and which keys are already committed (committed_keys maps key → created row id).",
+    method: "GET",
+    path: "/admin/partners/:id/capabilities/scans/:scanId",
+    pathParams: ["id", "scanId"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id."),
+        scanId: STR("Scan id, 'pcscan_...', from scan_partner_website or scan_partner_records."),
+      },
+      ["id", "scanId"]
+    ),
+    nextSteps: ["commit_partner_capability_scan"],
+  },
+  {
+    name: "commit_partner_capability_scan",
+    description:
+      "File approved proposals from a capability scan (website or records) into the partner's capability library. Select by KEY only — content cannot be edited in transit, so every row is what its source said. Omit both key lists to commit everything. Photos are downloaded into media and attached; a photo that fails is a warning, not a failure. Keys already committed are skipped, so a retry cannot duplicate. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/capabilities/scans/:scanId/commit",
+    pathParams: ["id", "scanId"],
+    previewPath: "/admin/partners/:id/capabilities/scans/:scanId",
+    write: true,
+    sensitive: true,
+    bodyParams: ["sample_keys", "knowledge_keys"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id."),
+        scanId: STR("Scan id, 'pcscan_...'."),
+        sample_keys: { type: "array", items: { type: "string" }, description: "Sample proposal keys to commit, e.g. ['s1','s3']. Omit for all." },
+        knowledge_keys: { type: "array", items: { type: "string" }, description: "Knowledge proposal keys, e.g. ['k2']. Omit for all." },
+      },
+      ["id", "scanId"]
+    ),
+    sideEffects:
+      "Creates capability samples (source='website' or 'records', captured_at = the evidence's earliest date, or the scan date with metadata.captured_at_defaulted) and knowledge rows; photos we already hold are linked, others are copied into the partner's capability media folder.",
+    nextSteps: ["list_partner_capabilities"],
+  },
+  {
+    name: "add_partner_capability_knowledge",
+    description:
+      "Append one thing learned about a partner's capability — 'handles 60 lea linen', '10 m takes three weeks', 'no natural indigo in monsoon'. About one sample (sample_id) or the partner as a whole. Append-only: a new fact never edits an old one; if something stopped being true, add the newer fact. ADMIN-ONLY — the partner does not see knowledge. 🔑 ASK when it was observed and pass observed_at. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/partners/:id/capabilities/knowledge",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["fact", "sample_id", "source_url", "observed_at"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id."),
+        fact: STR("One fact, in plain words."),
+        sample_id: STR("Capability sample id ('pcap_...') the fact is about; omit for partner-wide."),
+        source_url: STR("Where it was read, if from a page."),
+        observed_at: STR("ISO date the fact was observed (ask, do not default silently)."),
+      },
+      ["id", "fact"]
+    ),
+    sideEffects: "Adds a permanent knowledge row, stamped source='admin'.",
+    nextSteps: ["list_partner_capabilities"],
+  },
+  {
+    name: "get_partner_onboarding_profile",
+    description:
+      "Read a partner's onboarding questionnaire (what they sell, price range, person type, team size, payment/selling mode, commission, supplier capability, completion flag). Returns null when the partner has not started the wizard — a partner with no profile is an ordinary state, not an error. Use to see how far onboarding has progressed and what is still missing.",
+    method: "GET",
+    path: "/admin/partners/:id/onboarding-profile",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+    nextSteps: ["update_partner_onboarding_profile"],
+  },
+  {
+    name: "update_partner_onboarding_profile",
+    description:
+      "Upsert a partner's onboarding questionnaire — file answers the partner gave outside the wizard (a call, WhatsApp) rather than making them complete it themselves. Only supplied fields are written, so you can record one answer at a time. Use dry_run to see the current answers first. Sensitive: requires confirm:true.",
+    method: "PUT",
+    path: "/admin/partners/:id/onboarding-profile",
+    pathParams: ["id"],
+    previewPath: "/admin/partners/:id/onboarding-profile",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "what_they_sell",
+      "price_range",
+      "has_inventory_info",
+      "does_stock",
+      "does_weaving",
+      "person_type",
+      "team_size",
+      "payment_collection",
+      "selling_mode",
+      "commission_bps",
+      "supplies_to_platform",
+      "completed",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        what_they_sell: STR("'apparel' | 'home_textiles' | 'fabric' | 'yarn' | 'accessories' | 'other'."),
+        price_range: STR("'economy' | 'mid' | 'premium' | 'luxury'."),
+        has_inventory_info: BOOL("Whether they can share inventory info."),
+        does_stock: BOOL("Whether they hold stock themselves."),
+        does_weaving: BOOL("Whether they do weaving in-house."),
+        person_type: STR("'individual' | 'business' | 'manufacturer' | 'wholesaler' | 'retailer' | 'artisan' | 'other'."),
+        team_size: INT("How many people work in their team (0–100000)."),
+        payment_collection: STR("'through_us' (JYT collects customer payments) | 'themselves'."),
+        selling_mode: STR("'dedicated_storefront' | 'core_channel_listing' (listing on the core channel at an agreed commission)."),
+        commission_bps: INT(
+          "Agreed commission in basis points (1000 = 10.00%, max 10000). This is the per-partner BILLING override — what the platform keeps on this partner's sales. Set it deliberately, never incidentally."
+        ),
+        supplies_to_platform: BOOL("Whether the platform places production/inventory orders WITH this partner (a supplier) — orthogonal to selling_mode."),
+        completed: BOOL("Mark the questionnaire complete."),
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Creates the profile on first save, updates it thereafter. commission_bps overrides the platform default fee rate for this partner.",
+    nextSteps: ["get_partner_onboarding_profile"],
+  },
+  {
+    name: "get_partner_product_proposal",
+    description:
+      "Read the artisan-proposal state of a product: whether it's artisan-owned, its status, owning partner, and whether it can currently be approved/rejected.",
+    method: "GET",
+    path: "/admin/partners/products/:id/proposal",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Product id, e.g. 'prod_...'.") }, ["id"]),
+  },
+  {
+    name: "approve_partner_product",
+    description:
+      "Approve an artisan's proposed product: publishes it and attaches the core sales channel. Sensitive: requires confirm:true. Use get_partner_product_proposal first to check can_approve.",
+    method: "POST",
+    path: "/admin/partners/products/:id/approve",
+    pathParams: ["id"],
+    previewPath: "/admin/partners/products/:id/proposal",
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Product id, e.g. 'prod_...'.") }, ["id"]),
+    sideEffects: "Publishes the product and emits partner_product.approved (cross-list subscriber attaches the core sales channel).",
+  },
+  {
+    name: "reject_partner_product",
+    description:
+      "Reject an artisan's proposed product, optionally with a reason shown to the artisan. Sensitive: requires confirm:true. Use get_partner_product_proposal first to check can_reject.",
+    method: "POST",
+    path: "/admin/partners/products/:id/reject",
+    pathParams: ["id"],
+    previewPath: "/admin/partners/products/:id/proposal",
+    write: true,
+    sensitive: true,
+    bodyParams: ["rejection_reason"],
+    inputSchema: obj(
+      {
+        id: STR("Product id, e.g. 'prod_...'."),
+        rejection_reason: STR("Optional reason shown to the artisan in the rejection email."),
+      },
+      ["id"]
+    ),
+    sideEffects: "Sets the product to 'rejected' and emits partner_product.rejected.",
+  },
+
+  // ===== Orders ops (#1165): fulfillment, shipping and order edits =======
+  // Wraps the order detail page's actions. Fulfilling and shipping are
+  // `sensitive` (they notify the customer and hit a live carrier API);
+  // cancelling an order or a fulfillment, and confirming an order edit, are
+  // `dangerous` — irreversible once the workflow runs.
+  {
+    name: "list_order_changes",
+    description:
+      "List the change history of an order (order edits, returns, exchanges, claims) with their status and type. Use to explain why an order's totals or line items differ from the original.",
+    method: "GET",
+    path: "/admin/orders/:id/changes",
+    pathParams: ["id"],
+    queryParams: ["status", "change_type"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        status: STR("Optional change status filter."),
+        change_type: STR("Optional change type filter, e.g. 'edit' | 'return' | 'exchange'."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "list_order_designs",
+    description:
+      "List the designs attached to an order's line items. Use before produce_order_designs to see what would be sent to production.",
+    method: "GET",
+    path: "/admin/orders/:id/design",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Order id, e.g. 'order_...'.") }, ["id"]),
+  },
+  {
+    name: "list_order_shipping_rates",
+    description:
+      "List the available courier options for an order (rate, ETA, recommended flag). Call this before create_order_shipping_label to pick a preferred_courier_id.",
+    method: "GET",
+    path: "/admin/orders/:id/fulfillment-rates",
+    pathParams: ["id"],
+    // 🔴 The box, not just the weight. `parseRateQuery` has accepted
+    // length/width/height all along — the quote workflow forwards them to the
+    // carrier precisely because "a cross-border quote is priced on volumetric
+    // weight too" — and this tool advertised only the weight. So an agent could
+    // not ask for the price of the parcel it was about to ship: on order #3 a
+    // 38x23x20cm box has a volumetric weight of 3.54kg against 2.5kg actual,
+    // and the carrier bills the greater. The quote had to be hand-computed.
+    queryParams: [
+      "carrier",
+      "weight_grams",
+      "length_cm",
+      "width_cm",
+      "height_cm",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        carrier: STR("Optional carrier to scope the quote to. Omit for the configured default."),
+        weight_grams: { type: "number", description: "Actual shipment weight in grams. Send the REAL weight — the default is 500 g, and a quote at the wrong weight can offer a courier that will not carry the parcel." },
+        length_cm: { type: "number", description: "Parcel length in cm. Send all three sides or none — a partial box is dropped rather than guessed." },
+        width_cm: { type: "number", description: "Parcel width in cm (the carrier calls it breadth)." },
+        height_cm: { type: "number", description: "Parcel height in cm. With all three, the carrier prices on volumetric weight where that exceeds actual." },
+      },
+      ["id"]
+    ),
+    nextSteps: ["create_order_shipping_label"],
+  },
+  {
+    name: "get_order_fulfillment_label",
+    description:
+      "Get the shipping label for an existing fulfillment (label URL / waybill). Returns 404 if the fulfillment has no waybill yet.",
+    method: "GET",
+    path: "/admin/orders/:id/fulfillments/:fulfillmentId/label",
+    pathParams: ["id", "fulfillmentId"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        fulfillmentId: STR("Fulfillment id, e.g. 'ful_...'."),
+      },
+      ["id", "fulfillmentId"]
+    ),
+  },
+
+  // ---- Order writes -------------------------------------------------------
+  {
+    name: "update_order",
+    description:
+      "Update an order's email or shipping/billing address. Sensitive: requires confirm:true. Use dry_run to see the current order first. Does NOT change line items — use the order-edit tools for that.",
+    method: "POST",
+    path: "/admin/orders/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["email", "shipping_address", "billing_address", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        email: STR("New order email."),
+        shipping_address: {
+          type: "object",
+          description:
+            "Replacement shipping address: { first_name, last_name, phone, company, address_1, address_2, city, province, postal_code, country_code }.",
+        },
+        billing_address: {
+          type: "object",
+          description: "Replacement billing address (same shape as shipping_address).",
+        },
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "create_order_fulfillment",
+    description:
+      "Fulfil items on an order — creates a fulfillment for the given line items at a stock location. Sensitive: requires confirm:true. Call get_order first to read the line item ids and quantities.",
+    method: "POST",
+    path: "/admin/orders/:id/fulfillments",
+    pathParams: ["id"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["items", "location_id", "shipping_option_id", "no_notification", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        items: {
+          type: "array",
+          description:
+            "Line items to fulfil (required, non-empty). Each: { id: order line item id, quantity: number }.",
+          items: obj(
+            {
+              id: STR("Order line item id."),
+              quantity: { type: "number", description: "Quantity to fulfil." },
+            },
+            ["id", "quantity"]
+          ),
+        },
+        location_id: STR("Stock location to fulfil from."),
+        shipping_option_id: STR("Shipping option to use."),
+        no_notification: { type: "boolean", description: "Suppress the customer notification." },
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["id", "items"]
+    ),
+    sideEffects: "Reserves/deducts inventory at the location and notifies the customer unless no_notification is set.",
+    nextSteps: ["create_order_shipment", "create_order_shipping_label"],
+  },
+  {
+    name: "create_order_shipment",
+    description:
+      "Mark a fulfillment as SHIPPED, optionally attaching tracking numbers/URLs. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/orders/:id/fulfillments/:fulfillmentId/shipments",
+    pathParams: ["id", "fulfillmentId"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["items", "labels", "no_notification", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        fulfillmentId: STR("Fulfillment id, e.g. 'ful_...'."),
+        items: {
+          type: "array",
+          description: "Items being shipped (required; may be empty). Each: { id, quantity }.",
+          items: obj(
+            {
+              id: STR("Order line item id."),
+              quantity: { type: "number", description: "Quantity shipped." },
+            },
+            ["id", "quantity"]
+          ),
+        },
+        labels: {
+          type: "array",
+          description:
+            "Tracking labels. Each requires { tracking_number, tracking_url, label_url } — URLs must be http(s).",
+          items: obj(
+            {
+              tracking_number: STR("Carrier tracking number."),
+              tracking_url: STR("Tracking URL (http/https)."),
+              label_url: STR("Label PDF URL (http/https)."),
+            },
+            ["tracking_number", "tracking_url", "label_url"]
+          ),
+        },
+        no_notification: { type: "boolean", description: "Suppress the shipment email." },
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["id", "fulfillmentId", "items"]
+    ),
+    sideEffects: "Marks the fulfillment shipped and emails the customer unless no_notification is set.",
+    nextSteps: ["mark_order_fulfillment_delivered"],
+  },
+  {
+    name: "mark_order_fulfillment_delivered",
+    description:
+      "Mark a fulfillment as DELIVERED. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/orders/:id/fulfillments/:fulfillmentId/mark-as-delivered",
+    pathParams: ["id", "fulfillmentId"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["no_notification"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        fulfillmentId: STR("Fulfillment id, e.g. 'ful_...'."),
+        no_notification: { type: "boolean", description: "Suppress the customer notification." },
+      },
+      ["id", "fulfillmentId"]
+    ),
+  },
+  {
+    name: "schedule_order_pickup",
+    description:
+      "Book the carrier pickup for a fulfillment that already has a waybill. Creating the label and scheduling the collection are DELIBERATELY separate: a manifest can be made the evening before, while a pickup slot is a real-world commitment for a date, a package count and a warehouse — booking one automatically on every fulfillment would send couriers to locations that are not packed. `pickup_date` and `pickup_time` are both REQUIRED; there is no default, because the slot is a promise to a driver. A carrier that has already queued the shipment answers 'Already in Pickup Queue' — that is a refusal to double-book, not a failure. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/orders/:id/fulfillments/:fulfillmentId/pickup",
+    pathParams: ["id", "fulfillmentId"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["pickup_date", "pickup_time", "expected_package_count"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        fulfillmentId: STR("Fulfillment id that holds the waybill, e.g. 'ful_...'."),
+        pickup_date: STR("Collection date, YYYY-MM-DD. Required. The admin UI defaults to TOMORROW — a slot later today is usually already past the carrier's cut-off."),
+        pickup_time: STR("Collection time, HH:mm. Required. The admin UI defaults to 14:00."),
+        expected_package_count: {
+          type: "number",
+          description: "Number of boxes the driver should expect (default 1).",
+        },
+      },
+      ["id", "fulfillmentId", "pickup_date", "pickup_time"]
+    ),
+    sideEffects:
+      "Books a real collection with the carrier for that date and warehouse. `pickup_persisted: false` means the booking is LIVE at the carrier but was not saved here — the cancellation token then exists only in the server log.",
+  },
+  {
+    name: "get_export_igst_status",
+    description:
+      "What an export label would declare for IGST right now, and why (#1216). Answers 'B' (a live LUT is on file, so the export is zero-rated) or 'C' (IGST paid and reclaimed — an LUT is recorded but none is currently in force). Read-only. Use it when a cross-border booking is refused or a customs figure looks wrong: it comes from the SAME resolver the label path uses, so it cannot disagree with what was actually declared. `days_until_expiry` is the number worth watching — an LUT lapses silently and the declaration flips to 'C' with nothing else changing.",
+    method: "GET",
+    path: "/admin/customs/export-igst-status",
+    queryParams: ["country"],
+    inputSchema: obj({
+      country: STR("ISO-2 destination country to resolve for. Defaults to the platform's configured export country."),
+    }),
+  },
+  {
+    name: "cancel_order_shipment",
+    description:
+      "Void a fulfillment's carrier waybill when the parcel cannot go out as booked — a pickup that never happened, a partner change, an address caught late. Cancels at the CARRIER first, then clears the carrier refs off the fulfillment so a fresh label can be generated on it (possibly with a different courier), reverses the partner's freight deduction when there was one, and emails the customer that their courier is changing. 🔑 PREFER THIS over cancel_order_fulfillment when only the SHIPMENT is wrong: this keeps the fulfillment and its items intact, while cancel_order_fulfillment reverses the whole fulfillment and restocks everything, forcing a re-fulfil. An already-shipped fulfillment is refused unless force:true — a parcel physically in the carrier's network whose waybill is voided is a box nobody can route. PLATFORM-DESTRUCTIVE: requires confirm:true AND a human reason, which is also what the audit entry and the courier-changed email are built from. Always dry_run first.",
+    method: "POST",
+    path: "/admin/orders/:id/fulfillments/:fulfillmentId/cancel-shipment",
+    pathParams: ["id", "fulfillmentId"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    dangerous: true,
+    // Same arrangement as cancel_production_run: the dangerous rail's `reason`
+    // doubles as the route's cancellation reason, so the audited "why" is what
+    // gets persisted on the fulfillment's cancellation record. The customer
+    // email is rendered from a template and never quotes it.
+    bodyParams: ["reason", "force", "notify_customer"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        fulfillmentId: STR("Fulfillment id whose waybill to void, e.g. 'ful_...'."),
+        force: {
+          type: "boolean",
+          description:
+            "Cancel even though the fulfillment is already marked shipped. Off by default — voiding a waybill for a parcel already moving strands a box nobody can route.",
+        },
+        notify_customer: {
+          type: "boolean",
+          description:
+            "Email the customer that their courier is changing. Defaults to TRUE — they are the one person guaranteed to notice the tracking link going dead.",
+        },
+      },
+      ["id", "fulfillmentId"]
+    ),
+    sideEffects:
+      "Cancels the waybill at the live carrier (irreversible there), nulls the carrier refs on fulfillment.data, appends a cancelled_shipments audit entry, credits back the partner's freight deduction when there was one, and emails the customer. The fulfillment and its items SURVIVE — book a new label with create_order_shipping_label.",
+  },
+  {
+    name: "cancel_order_fulfillment",
+    description:
+      "Cancel a fulfillment and return its items to stock. ⚠️ If only the SHIPMENT is wrong (a pickup that never happened, a bad AWB), use cancel_order_shipment instead — it voids just the waybill and leaves the fulfillment intact, where this reverses everything and forces a re-fulfil. PLATFORM-DESTRUCTIVE: requires confirm:true AND a human reason, and is only available when ADMIN_MCP_ENABLE_DANGEROUS is enabled. Cannot be undone — a cancelled fulfillment must be re-created. Always dry_run first.",
+    method: "POST",
+    path: "/admin/orders/:id/fulfillments/:fulfillmentId/cancel",
+    pathParams: ["id", "fulfillmentId"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    dangerous: true,
+    bodyParams: ["no_notification"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        fulfillmentId: STR("Fulfillment id, e.g. 'ful_...'."),
+        no_notification: { type: "boolean", description: "Suppress the customer notification." },
+      },
+      ["id", "fulfillmentId"]
+    ),
+    sideEffects: "Reverses the fulfillment and restocks its items. Already-shipped fulfillments cannot be cancelled.",
+  },
+  {
+    name: "cancel_order",
+    description:
+      "Cancel an entire order. PLATFORM-DESTRUCTIVE: requires confirm:true AND a human reason, and is only available when ADMIN_MCP_ENABLE_DANGEROUS is enabled. Irreversible — the order cannot be un-cancelled. Always dry_run first.",
+    method: "POST",
+    path: "/admin/orders/:id/cancel",
+    pathParams: ["id"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    dangerous: true,
+    inputSchema: obj({ id: STR("Order id to cancel, e.g. 'order_...'.") }, ["id"]),
+    sideEffects: "Cancels payments and fulfillments on the order and notifies the customer. Fails if the order is already fulfilled or captured.",
+  },
+  {
+    name: "complete_order",
+    description:
+      "Mark an order as complete (closes it for further edits). Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/orders/:id/complete",
+    pathParams: ["id"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Order id, e.g. 'order_...'.") }, ["id"]),
+    sideEffects: "Sets the order to 'completed'; further order edits are blocked.",
+  },
+  {
+    name: "produce_order_designs",
+    description:
+      "Send an order's design line items to production: creates one production run per design, collated into a single design work-order. Idempotent — re-running does not duplicate runs. Sensitive: requires confirm:true. Call list_order_designs first.",
+    method: "POST",
+    path: "/admin/orders/:id/design/produce",
+    pathParams: ["id"],
+    previewPath: "/admin/orders/:id/design",
+    write: true,
+    sensitive: true,
+    bodyParams: ["partner_id"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        partner_id: STR("Optional partner to assign every created run to."),
+      },
+      ["id"]
+    ),
+    sideEffects: "Creates production runs and a collated design work-order for the order.",
+    nextSteps: ["list_production_runs", "approve_production_run"],
+  },
+  {
+    name: "create_order_shipping_label",
+    description:
+      "One-click ship: create (or reuse) a fulfillment for the whole order, book the carrier shipment and buy the label. Sensitive: requires confirm:true. Call list_order_shipping_rates first to choose preferred_courier_id.",
+    method: "POST",
+    path: "/admin/orders/:id/fulfillment-label",
+    pathParams: ["id"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    sensitive: true,
+    // 🔴 weight_grams + dimensions_cm are listed because the ROUTE has taken
+    // them all along and this tool did not forward them. bodyParams is an
+    // allowlist walk, so an unlisted key is dropped SILENTLY — every label an
+    // agent booked went out at DEFAULT_WEIGHT_GRAMS (500 g) in a 10×10×10 cm
+    // box, whatever the real parcel was, while `list_order_shipping_rates`
+    // quoted the courier on the true weight. The quote and the booking
+    // disagreed and nothing reported it.
+    //
+    // That is not cosmetic. On order #3 the five-garment, ~2.5 kg parcel to
+    // Switzerland was booked on SRX Economy — a lane that does not serve 2.5 kg
+    // at all (it disappears from the quote at that weight) — and the pickup was
+    // scanned "Not Picked - Shipment not received from client".
+    bodyParams: ["carrier", "preferred_courier_id", "weight_grams", "dimensions_cm"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        carrier: STR("Carrier to book with (defaults to the configured provider)."),
+        preferred_courier_id: STR("Courier id from list_order_shipping_rates."),
+        weight_grams: {
+          type: "number",
+          description:
+            "Real parcel weight in grams. ALWAYS send this: without it the booking uses 500 g regardless of the box, which can put the parcel on a lane that cannot carry it. Quote the same weight in list_order_shipping_rates so the rate and the booking agree.",
+        },
+        dimensions_cm: {
+          type: "object",
+          description:
+            "Parcel dimensions in CENTIMETRES: { length, width, height }. All three are required together — any missing one and the carrier defaults the whole box to 10×10×10 cm. Volumetric weight can exceed actual weight and decide the price.",
+          properties: {
+            length: { type: "number", description: "Length in cm." },
+            width: { type: "number", description: "Width in cm (sent to the carrier as breadth)." },
+            height: { type: "number", description: "Height in cm." },
+          },
+        },
+      },
+      ["id"]
+    ),
+    sideEffects: "Calls the live carrier API, books a real shipment and buys a label — this costs money and is NOT undone by cancelling the fulfillment (use cancel_order_shipment to void the waybill).",
+  },
+  {
+    name: "attach_order_awb",
+    description:
+      "Attach an EXISTING carrier waybill (AWB) to an order — reuses or creates a manual fulfillment, looks the AWB up read-only, and stamps the carrier refs. Use when a shipment was booked outside the platform. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/orders/:id/shiprocket-attach-awb",
+    pathParams: ["id"],
+    previewPath: "/admin/orders/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["awb"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        awb: STR("The existing carrier waybill number (required)."),
+      },
+      ["id", "awb"]
+    ),
+    sideEffects: "Does NOT book a new shipment — it only links an already-booked AWB and syncs its status.",
+  },
+
+  // ---- Order edits (line-item changes on a placed order) ------------------
+  // A staged workflow: create an edit -> add/update items -> request ->
+  // confirm. Nothing touches the real order until confirm_order_edit runs,
+  // which is why only that last step is `dangerous`.
+  {
+    name: "create_order_edit",
+    description:
+      "Start an order edit — a staged draft for changing a placed order's line items. Nothing changes on the order until confirm_order_edit. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/order-edits",
+    write: true,
+    sensitive: true,
+    bodyParams: ["order_id", "description", "internal_note", "metadata"],
+    inputSchema: obj(
+      {
+        order_id: STR("Order id to edit, e.g. 'order_...' (required)."),
+        description: STR("Customer-facing description of the edit."),
+        internal_note: STR("Internal note for the ops team."),
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["order_id"]
+    ),
+    sideEffects: "Creates a draft order-change. The order itself is untouched until the edit is confirmed.",
+    nextSteps: ["add_order_edit_items", "update_order_edit_item", "request_order_edit"],
+  },
+  {
+    name: "add_order_edit_items",
+    description:
+      "Add new line items to an in-progress order edit. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/order-edits/:id/items",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["items"],
+    inputSchema: obj(
+      {
+        id: STR("Order edit (order-change) id."),
+        items: {
+          type: "array",
+          description: "Items to add. Each: { variant_id, quantity, unit_price?, internal_note? }.",
+          items: obj(
+            {
+              variant_id: STR("Product variant id to add."),
+              quantity: { type: "number", description: "Quantity to add." },
+              unit_price: { type: "number", description: "Override unit price." },
+              internal_note: STR("Internal note on the added item."),
+            },
+            ["variant_id", "quantity"]
+          ),
+        },
+      },
+      ["id", "items"]
+    ),
+  },
+  {
+    name: "update_order_edit_item",
+    description:
+      "Change the quantity or price of an EXISTING line item within an in-progress order edit (this is how you remove an item — set quantity to 0). Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/order-edits/:id/items/item/:itemId",
+    pathParams: ["id", "itemId"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["quantity", "unit_price", "internal_note"],
+    inputSchema: obj(
+      {
+        id: STR("Order edit (order-change) id."),
+        itemId: STR("The ORIGINAL order line item id being changed."),
+        quantity: { type: "number", description: "New quantity (required). 0 removes the item." },
+        unit_price: { type: "number", description: "New unit price." },
+        internal_note: STR("Internal note on the change."),
+      },
+      ["id", "itemId", "quantity"]
+    ),
+  },
+  {
+    name: "request_order_edit",
+    description:
+      "Move an order edit from draft to 'requested' (awaiting confirmation). Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/order-edits/:id/request",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Order edit (order-change) id.") }, ["id"]),
+    nextSteps: ["confirm_order_edit", "cancel_order_edit"],
+  },
+  {
+    name: "confirm_order_edit",
+    description:
+      "APPLY an order edit to the real order — recalculates totals and may create a payment or refund. PLATFORM-DESTRUCTIVE: requires confirm:true AND a human reason, and is only available when ADMIN_MCP_ENABLE_DANGEROUS is enabled. Always dry_run first.",
+    method: "POST",
+    path: "/admin/order-edits/:id/confirm",
+    pathParams: ["id"],
+    write: true,
+    dangerous: true,
+    inputSchema: obj({ id: STR("Order edit (order-change) id to apply.") }, ["id"]),
+    sideEffects: "Mutates the placed order's line items and totals, and can trigger an additional charge or a refund. Not reversible by cancelling the edit.",
+  },
+  {
+    name: "cancel_order_edit",
+    description:
+      "Discard an in-progress order edit without applying it. Safe to call on any unconfirmed edit. Sensitive: requires confirm:true.",
+    method: "DELETE",
+    path: "/admin/order-edits/:id",
+    pathParams: ["id"],
+    write: true,
+    inputSchema: obj({ id: STR("Order edit (order-change) id to discard.") }, ["id"]),
+    sideEffects: "Throws away the draft edit. The underlying order is unaffected.",
+  },
+
+  // ===== Production runs (#1167): the admin lifecycle levers =============
+  // create -> approve (this is where partners are assigned) -> either
+  // send-to-production (instantiate task templates) OR start/resume-dispatch
+  // -> cancel. Accept/start/finish are PARTNER-side routes and deliberately
+  // absent here. Statuses: draft | pending_review | approved | sent_to_partner
+  // | in_progress | completed | cancelled | awaiting_reassignment.
+  {
+    name: "get_production_run",
+    description:
+      "Get a single production run by id, with its linked tasks and its assigned materials. Use to read the run's status, quantity, assigned partner, dispatch state and cost fields. `materials` is what THIS run was allocated; `materials_constrained: false` means no selection was made and the partner may use the design's whole bill of materials.\n\nTo answer 'why has this run not started', read its two upstream edges: `depends_on_inventory_order_ids` (goods being supplied to this partner — met only at `Delivered`) and `depends_on_run_ids` (another partner's run — met at `completed`, derived from the assignment order at approval or attached with update_production_run). A run sitting at `approved` with either of these non-empty is WAITING, not stuck.",
+    method: "GET",
+    path: "/admin/production-runs/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Production run id.") }, ["id"]),
+  },
+  {
+    name: "get_entity_neighbours",
+    description:
+      "Read one entity's GRAPH: its neighbours, the edges joining them, and — the part no list can answer — the edges the model EXPECTS and that are missing. `spine` is the kind of thing you are centring on: 'production_run' | 'design' | 'partner' | 'website' | 'social_platform' | 'queue'. Each edge carries a `state`: 'present' (a real link with a record on the other end), 'derived' (the neighbour exists and is not doing its job — an assigned partner who never answered), or 'absent' (expected and not there, with `action` naming what would create it). Use it to answer 'why has this not moved' and 'what is missing here' in one call instead of four. On a production run the two edges worth reading first are the upstream ones: materials (met only at `Delivered`, never `Shipped`) and another partner's run (met at `completed`). An unknown spine is an error naming the valid keys — never an empty graph.",
+    method: "GET",
+    path: "/admin/graph/:spine/:id",
+    pathParams: ["spine", "id"],
+    inputSchema: obj(
+      {
+        spine: STR(
+          "What kind of thing the id is: 'production_run' | 'design' | 'partner' | 'website' | 'social_platform' | 'queue'."
+        ),
+        id: STR("The entity's id. For the 'queue' spine this is the queue's name, not a record id."),
+      },
+      ["spine", "id"]
+    ),
+  },
+  {
+    name: "attach_design_customer",
+    description:
+      "Say whose design this is — write (or clear) the design\u2194customer link. THIS IS WHAT MAKES A DESIGN NOTIFIABLE: every customer email about a design (production started, production complete, materials linked, materials delivered, status changed) resolves its recipient through this link and returns SILENTLY when there is none. A design with no customer is not 'unnotified', it is unreachable, and nothing anywhere reports that. Distinct from attach_design_order_customer, which needs a design ORDER and a cart line; this one works on a bare design, which is how designs that came out of a conversation rather than a checkout get an owner. Pass customer_id null to detach.",
+    method: "POST",
+    path: "/admin/designs/:id/customer",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["customer_id"],
+    inputSchema: obj(
+      {
+        id: STR("Design id."),
+        customer_id: STR("Customer id to attach, or null to detach the current one."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "list_design_inventory_orders",
+    description:
+      "What material a design is WAITING FOR — the inventory orders attached to it, with each one's status, quantity and expected delivery, plus whether the client is told when it lands and whether they already were. Read. Note this is NOT a bill of materials: it says an order is FOR this design, not how much the design consumes (that is the run's allocation and its consumption logs).",
+    method: "GET",
+    path: "/admin/designs/:id/inventory-orders",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Design id.") }, ["id"]),
+  },
+  {
+    name: "attach_design_inventory_order",
+    description:
+      "Attach an incoming inventory order to a design — 'this cloth is for that piece'. Attaching is what makes the arrival tellable: when the order reaches `Delivered` (never `Shipped`), the design's customer is emailed that their material has arrived. Set notify_customer false for cloth bought speculatively or for a client who asked not to be told; omitted, it sends. \u26a0\ufe0f Attaching sends NOTHING now \u2014 it arms a future status change, so an order already Delivered when you attach it will never fire, and that client has to be told by hand.",
+    method: "POST",
+    path: "/admin/designs/:id/inventory-orders",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["inventory_order_id", "notify_customer", "note"],
+    inputSchema: obj(
+      {
+        id: STR("Design id."),
+        inventory_order_id: STR("The inventory order to attach."),
+        notify_customer: STR(
+          "'false' to suppress the arrival email for this design. Defaults to sending."
+        ),
+        note: STR("Why this order is for this design, in your own words."),
+      },
+      ["id", "inventory_order_id"]
+    ),
+  },
+  {
+    name: "list_production_run_activities",
+    description:
+      "Read a production run's activity timeline (reminders sent, lifecycle events, notes), newest first. Use to answer 'what happened on this run'.",
+    method: "GET",
+    path: "/admin/production-runs/:id/activities",
+    pathParams: ["id"],
+    queryParams: ["limit", "offset", "activity_type", "kind"],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        limit: { type: "integer", description: "Max rows (default 100, max 500)." },
+        offset: { type: "integer", description: "Pagination offset." },
+        activity_type: STR("'reminder_sent' | 'lifecycle_event' | 'note' | 'system'."),
+        kind: STR("Optional free-text activity kind filter."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "get_production_run_cost_summary",
+    description:
+      "Get a production run's computed cost rollup: material, energy, labour and partner cost, grand total and cost per unit.",
+    method: "GET",
+    path: "/admin/production-runs/:id/cost-summary",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Production run id.") }, ["id"]),
+  },
+  // #2322 — profit share on partner runs made with OUR material.
+  {
+    name: "get_production_run_profit_share",
+    description:
+      "A run's profit-share position (#2322): the share of GROSS sales the partner pays us, every sale they made (qty × unit price), every payment they made us (bank transfer or cash), and what is still owed — computed, never stored, with its working. Use for runs where the PARTNER made pieces on OUR material and sells them (the reverse of a payout). 🔑 `owed: null` means no arrangement on this run; `owed: 0` with status `no_sales` means an arrangement with nothing sold yet.",
+    method: "GET",
+    path: "/admin/production-runs/:id/profit-share",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Production run id (prod_run_...).") }, ["id"]),
+    nextSteps: ["set_production_run_profit_share", "record_production_run_sale", "record_profit_share_payment"],
+  },
+  {
+    name: "set_production_run_profit_share",
+    description:
+      "Set the share (0-100) of GROSS sale price a partner pays us on a run they made with our material (#2322), e.g. 50. Pass percent: null to remove the arrangement. Sensitive: requires confirm:true. Only the percent changes; recorded sales and payments are kept, and what is owed is recomputed from them.",
+    method: "POST",
+    path: "/admin/production-runs/:id/profit-share",
+    pathParams: ["id"],
+    bodyParams: ["percent"],
+    previewPath: "/admin/production-runs/:id/profit-share",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        percent: {
+          type: ["number", "null"],
+          description: "Share of gross sales owed to us, 0-100. null removes the arrangement.",
+        },
+      },
+      ["id", "percent"]
+    ),
+    sideEffects: "Writes `profit_share_percent` on the run. Changes the computed amount owed.",
+    nextSteps: ["get_production_run_profit_share", "record_production_run_sale"],
+  },
+  {
+    name: "record_production_run_sale",
+    description:
+      "Record pieces a partner SOLD from a profit-share run (#2322): quantity and the GROSS price of ONE piece. Sensitive: requires confirm:true. Refused when the run has no profit-share percent, or when it would report more pieces sold than the run made. Partial reports are ordinary (4 of 10 this month). A mistaken row is removed with DELETE /admin/production-runs/:id/profit-share/sales/:saleId.",
+    method: "POST",
+    path: "/admin/production-runs/:id/profit-share/sales",
+    pathParams: ["id"],
+    bodyParams: ["quantity", "unit_price", "currency_code", "sold_at", "note"],
+    previewPath: "/admin/production-runs/:id/profit-share",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        quantity: { type: "number", description: "Pieces sold in this line. > 0." },
+        unit_price: {
+          type: "number",
+          description: "GROSS sale price of ONE piece, in major units (e.g. 5700 for ₹5,700) — before any of the partner's costs or fees.",
+        },
+        currency_code: STR("Lowercase 3-letter code. Defaults to the run's cost currency, else 'inr'."),
+        sold_at: STR("ISO date-time of the sale. Defaults to now."),
+        note: STR("Optional note, e.g. who bought or an invoice reference."),
+      },
+      ["id", "quantity", "unit_price"]
+    ),
+    sideEffects: "Creates a production_run_sale row; the amount owed rises by qty × unit_price × percent.",
+    nextSteps: ["get_production_run_profit_share", "record_profit_share_payment"],
+  },
+  {
+    name: "record_profit_share_payment",
+    description:
+      "Record money a partner PAID US against a profit-share run (#2322) — by bank transfer or cash. Recorded, not collected: no link is sent. Sensitive: requires confirm:true. Partial payments are ordinary; the balance stays open. A mistaken row is removed with DELETE /admin/production-runs/:id/profit-share/settlements/:settlementId.",
+    method: "POST",
+    path: "/admin/production-runs/:id/profit-share/settlements",
+    pathParams: ["id"],
+    bodyParams: ["amount", "method", "currency_code", "paid_at", "reference", "receipt_url", "note"],
+    previewPath: "/admin/production-runs/:id/profit-share",
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        amount: { type: "number", description: "Amount received, major units." },
+        method: { type: "string", enum: ["bank_transfer", "cash"], description: "How it was paid." },
+        currency_code: STR("Lowercase 3-letter code. Defaults to the run's cost currency, else 'inr'."),
+        paid_at: STR("ISO date-time received. Defaults to now."),
+        reference: STR("UTR for a bank transfer; the person who received it for cash."),
+        receipt_url: STR("Optional receipt / photo URL."),
+        note: STR("Optional note."),
+      },
+      ["id", "amount", "method"]
+    ),
+    sideEffects: "Creates a production_run_settlement row; the balance owed falls by the amount.",
+    nextSteps: ["get_production_run_profit_share"],
+  },
+  // #2271 — replay completion against prod data with no side effects.
+  {
+    name: "preview_production_run_completion",
+    description:
+      "What completing a production run WOULD do, writing nothing — a GET, safe on prod. Reports: whether the completion gate would refuse; the per-size/colour split it would record (confirmed → plan → the run's only combination, else refused); the stock path (legacy single variant | one variant per size/colour | skipped with a reason); every write it would make (mint a DRAFT product and at what price, add Size/Color options, create or reuse variants, stock +N at which warehouse). On an already-completed, unbanked run it shows what the bank-unstocked-run job would do. Pass produced_quantity / rejected_quantity / produced_output ('S:1,M:2') to ask 'what if'.",
+    method: "GET",
+    path: "/admin/production-runs/:id/completion-preview",
+    pathParams: ["id"],
+    queryParams: ["produced_quantity", "rejected_quantity", "produced_output", "allow_shortfall", "notes"],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        produced_quantity: { type: "number", description: "Good pieces to complete with. Defaults to what the run recorded." },
+        rejected_quantity: { type: "number", description: "Rejected pieces. Defaults to what the run recorded." },
+        produced_output: STR("The split per size/colour, e.g. 'S:1,M:2' or 'S/Indigo:1'."),
+        allow_shortfall: STR("'true' to preview a deliberate shortfall."),
+        notes: STR("Completion notes, as the shortfall gate reads them."),
+      },
+      ["id"]
+    ),
+  },
+  // ----- What a run actually consumed (#1974) -----------------------------
+  // `get_production_run_cost_summary` could REPORT a cost but nothing here
+  // could CREATE one, so a run with no consumption logs was uncostable through
+  // the MCP and `approve_production_run` refused it — correctly, and with no
+  // reachable way to fix it. The rollup reads these three; now they can be
+  // written. See approval-pricing.ts: price = cost per unit x 1.40.
+  {
+    name: "list_energy_rates",
+    description:
+      "List the platform's energy and LABOUR rates — the per-unit figures the run cost rollup falls back to when a consumption log carries no `unitCost` of its own. Read. 🔑 The labour rate lives here too, as `energy_type: \"labor\"`: a labour log with no unit cost is priced at this rate per hour, and if NO active labour rate exists such a log contributes ZERO to the run's cost. Check here before logging labour without a unit cost.",
+    method: "GET",
+    path: "/admin/energy-rates",
+    queryParams: ["energy_type", "is_active", "region", "limit", "offset"],
+    inputSchema: obj({
+      energy_type: STR(
+        "'labor' | 'energy_electricity' | 'energy_water' | 'energy_gas'."
+      ),
+      is_active: STR("'true' to list only active rates."),
+      region: STR("Optional region filter."),
+      limit: INT("Max results (default 50)."),
+      offset: INT("Pagination offset."),
+    }),
+  },
+  {
+    name: "list_run_consumption_logs",
+    description:
+      "Read what a production run consumed — the material, energy and labour logs behind `get_production_run_cost_summary`. Read. A run with zero logs cannot be priced from its own cost, which is why approval refuses it.",
+    method: "GET",
+    path: "/admin/production-runs/:id/consumption-logs",
+    pathParams: ["id"],
+    queryParams: [
+      "consumption_type",
+      "is_committed",
+      "consumed_by",
+      "inventory_item_id",
+      "limit",
+      "offset",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        consumption_type: STR(
+          "'sample' | 'production' | 'wastage' | 'energy_electricity' | 'energy_water' | 'energy_gas' | 'labor'."
+        ),
+        is_committed: STR(
+          "'true' for logs already deducted from stock, 'false' for uncommitted ones."
+        ),
+        consumed_by: STR("Who recorded it, e.g. 'admin' or a partner id."),
+        inventory_item_id: STR("Only logs against this inventory item."),
+        limit: INT("Max results."),
+        offset: INT("Pagination offset."),
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "log_run_consumption",
+    description:
+      "Record what a production run consumed — one material, energy or labour line. Sensitive: requires confirm:true. This is what makes a run COSTABLE: `get_production_run_cost_summary` sums these into `cost_per_unit`, and `approve_production_run` prices the minted product at cost x 1.40 from it, preferring a run's real cost over the design's typed estimate.\n\n🔴 `unitCost` is NOT resolved from the raw material. The workflow stores `unit_cost: input.unit_cost ?? null`, and the rollup SKIPS any material line whose unit cost is null — so a log against a material with no `unit_cost` of its own, filed without one here, contributes ZERO and reads exactly like a line that was recorded. Pass `unitCost` explicitly unless you have confirmed the material carries one.\n\n🔑 `inventoryItemId` is REQUIRED even for a labour or energy line, and must be a real `iitem_` id — note `list_raw_materials` returns LINK rows, so take its `inventory_item_id` field, never the `link_` id. The run's design/product anchor is read off the run itself and cannot be passed in.\n\nLogging does not deduct stock; committing does (see the commit route).",
+    method: "POST",
+    path: "/admin/production-runs/:id/consumption-logs",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "inventoryItemId",
+      "rawMaterialId",
+      "quantity",
+      "quantityBasis",
+      "unitCost",
+      "unitOfMeasure",
+      "consumptionType",
+      "notes",
+      "locationId",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        inventoryItemId: STR(
+          "Inventory item consumed (`iitem_...`). REQUIRED even for labour/energy lines. From list_inventory_items, or the `inventory_item_id` field of list_raw_materials — NOT its `link_...` id."
+        ),
+        rawMaterialId: STR("Optional raw-material id for provenance."),
+        quantity: {
+          type: "number",
+          description:
+            "How much was consumed — metres of cloth, kWh, or HOURS for a labour line. Must be positive.",
+        },
+        quantityBasis: STR(
+          "'total' (default) or 'per_piece' — whether `quantity` is the whole run or one garment."
+        ),
+        unitCost: {
+          type: "number",
+          description:
+            "Cost per unit, in the platform's costing currency (INR). Must be positive. Omit ONLY when the material carries its own unit cost or, for labour/energy, an active rate exists — otherwise this line is worth zero. See the description.",
+        },
+        unitOfMeasure: STR(
+          "'Meter' | 'Yard' | 'Kilogram' | 'Gram' | 'Piece' | 'Roll' | 'kWh' | 'Liter' | 'Cubic_Meter' | 'Hour' | 'Other'. Use 'Hour' for labour."
+        ),
+        consumptionType: STR(
+          "'production' (default use for a real run) | 'sample' | 'wastage' | 'labor' | 'energy_electricity' | 'energy_water' | 'energy_gas'. Material types are sample/production/wastage; these are what the rollup counts as material."
+        ),
+        notes: STR("Free-text note recorded on the log."),
+        locationId: STR(
+          "Stock location the material came from (`sloc_...`). Consumption is only ever deducted from a core location."
+        ),
+        metadata: {
+          type: "object",
+          description: "Arbitrary metadata to store on the log.",
+          additionalProperties: true,
+        },
+      },
+      ["id", "inventoryItemId", "quantity"]
+    ),
+  },
+  {
+    name: "get_production_run_task",
+    description: "Get a single task belonging to a production run.",
+    method: "GET",
+    path: "/admin/production-runs/:id/tasks/:taskId",
+    pathParams: ["id", "taskId"],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        taskId: STR("Task id, e.g. 'task_...'."),
+      },
+      ["id", "taskId"]
+    ),
+  },
+  {
+    name: "change_order_item_design",
+    description:
+      "Attach, replace or DETACH the design behind an order line item, and email the customer what changed. Sensitive: requires confirm:true. 🔑 This is the ORDER line-item link (#1919) — the older cart-level link dies at checkout, which is why a paid order could never be re-pointed before. Send `design_id` to attach or replace; send an explicit **null** to detach. Omitting `design_id` is REJECTED, because a forgotten field and a deliberate detach must not look the same when the result is unlinking a garment somebody paid for. Detaching keeps the item's `metadata.design_id` provenance, so 'unlinked' stays distinguishable from 'never had a design'. 🔑 ALWAYS run with `dry_run: true` first: it returns the exact change AND the email the customer would receive, including each garment's real production state, without writing or sending. The email tells the customer the truth per garment — 'already made' only when a run actually completed; a cancelled run or no run at all is reported as not started, never as reassurance. Use `notify: false` for a correction the customer should not see.",
+    method: "POST",
+    path: "/admin/designs/orders/:lineItemId/design",
+    pathParams: ["lineItemId"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["design_id", "notify", "dry_run"],
+    inputSchema: obj(
+      {
+        lineItemId: STR(
+          "The ORDER line item id (starts `ordli_`), from get_order or list_order_designs. NOT a cart line item (`cali_`) and not the order id."
+        ),
+        design_id: STR(
+          "The design to point this item at. Send an explicit null to DETACH. Required — omitting it is an error, not a detach."
+        ),
+        notify: BOOL(
+          "Whether to email the customer what changed. Defaults to true. Set false only for a correction the customer should not see."
+        ),
+        dry_run: BOOL(
+          "Preview the change and the email WITHOUT writing the link or sending anything. Do this first."
+        ),
+      },
+      ["lineItemId"]
+    ),
+  },
+
+  // ---- Platform cost config (#1939) --------------------------------------
+  {
+    name: "get_platform_cost_config",
+    description:
+      "Read the platform's ECONOMIC POLICY — the five numbers that decide what a design costs and what a buyer pays: the platform commission, the production overhead, the fallback material cost, the custom-design markup and the approval markup. Call this BEFORE quoting, explaining or changing any price, and before answering 'what do we charge': these numbers were previously compiled into the code and this is the only place they can be read. 🔑 A null field means NOT CONFIGURED, not zero — the code falls back to its own constant, so never report a null as 'we charge nothing'. ⚠️ There are TWO markups and they are different shapes: `custom_design_markup_percent` is a PERCENT (20 = +20%) on the quote/retail path, `approval_markup_multiplier` is a MULTIPLIER (1.4 = list at 140% of cost) on the run-approval path; at ×1.40 the MARGIN is 28.6%, not 40%. Pass `at` (an ISO date) to see the policy that was in force at a past moment — that is how a price quoted months ago is explained, since the table is effective-dated and old rows are kept.",
+    method: "GET",
+    path: "/admin/platform-cost-config",
+    queryParams: ["at"],
+    inputSchema: obj({
+      at: STR(
+        "ISO date/time to resolve the policy AT, e.g. '2026-03-01T00:00:00Z'. Omit for the policy in force now. Use it to explain a price that was quoted under an older policy."
+      ),
+    }),
+  },
+  {
+    name: "set_platform_cost_config",
+    description:
+      "Set the platform's next economic policy. ⚠️ THIS CHANGES WHAT CUSTOMERS PAY AND WHAT PARTNERS ARE PAID — it is not a settings tweak. Sensitive: requires confirm:true. 🔑 It INSERTS a new effective-dated policy rather than editing the current one, so every price already quoted stays explicable under the policy it was quoted under; there is deliberately no update tool. Fields you OMIT carry forward from the policy currently in force — so sending only `custom_design_markup_percent` changes the markup and leaves the other four alone. Sending a field as null UNSETS it, which makes the code fall back to its compiled-in constant; that is rarely what you want, so only send null when the intent is genuinely 'we have no policy on this'. ALWAYS call get_platform_cost_config first and tell the admin what is changing FROM and TO before you write. Pass a future `effective_from` to stage a change without applying it.",
+    method: "POST",
+    path: "/admin/platform-cost-config",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "effective_from",
+      "notes",
+      "platform_fee_percent",
+      "production_overhead_percent",
+      "default_material_cost",
+      "default_material_cost_currency",
+      "custom_design_markup_percent",
+      "approval_markup_multiplier",
+    ],
+    inputSchema: obj({
+      effective_from: STR(
+        "ISO date/time this policy takes effect. Defaults to now. A FUTURE date stages it without applying it; a PAST date back-dates a correction and inherits from whatever was in force at that moment, not from today's policy."
+      ),
+      notes: STR(
+        "Why the policy changed — write the DECISION and who made it, not the number (the number is its own field). This is what a person reads in six months asking why a price moved."
+      ),
+      platform_fee_percent: {
+        type: "number",
+        description:
+          "JYT's commission on partner production work, as a PERCENTAGE of material cost. 0 is meaningful and means 'we take no commission'; omit the field to leave it unchanged.",
+      },
+      production_overhead_percent: {
+        type: "number",
+        description:
+          "Production overhead as a PERCENTAGE of material cost.",
+      },
+      default_material_cost: {
+        type: "number",
+        description:
+          "Fallback per-unit material cost used ONLY when a BOM material has no resolved price (no order history, no unit cost, no consumption log). A guess standing in for a fact — raising it silently raises every design priced without real purchase data.",
+      },
+      default_material_cost_currency: STR(
+        "Currency of default_material_cost, e.g. 'INR'. Send it whenever you send the cost — an amount with no currency cannot be added up."
+      ),
+      custom_design_markup_percent: {
+        type: "number",
+        description:
+          "Markup on a custom/commissioned design, as a PERCENTAGE (20 = +20%). Applies to the quote path and, since the 2026-09-09 decision, to retail.",
+      },
+      approval_markup_multiplier: {
+        type: "number",
+        description:
+          "Markup applied when an approved run's output is listed, as a MULTIPLIER on cost (1.4 = list at 140% of cost). NOT a percentage — sending 40 here would list at 40x cost. At 1.4 the margin is 28.6%.",
+      },
+    }),
+  },
+
+  {
+    name: "get_production_run_policy",
+    description:
+      "Read the platform's production-run policy: which run statuses each lifecycle transition (approve, dispatch, send-to-production, accept, start, finish, decline) is allowed from.",
+    method: "GET",
+    path: "/admin/production-run-policy",
+    inputSchema: obj({}),
+  },
+
+  // ---- Production run writes ---------------------------------------------
+  {
+    name: "create_production_run",
+    description:
+      "Create a production run for a design. Sensitive: requires confirm:true. The run starts in 'pending_review' — partners are assigned later via approve_production_run, not here.\n\n⚠️ Upstream dependencies are NOT set here, and the omission is deliberate. A run only waits on anything once it is `approved` — the release subscriber's candidate set is `status: 'approved'` — so a dependency written onto this 'pending_review' parent would never be read. Declare it per assignment on approve_production_run, or add it afterwards with update_production_run.",
+    method: "POST",
+    path: "/admin/production-runs",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "design_id",
+      "partner_id",
+      "quantity",
+      "run_type",
+      "product_id",
+      "variant_id",
+      "order_id",
+      "order_line_item_id",
+      "metadata",
+      "materials",
+      "planned_output",
+    ],
+    inputSchema: obj(
+      {
+        design_id: STR("Design id to produce (required)."),
+        partner_id: STR("Optional partner to pre-assign."),
+        quantity: { type: "number", description: "Units to produce (defaults to 1)." },
+        run_type: STR("'production' (default) | 'sample'."),
+        product_id: STR("Optional linked product id."),
+        variant_id: STR("Optional linked variant id."),
+        order_id: STR("Optional originating order id."),
+        order_line_item_id: STR("Optional originating order line item id."),
+        metadata: { type: "object", description: "Optional key/value metadata." },
+        materials: RUN_MATERIALS_PARAM,
+        planned_output: RUN_PLANNED_OUTPUT_PARAM,
+      },
+      ["design_id"]
+    ),
+    sideEffects: "Creates a run in 'pending_review'. It does no work until it is approved.",
+    nextSteps: ["approve_production_run", "get_production_run"],
+  },
+  {
+    name: "update_production_run",
+    description:
+      "Update a production run's quantity, role, run type, assigned materials, partner cost estimate, what it waits on (goods via depends_on_inventory_order_ids, other runs via depends_on_run_ids), or correct the output the partner reported (produced_quantity / rejected_quantity). Sensitive: requires confirm:true. Structural edits (quantity/role/run_type) are REJECTED once the run has been accepted or started, and any edit is rejected on a cancelled run — but output corrections are allowed precisely BECAUSE the run is completed. Use dry_run to see the current run first.",
+    method: "POST",
+    path: "/admin/production-runs/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/production-runs/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "quantity",
+      "role",
+      "run_type",
+      "partner_cost_estimate",
+      "cost_type",
+      "produced_quantity",
+      "rejected_quantity",
+      "correction_reason",
+      "materials",
+      "depends_on_inventory_order_ids",
+      "depends_on_run_ids",
+      "dispatch_template_ids",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        quantity: {
+          type: "number",
+          description:
+            "New ORDERED quantity (pre-acceptance only). This is what was asked for — to correct what was actually MADE, use produced_quantity instead.",
+        },
+        role: STR("New role for the run (pre-acceptance only)."),
+        run_type: STR("'production' | 'sample' (pre-acceptance only)."),
+        produced_quantity: {
+          type: "number",
+          description:
+            "Correct the number of good pieces the partner reported making. Partners self-report this at completion and do over-report. Editable after completion. Feeds cost-per-unit, the design cost engine, goods-transfer quantities and the public production story, so pass correction_reason too.",
+        },
+        rejected_quantity: {
+          type: "number",
+          description: "Correct the number of rejected pieces the partner reported.",
+        },
+        correction_reason: STR(
+          "Why the reported output is being corrected (e.g. 'physical count was 3'). Recorded on the run's activity timeline alongside the before/after values."
+        ),
+        partner_cost_estimate: {
+          type: "number",
+          description:
+            "Partner cost estimate. REQUIRES cost_type alongside it unless the run already carries one — the route refuses a cost with no type, because 'per_unit' and 'total' differ by the run quantity and a per-piece rate stored as a total is paid once. Note: the dispatcher drops null arguments, so this tool can set a cost but not clear one — clear it from the admin UI.",
+        },
+        cost_type: STR(
+          "How partner_cost_estimate is expressed: 'per_unit' (a rate per finished piece — multiply by quantity to get the payout) or 'total' (the whole run). Send it whenever you send a cost; there is no safe default, and the run's stored default is 'total'."
+        ),
+        materials: {
+          ...RUN_MATERIALS_PARAM,
+          description:
+            RUN_MATERIALS_PARAM.description +
+            " REPLACES the run's whole allocation — it is not merged, so send the complete list. Send [] to clear it and make the run unconstrained again. ADD-ONLY once the partner has accepted or started (#2111): you may issue MORE material to a running job, but removing an item, lowering a quantity or changing its location is refused. Before acceptance it is freely replaceable.",
+        },
+        depends_on_inventory_order_ids: {
+          ...RUN_INVENTORY_DEPENDENCY_PARAM,
+          description:
+            RUN_INVENTORY_DEPENDENCY_PARAM.description +
+            "\n\nOn THIS tool: REPLACES the whole list, and `[]` clears it — which is how you unblock a run by hand when the supply order is cancelled rather than delivered. Pre-acceptance only, and for a stronger reason than the other frozen fields: the dependency is read ONLY at dispatch and at release (candidates limited to `approved`), so setting one on a started or completed run would record a wait nothing will ever read.",
+        },
+        depends_on_run_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Other PRODUCTION RUNS this run waits on (prod_run_ ids — the partner's CHILD run, not the parent). The run stays approved and undispatched until every listed run is `completed`, then dispatches itself with its recorded templates — or, if it has none, a person is told to dispatch it by hand. The upstream may sit under ANY parent.\n\nUse it for stages on the SAME pieces in sequence (embroider → stitch), which assignment `order` cannot express because it splits pieces between partners. REPLACES the whole list; `[]` clears it.\n\nRefused: a run waiting on itself, an id that is not a run, a CANCELLED run (it never completes), and anything that makes a loop. Pre-acceptance only. ⚠️ If every listed run is ALREADY completed, saving this dispatches the run immediately and messages its partner — the response's `dependency_release` says so.",
+        },
+        dispatch_template_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Task template IDS (from list_task_templates) this run will be dispatched with when its waits are met. Without them a released run lands as 'ready, dispatch by hand' and an admin is notified instead — so set them together with depends_on_run_ids for a hand-over that needs nobody. Only while the run is approved and not yet dispatched; unknown ids are refused. ⚠️ If the run's waits are ALREADY met, saving this dispatches it immediately and messages its partner.",
+        },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "approve_production_run",
+    description:
+      "Approve a production run and assign partners to it. THIS is where partner assignment happens: each assignment fans out a child run, and children carrying template_names are auto-dispatched. Sensitive: requires confirm:true. Use dry_run to see the current run first.",
+    method: "POST",
+    path: "/admin/production-runs/:id/approve",
+    pathParams: ["id"],
+    previewPath: "/admin/production-runs/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["assignments"],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        assignments: {
+          type: "array",
+          description:
+            "Partner assignments. Each: { partner_id (required), role?, quantity?, order? (dispatch sequence), template_ids?/template_names? (task templates to auto-dispatch; omit or null for none), materials? (the subset of the design's inventory THIS partner is sent) }. Different partners can be given different materials from the same design — that is what makes this an assignment rather than a copy of the design.",
+          items: obj(
+            {
+              partner_id: STR("Partner to assign (required)."),
+              role: STR("Role this partner plays in the run."),
+              quantity: { type: "number", description: "Units for this partner." },
+              order: {
+                type: "integer",
+                description:
+                  "Dispatch sequence position — and the ONLY way to express a run-to-run dependency. Approval turns it into `depends_on_run_ids`: every child at order N waits on every child at the order below it, met at `completed`. `order` SPLITS the pieces between partners; for two partners working the SAME pieces in turn (embroider, then stitch), create the runs and then attach the wait with update_production_run's depends_on_run_ids.",
+              },
+              template_names: {
+                type: "array",
+                items: { type: "string" },
+                description: "Task templates to instantiate and auto-dispatch for this partner. A name may match two templates, and dispatch REFUSES an ambiguous one — prefer template_ids.",
+              },
+              template_ids: {
+                type: "array",
+                items: { type: "string" },
+                description: "The same selection BY ID, and the preferred form (#1268): an id survives a rename and cannot be ambiguous. Wins over template_names when both are sent.",
+              },
+              materials: RUN_MATERIALS_PARAM,
+              depends_on_inventory_order_ids: RUN_INVENTORY_DEPENDENCY_PARAM,
+            },
+            ["partner_id"]
+          ),
+        },
+      },
+      ["id"]
+    ),
+    sideEffects: "Creates one child run per assignment and auto-dispatches those with template_names — skipped for the WHOLE batch if any child carries an upstream edge (an assignment `order`, or depends_on_inventory_order_ids), because those must be sequenced rather than started together.",
+    nextSteps: ["send_production_run_to_production", "start_production_run_dispatch"],
+  },
+  {
+    name: "send_production_run_to_production",
+    description:
+      "Instantiate task templates on an approved production run — this creates the partner's tasks and hands the run over. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/production-runs/:id/send-to-production",
+    pathParams: ["id"],
+    previewPath: "/admin/production-runs/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["template_names", "template_ids"],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        template_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Task template IDS to instantiate — PREFERRED, and the only way to pick between two same-named templates. Get them from list_task_templates. Wins over template_names.",
+        },
+        template_names: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Task template names to instantiate. ⚠️ A name that matches MORE THAN ONE template (e.g. 'Stitching', which exists in both Pre Production and Production) is REJECTED — the dispatch fails and nothing is created. Use template_ids for those.",
+        },
+      },
+      ["id"]
+    ),
+    sideEffects: "Creates partner tasks from the templates and notifies the assigned partner.",
+  },
+  {
+    name: "list_task_templates",
+    description:
+      "List the task templates available to dispatch a production run with, ORGANISED BY CATEGORY — the catalogue of process steps. Categories are the real structure: 'Pre Production' (Sampling, Cutting, Measurement, Stitching, Embroidery and Painting), 'Production' (Research, Pattern Cutting, Stitching, Quality Check, Block Printing), 'Design Orders' and 'Partner Orders' (the partner-* lifecycle templates). Every tool that takes template_names needs names FROM HERE: a name that does not exist fails the dispatch with 'Missing task templates'. Use it to show the user a real choice instead of guessing. ⚠️ A NAME ALONE MAY NOT IDENTIFY A TEMPLATE — 'Stitching' exists in BOTH Pre Production and Production, and they are different steps. Always read `category.name` alongside the name, present the category to the user when a name is duplicated, and narrow with category_name when you know which stage you mean.",
+    method: "GET",
+    path: "/admin/task-templates",
+    // ONLY the filters the handler actually forwards. `limit`, `offset`,
+    // `fields` and `expand` are accepted by the route and then DROPPED —
+    // listTaskTemplatesStep discards `input.config` — so declaring them would
+    // silently ignore the model's paging, the same defect as #1172. The route
+    // returns every template.
+    queryParams: ["name", "priority", "category_id", "category_name"],
+    inputSchema: obj({
+      name: STR(
+        "Exact template name. Omit to get every template — the list is small and unpaginated."
+      ),
+      category_name: STR(
+        "Only templates in this category, BY NAME: 'Pre Production' | 'Production' | 'Design Orders' | 'Partner Orders' | 'Research'. The way to disambiguate a name that exists in more than one category."
+      ),
+      priority: STR("Filter by priority: 'low' | 'medium' | 'high'."),
+      category_id: STR(
+        "Only templates in this category, by id. Prefer category_name unless you already hold an id."
+      ),
+    }),
+    nextSteps: [
+      "redispatch_parked_production_runs",
+      "send_production_run_to_production",
+      "resume_production_run_dispatch",
+    ],
+  },
+  {
+    name: "create_task_template",
+    description:
+      "Create a task template — a reusable process step that production-run dispatch can attach to a run. Use it when the work a run needs has no template yet (a photoshoot stage, a new finishing service), because dispatch resolves templates BY NAME and a name that does not exist fails the whole dispatch with 'Missing task templates'. 🔑 ALWAYS call list_task_templates first: 23+ already exist, names are not unique across categories, and creating a near-duplicate ('Stitching' when 'Stitching (Pre Production)' is what you meant) makes every later dispatch ambiguous. Give the template a `category_id` from that listing when the category already exists. ⚠️ If it does NOT exist, pass `category` (a NAME) instead and the route CREATES it — `checkCategory` looks the name up and creates a category when nothing matches. That is real power and a real hazard: a name that differs by so much as a space ('Photoshoot' when 'Photo Shoot' exists) silently creates a SECOND category and splits the taxonomy, and nothing over HTTP can merge or rename them afterwards (the categories route is read-only). So call list_task_templates first and reuse an EXACT existing name; pass `category` only when you have confirmed the category is genuinely absent. Cost and duration are what make a step accountable rather than a checkbox: `estimated_cost` + `cost_currency` and `estimated_duration` (MINUTES) are copied onto every task dispatched from it. ⚠️ `required_fields` must be an OBJECT here — the route's validator declares `z.record`, so the ARRAY form used by the in-process seeds (ship-to-next-location, the photoshoot templates) is REJECTED with a 400. A template needing array-shaped field configs has to be seeded, not created here. [sensitive: requires confirm:true]",
+    method: "POST",
+    path: "/admin/task-templates",
+    bodyParams: [
+      "name",
+      "description",
+      "category",
+      "category_id",
+      "estimated_duration",
+      "estimated_cost",
+      "cost_currency",
+      "priority",
+      "required_fields",
+      "eventable",
+      "notifiable",
+      "message_template",
+      "metadata",
+    ],
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        name: STR(
+          "The template's name. This is the DISPATCH KEY — runs are dispatched by name, so make it unambiguous across categories (prefer 'Stitching (Finishing)' over 'Stitching'). Required."
+        ),
+        description: STR(
+          "What the step actually involves, written for the partner who will do it. Required by the route — not optional."
+        ),
+        category: STR(
+          "The category this step belongs to, BY NAME — use this only when the category does not exist yet, because the route CREATES it when no category matches the name. Match an existing name EXACTLY or you create a duplicate that cannot be merged over HTTP. Ignored when category_id is given and resolves."
+        ),
+        category_id: STR(
+          "The category this step belongs to, from list_task_templates' `category.id`. Prefer this whenever the category already exists — an id cannot typo into a new category the way a name can. Omit both only for a deliberately uncategorised step."
+        ),
+        estimated_duration: INT(
+          "Expected hands-on time in MINUTES — not hours, and not elapsed/transit time. Copied onto each dispatched task."
+        ),
+        estimated_cost: {
+          type: "number",
+          description:
+            "Default cost of this step, per task, in `cost_currency`. Omit for our own time rather than sending 0 — a 0 asserts the step is free, which is a different claim from 'not costed'.",
+        },
+        cost_currency: STR(
+          "Currency of estimated_cost, e.g. 'INR'. Send it whenever estimated_cost is set; a cost with no currency cannot be added up."
+        ),
+        priority: STR("'low' | 'medium' | 'high'. Defaults to 'medium'."),
+        required_fields: {
+          type: "object",
+          description:
+            "Field configuration the task collects, as an OBJECT keyed by field name. ⚠️ An ARRAY is rejected by the validator (see the tool description) even though the seeded templates carry one.",
+          additionalProperties: true,
+        },
+        eventable: BOOL("Whether completing this task emits an event."),
+        notifiable: BOOL("Whether this task notifies the assignee."),
+        message_template: STR(
+          "Notification body, with {{placeholders}} — e.g. 'Order {{order_id}} has been sent to partner.'"
+        ),
+        metadata: {
+          type: "object",
+          description:
+            "Free-form template metadata. Conventionally carries `entity` (what it attaches to, e.g. 'production_run') and, for a step the partner UI renders a real form for, `action` + `endpoint`.",
+          additionalProperties: true,
+        },
+      },
+      ["name", "description"]
+    ),
+    sideEffects:
+      "Creates a task template that becomes dispatchable by name immediately. It is not attached to any run until a dispatch names it.",
+    nextSteps: ["list_task_templates", "send_production_run_to_production"],
+  },
+  {
+    name: "assign_production_run_partner",
+    description:
+      "Assign — or RE-assign — one production run to a partner. The single-run counterpart to redispatch_parked_production_runs, and the only way a run parked in 'awaiting_reassignment' gets back out. Unlike that batch tool this takes an explicit partner_id, so it can send the run somewhere NEW as well as back to the partner who let it lapse; pass the same partner to mean 'send it to them again'. 🔴 THE RUN LANDS ON `approved`, NOT `sent_to_partner` — nothing is messaged and no tasks are created by this call. Dispatch is what collects templates and templates are what seed the partner's tasks, so the next step is send_production_run_to_production (or redispatch_parked_production_runs, which does assign + dispatch in one). ⚠️ update_production_run deliberately does NOT forward partner_id: ownership moves through this guarded route, which runs the assignment workflow, checks the policy's assign_partner_from list and records the change on the run's activity feed. Refused once a run has been accepted or reached a terminal state. [sensitive: requires confirm:true]",
+    method: "POST",
+    path: "/admin/production-runs/:id/assign-partner",
+    pathParams: ["id"],
+    previewPath: "/admin/production-runs/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["partner_id", "note"],
+    inputSchema: obj(
+      {
+        id: STR("Production run id, e.g. 'prod_run_...'."),
+        partner_id: STR(
+          "The partner to give the run to, e.g. '01M20A7X...'. May be the partner it was already parked from — that is the ordinary 'they say they will take it now' case. Required."
+        ),
+        note: STR(
+          "Why, in a human's words. Recorded on the run's activity feed, so it is what a later session reads when it asks why ownership moved. Max 500 characters."
+        ),
+      },
+      ["id", "partner_id"]
+    ),
+    sideEffects:
+      "Sets partner_id, moves the run to `approved`, clears the parked cancellation reason and resets reassign_retry_count, keeping the prior owner on previous_partner_id. Tells the partner NOTHING on its own — dispatch does that.",
+    nextSteps: [
+      "send_production_run_to_production",
+      "redispatch_parked_production_runs",
+    ],
+  },
+  {
+    name: "redispatch_parked_production_runs",
+    description:
+      "Re-send production runs parked in 'awaiting_reassignment' back to the PARTNER THEY CAME FROM, and dispatch them again — the batch answer to 'this partner says they'll take their lapsed runs now'. Each run goes to its own previous_partner_id; partner_id only FILTERS which parked runs are considered, so this can never hand one partner's work to another. THE DRY-RUN RECOVERS WHAT EACH RUN WAS DISPATCHED WITH LAST TIME (from its own tasks) and lists every available template, so you can show the user a real selection instead of asking them to remember: read `would_redispatch[].previous_template_names` and `available_template_names`. Then confirm with use_previous_templates:true to send each run back with ITS OWN set (parked runs usually do NOT share one), or template_names/template_ids to override them all. Recovered history dispatches by template ID where it identified one, so a run that used 'Stitching (Production)' cannot come back as 'Stitching (Pre Production)'; a run that would go out on an AMBIGUOUS name is reported as would_fail_on_ambiguous_name and must be given template_ids. Dry-run by default. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/production-runs/redispatch-parked",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "partner_id",
+      "template_names",
+      "template_ids",
+      "use_previous_templates",
+      "limit",
+      "note",
+      "dry_run",
+      "confirm",
+    ],
+    inputSchema: obj({
+      partner_id: STR(
+        "Only consider runs parked FROM this partner. Omit for every parked run."
+      ),
+      template_names: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Dispatch EVERY selected run with these templates, overriding recovered history. Use only when the runs really should share one set — otherwise prefer use_previous_templates. ⚠️ An ambiguous name is REJECTED at dispatch; use template_ids for those.",
+      },
+      template_ids: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "The same override BY ID — unambiguous, and what to use when a name matches two templates. Wins over template_names. Ids come from list_task_templates or the dry-run's available_templates_by_category[].templates[].id.",
+      },
+      use_previous_templates: {
+        type: "boolean",
+        description:
+          "Dispatch each run with the templates IT used last time, recovered per run from its own tasks. The safe way to re-send a mixed batch end-to-end.",
+      },
+      limit: { type: "integer", description: "Cap how many runs are re-sent." },
+      note: STR("Admin note recorded on each run's activity feed."),
+      dry_run: {
+        type: "boolean",
+        description: "Default true — preview which runs would be re-sent.",
+      },
+      confirm: { type: "boolean", description: "Required to actually re-send." },
+    }),
+    sideEffects:
+      "Assigns each run to its previous partner and starts dispatch, which notifies the partner. Runs dispatched with no template selection (neither template_names nor a recoverable history under use_previous_templates) stay in 'awaiting_templates' until resume_production_run_dispatch is called with the returned transaction_id.",
+    nextSteps: [
+      "list_task_templates",
+      "resume_production_run_dispatch",
+      "list_production_runs",
+    ],
+  },
+  {
+    name: "start_production_run_dispatch",
+    description:
+      "Begin the interactive dispatch of a production run. Returns a transaction_id and PARKS the workflow with the run in 'awaiting_templates' — you MUST follow up with resume_production_run_dispatch or the run stays stuck. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/production-runs/:id/start-dispatch",
+    pathParams: ["id"],
+    previewPath: "/admin/production-runs/:id",
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Production run id.") }, ["id"]),
+    sideEffects: "Leaves the run parked in dispatch_state 'awaiting_templates' until resume_production_run_dispatch is called with the returned transaction_id.",
+    nextSteps: ["resume_production_run_dispatch"],
+  },
+  {
+    name: "resume_production_run_dispatch",
+    description:
+      "Complete a parked dispatch by supplying the chosen task templates. Requires the transaction_id returned by start_production_run_dispatch. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/production-runs/:id/resume-dispatch",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["template_names", "template_ids", "transaction_id"],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        template_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Task template IDS to dispatch — PREFERRED. The only unambiguous selection; wins over template_names.",
+        },
+        template_names: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Task template names to dispatch. ⚠️ An ambiguous name (one matching several templates, like 'Stitching') is REJECTED rather than guessed at — pass template_ids instead.",
+        },
+        transaction_id: STR("The transaction_id returned by start_production_run_dispatch (required)."),
+      },
+      ["id", "transaction_id"]
+    ),
+  },
+  {
+    name: "cancel_production_run",
+    description:
+      "Cancel a production run, its open tasks and all of its child runs. PLATFORM-DESTRUCTIVE: requires confirm:true AND a human reason, and is only available when ADMIN_MCP_ENABLE_DANGEROUS is enabled. Cascades to the parent run when every sibling is terminal. Always dry_run first.",
+    method: "POST",
+    path: "/admin/production-runs/:id/cancel",
+    pathParams: ["id"],
+    previewPath: "/admin/production-runs/:id",
+    write: true,
+    dangerous: true,
+    // The dangerous rail's `reason` doubles as the route's cancellation reason:
+    // it is injected onto the schema by buildToolInputSchema and picked up here
+    // as a body param, so the audited "why" is what gets persisted on the run.
+    bodyParams: ["reason"],
+    inputSchema: obj({ id: STR("Production run id to cancel.") }, ["id"]),
+    sideEffects: "Cancels the run's non-terminal tasks, cascades to child runs, mirrors the state to the unified order and emits production_run.cancelled. Cancelled runs are terminal — they cannot be reopened.",
+  },
+  {
+    name: "update_production_run_task",
+    description:
+      "Update a task on a production run (title, description, status, priority, dates). Sensitive: requires confirm:true. Use dry_run to see the current task first. NOTE: this route does not validate enums server-side — only send the documented values.",
+    method: "POST",
+    path: "/admin/production-runs/:id/tasks/:taskId",
+    pathParams: ["id", "taskId"],
+    previewPath: "/admin/production-runs/:id/tasks/:taskId",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "title",
+      "description",
+      "status",
+      "priority",
+      "start_date",
+      "end_date",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        taskId: STR("Task id, e.g. 'task_...'."),
+        title: STR("New title."),
+        description: STR("New description."),
+        status: STR(
+          "New status — one of exactly: 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'accepted' | 'blocked'."
+        ),
+        priority: STR("New priority — one of exactly: 'low' | 'medium' | 'high'."),
+        start_date: STR("New start date (ISO string)."),
+        end_date: STR("New due date (ISO string)."),
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id", "taskId"]
+    ),
+  },
+  {
+    name: "update_production_run_policy",
+    description:
+      "Replace the platform-wide production-run policy config (which statuses each lifecycle transition is allowed from). This is a FULL REPLACE, not a merge, and it affects every run on the platform. Sensitive: requires confirm:true. Always call get_production_run_policy and dry_run first.",
+    method: "PUT",
+    path: "/admin/production-run-policy",
+    previewPath: "/admin/production-run-policy",
+    write: true,
+    sensitive: true,
+    bodyParams: ["config"],
+    inputSchema: obj(
+      {
+        config: {
+          type: "object",
+          description:
+            "The COMPLETE replacement policy config, e.g. { transitions: { approve_from: [...], dispatch_from: [...] } }. Read the current one with get_production_run_policy and send it back with your edits applied.",
+        },
+      },
+      ["config"]
+    ),
+    sideEffects: "Overwrites the singleton policy for ALL production runs; omitted keys are lost, not preserved.",
+  },
+
+  // ===== Design ORDERS (#1970 PR10): the create half ======================
+  // A "design order" is not an entity — it is a CART carrying custom-priced
+  // design line items, shared with the buyer as a link they agree to before it
+  // becomes an order. Until now the whole create half was invisible here: the
+  // agent could read an order's designs and send them to production, but could
+  // not create the order, attach the buyer, price it, or convert it. Every one
+  // of those was admin-UI-only, so an operator asking for a design order over
+  // chat had to be sent to a screen.
+  //
+  // 🔴 The buyer lives in TWO places — the design↔customer link AND
+  // `cart.customer_id` — and the detail read falls back between them, so a
+  // write that touches one side leaves an order that reads as owned on screen
+  // and checks out ANONYMOUS (or the reverse). `attach_design_order_customer`
+  // wraps the route that writes both, cart first. Never write one side by hand.
+  {
+    name: "list_design_orders",
+    description:
+      "List design orders — the carts carrying custom-priced design line items, each with its buyer (if attached), price and whether it has been converted to a real order yet. Start here to find a `lineItemId` for the mutation tools below.",
+    method: "GET",
+    path: "/admin/designs/orders",
+    queryParams: ["limit", "offset"],
+    inputSchema: obj({
+      limit: INT("Max results (default 20)."),
+      offset: INT("Pagination offset."),
+    }),
+    nextSteps: ["get_design_order", "attach_design_order_customer"],
+  },
+  {
+    name: "get_design_order",
+    description:
+      "Get one design order by its LINE ITEM id: the design behind it, the buyer resolved across all three sources (design↔customer link, cart.customer_id, the converted order's customer), the price, and whether it is converted. Read this before any mutation — the mutation tools refuse a converted order with 409.",
+    method: "GET",
+    path: "/admin/designs/orders/:lineItemId",
+    pathParams: ["lineItemId"],
+    inputSchema: obj(
+      {
+        lineItemId: STR(
+          "The design order's CART line item id (starts `cali_`), from list_design_orders. Not an order line item (`ordli_`) and not a cart id."
+        ),
+      },
+      ["lineItemId"]
+    ),
+  },
+  {
+    name: "preview_design_order",
+    description:
+      "Price a design order WITHOUT creating anything: what each selected design would cost, in which currency, and the order total. Read-only and free of side effects — use it to check a price before `create_design_order`, especially when passing `price_overrides`.",
+    method: "POST",
+    path: "/admin/designs/draft-order/preview",
+    bodyParams: [
+      "design_ids",
+      "currency_code",
+      "price_overrides",
+      "override_currency",
+      "country_code",
+    ],
+    inputSchema: obj(
+      {
+        design_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Designs to price into one order.",
+        },
+        currency_code: STR(
+          "Currency for the order, e.g. 'inr'. Defaults to the house store's default."
+        ),
+        price_overrides: {
+          type: "object",
+          description:
+            "Per-design unit price override, as { design_id: price } in MAJOR units. Use when the agreed price is not the design's estimated cost.",
+        },
+        override_currency: STR(
+          "Currency that `price_overrides` are expressed in. Defaults to the store default — set it whenever you set overrides, or the number is valued by one currency and labelled by another."
+        ),
+        country_code: STR(
+          "ISO-2 country the buyer purchases from, e.g. 'se'. 🔑 SET IT. The cart carries the country, and without one `resolveCartCheckoutLink` refuses to build a link at all — the order is created and `checkout_url` comes back null. A hand-written URL does not rescue it either: the storefront re-resolves the region from the cart and a Swedish buyer lands on /al/. Must be a country the order's own region serves."
+        ),
+      },
+      ["design_ids"]
+    ),
+    nextSteps: ["create_design_order"],
+  },
+  {
+    name: "create_design_order",
+    description: [
+      "Collate one or more designs into a single design order (a draft cart the buyer agrees to before it becomes an order). Sensitive: requires confirm:true. Run `preview_design_order` first to see the price.",
+      "",
+      "🔑 The buyer is OPTIONAL and leaving it off is ordinary — a design order with no customer is a draft somebody is attached to later, at checkout or when the order is claimed. What is NOT ordinary is a cart attached to the WRONG customer, so never pass a `customer_id` you are not sure of; attach it afterwards with `attach_design_order_customer`.",
+      "",
+      "⚠️ Passing a `customer_id` attaches the buyer AND sends them the design-order email with a checkout link. Do not pass one unless the operator has said the customer should be emailed.",
+      "",
+      "🔑 Pass `country_code`. Without it the cart names no country, `checkout_url` comes back null and the buyer cannot be sent anywhere — which then needs the `set-design-order-country` maintenance job to repair by hand. This is what happened to the €91 EUR order minted 2026-09-19.",
+      "",
+      "Refuses designs that are already in an open checkout rather than creating a second cart for them.",
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/designs/draft-order",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "design_ids",
+      "customer_id",
+      "currency_code",
+      "price_overrides",
+      "override_currency",
+      "country_code",
+    ],
+    inputSchema: obj(
+      {
+        design_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Designs to collate into ONE order.",
+        },
+        customer_id: STR(
+          "Optional buyer. Attaching one here also EMAILS them a checkout link — omit it to create the order unattached and decide separately."
+        ),
+        currency_code: STR(
+          "Currency for the order, e.g. 'inr'. Defaults to the house store's default."
+        ),
+        price_overrides: {
+          type: "object",
+          description:
+            "Per-design unit price override, as { design_id: price } in MAJOR units.",
+        },
+        override_currency: STR(
+          "Currency that `price_overrides` are expressed in. Set it whenever you set overrides."
+        ),
+        country_code: STR(
+          "ISO-2 country the buyer purchases from, e.g. 'se'. 🔑 SET IT. The cart carries the country, and without one `resolveCartCheckoutLink` refuses to build a link at all — the order is created and `checkout_url` comes back null. A hand-written URL does not rescue it either: the storefront re-resolves the region from the cart and a Swedish buyer lands on /al/. Must be a country the order's own region serves."
+        ),
+      },
+      ["design_ids"]
+    ),
+    sideEffects:
+      "Creates a cart with one custom-priced line item per design. With a customer_id, also attaches the buyer and emails them a checkout link.",
+    nextSteps: ["get_design_order", "attach_design_order_customer"],
+  },
+  {
+    name: "attach_design_order_customer",
+    description: [
+      "Attach a buyer to an existing design order, or DETACH one by sending `customer_id: null`. Sensitive: requires confirm:true.",
+      "",
+      "🔑 Writes BOTH sides — `cart.customer_id` and the design↔customer link — cart first. The detail read falls back between them, so a one-sided write leaves an order that reads as owned on screen and checks out ANONYMOUS. This is the only correct way to set a design order's buyer.",
+      "",
+      "The link is a list on both sides, so attaching also dismisses stale buyer links rather than accumulating them — otherwise the reader takes row [0] and whose order it is becomes a lottery.",
+      "",
+      "Refuses a CONVERTED design order with 409: once the order exists, change the customer on the order itself. Surface that message verbatim — a generic failure leaves an operator retrying something that can never succeed.",
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/designs/orders/:lineItemId/customer",
+    pathParams: ["lineItemId"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["customer_id"],
+    inputSchema: obj(
+      {
+        lineItemId: STR("The design order's cart line item id (`cali_...`)."),
+        customer_id: STR(
+          "Customer to attach. Send null to DETACH the buyer. Required — omitting it is an error, not a detach."
+        ),
+      },
+      ["lineItemId"]
+    ),
+    sideEffects:
+      "Sets the cart's customer and email, and replaces the design's customer link.",
+    nextSteps: ["get_design_order", "convert_design_order"],
+  },
+  {
+    name: "reprice_design_order",
+    description: [
+      "Set the agreed unit price on a design order's line. Sensitive: requires confirm:true. Major units, in the cart's OWN currency.",
+      "",
+      "🔑 There is no currency argument on purpose — the cart's region fixes the currency, and a price entered in a different one would be valued by one number and labelled by another.",
+      "",
+      "Design lines are `is_custom_price: true`, so nothing ever recalculates them: a wrong price stays wrong until somebody writes it again. Refuses anything that is not > 0, because `Number(null)` and `Number(\"\")` are both 0 and a missing field must not arrive looking like a deliberate zero.",
+      "",
+      "Refuses a CONVERTED design order with 409: reprice it through an order edit, not the cart.",
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/designs/orders/:lineItemId/reprice",
+    pathParams: ["lineItemId"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["unit_price"],
+    inputSchema: obj(
+      {
+        lineItemId: STR("The design order's cart line item id (`cali_...`)."),
+        unit_price: {
+          type: "number",
+          description:
+            "The agreed unit price, in MAJOR units of the cart's own currency. Must be greater than 0.",
+        },
+      },
+      ["lineItemId", "unit_price"]
+    ),
+    sideEffects: "Overwrites the agreed price on the design order's line item.",
+    nextSteps: ["get_design_order", "convert_design_order"],
+  },
+  {
+    name: "convert_design_order",
+    description: [
+      "Turn a design order (a cart) into a REAL order, admin-side, without routing the customer through checkout. Sensitive: requires confirm:true.",
+      "",
+      "`payment_mode: \"prepaid\"` (the default) marks the order paid via the system provider — use it when the money has already arrived. `\"cod\"` leaves it unpaid, to be reconciled on remittance.",
+      "",
+      "🔑 Converting does NOT start production. Every item is stamped `no_auto_produce`, so placement creates no runs — producing a converted design order is an explicit step (`produce_order_designs`). That is deliberate: a customer's design order must not spawn work-orders as a side effect of being converted.",
+    ].join("\n"),
+    method: "POST",
+    path: "/admin/designs/orders/:lineItemId/convert",
+    pathParams: ["lineItemId"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["payment_mode"],
+    inputSchema: obj(
+      {
+        lineItemId: STR("The design order's cart line item id (`cali_...`)."),
+        payment_mode: {
+          type: "string",
+          enum: ["prepaid", "cod"],
+          description:
+            "'prepaid' (default) marks the order paid; 'cod' leaves it unpaid for later reconciliation.",
+        },
+      },
+      ["lineItemId"]
+    ),
+    sideEffects:
+      "Creates a real order from the cart and marks it paid when prepaid. Does NOT create production runs.",
+    nextSteps: ["list_order_designs", "produce_order_designs"],
+  },
+
+  // ===== Designs (#1166): the design -> production pipeline ==============
+  // The designs domain is large; this wraps the operationally meaningful
+  // slice — core CRUD (which is also the ONLY way to set size_sets/colors),
+  // the collated work-order read, the produce/recreate/cancel triangle, and
+  // task state. AI-generation, segmentation, outline/vectorize, moodboard and
+  // pattern-block routes are deliberately NOT wrapped: they are file-upload
+  // shaped, cost money per call, or return payloads (SVG documents, Excalidraw
+  // scenes) that would blow the chat context.
+  {
+    name: "list_design_work_orders",
+    description:
+      "List collated design work-orders — each with its per-design production runs, the designs themselves and the assigned partners. One work-order collates the N runs of a commissioning order, so this is where 'this order has several runs' is visible. The single best read for 'what is in production right now'. Pass source_order_id to go from a CUSTOMER order to the work-order it produced, or id to fetch just one.",
+    method: "GET",
+    path: "/admin/design-work-orders",
+    queryParams: [
+      "limit",
+      "offset",
+      "id",
+      "source_order_id",
+      "partner_id",
+      "run_status",
+    ],
+    inputSchema: obj({
+      limit: { type: "integer", description: "Max results (default 20)." },
+      offset: { type: "integer", description: "Pagination offset." },
+      id: STR("Fetch a single work-order by its order id."),
+      source_order_id: STR(
+        "The COMMISSIONING order the work-order was collated from — the bridge from a customer order to its work-order. (Going the other way, from a work-order to its runs, is list_production_runs with work_order_id.)"
+      ),
+      partner_id: STR("Only work-orders with at least one run assigned to this partner."),
+      run_status: STR(
+        "Only work-orders with at least one run in this status, e.g. 'sent_to_partner'. A work-order's runs can be in different statuses, so this is 'contains', not 'is'."
+      ),
+    }),
+  },
+  {
+    name: "list_design_revisions",
+    description:
+      "Get a design's full revision lineage (ancestors, current, descendants). Use to explain why a design is 'Superseded' or to find the live revision.",
+    method: "GET",
+    path: "/admin/designs/:id/revisions",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Design id, e.g. 'design_...'.") }, ["id"]),
+  },
+  {
+    name: "list_design_inventory",
+    description:
+      "List the inventory items linked to a design (its bill of materials) with planned quantities.",
+    method: "GET",
+    path: "/admin/designs/:id/inventory",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Design id, e.g. 'design_...'.") }, ["id"]),
+  },
+  {
+    name: "list_design_tasks",
+    description: "List the tasks attached to a design.",
+    method: "GET",
+    path: "/admin/designs/:id/tasks",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Design id, e.g. 'design_...'.") }, ["id"]),
+  },
+  {
+    name: "get_design_task",
+    description: "Get a single task on a design by task id.",
+    method: "GET",
+    path: "/admin/designs/:id/tasks/:taskId",
+    pathParams: ["id", "taskId"],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        taskId: STR("Task id, e.g. 'task_...'."),
+      },
+      ["id", "taskId"]
+    ),
+  },
+
+  // ---- Design writes ------------------------------------------------------
+  {
+    name: "create_design",
+    description:
+      "Create a new design. Sensitive: requires confirm:true. A name is enough; everything else can be filled in later with update_design.",
+    method: "POST",
+    path: "/admin/designs",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "name",
+      "description",
+      "design_type",
+      "product_type",
+      "status",
+      "priority",
+      "target_completion_date",
+      "tags",
+      "designer_notes",
+      "estimated_cost",
+      "cost_currency",
+      "colors",
+      "size_sets",
+      "inspiration_sources",
+      "thumbnail_url",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        name: STR("Design name (required)."),
+        // Was required here as a workaround: omitting it used to 500 on the
+        // model's NOT NULL column. #1172 defaults it at the route, so a
+        // name-only draft is legal again — still worth sending when known.
+        description: STR("Design description. Optional; defaults to empty."),
+        design_type: STR("'Original' | 'Derivative' | 'Custom' | 'Collaboration'."),
+        product_type: STR(
+          "What the design IS — the garment category ('trousers', 'saree', 'kurta'). Distinct from design_type, which is how ORIGINAL the design is. Normalised server-side; setting it marks the type as human-set so AI inference will not overwrite it. Send null to clear it and let inference suggest one."
+        ),
+        status: STR(
+          "'Conceptual' | 'In_Development' | 'Technical_Review' | 'Sample_Production' | 'Revision' | 'Approved' | 'Rejected' | 'On_Hold' | 'Commerce_Ready' | 'Superseded'."
+        ),
+        priority: STR("'Low' | 'Medium' | 'High' | 'Urgent'."),
+        target_completion_date: STR("Target completion date (ISO string)."),
+        tags: { type: "array", items: { type: "string" }, description: "Free-form tags." },
+        designer_notes: STR("Notes for the designer."),
+        inspiration_sources: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Reference urls the design came from — a Pinterest pin, a lookbook, a supplier page. Record the link the operator gave you here rather than dropping it.",
+        },
+        thumbnail_url: STR(
+          "Url of the reference/hero image for this design (e.g. an attached photo or a pin's image url)."
+        ),
+        estimated_cost: { type: "number", description: "Estimated cost." },
+        cost_currency: STR("Currency code for estimated_cost."),
+        colors: {
+          type: "array",
+          description: "Colourway. Each: { name, hex_code, usage_notes?, order? }.",
+          items: obj(
+            { name: STR("Colour name."), hex_code: STR("Hex code, e.g. '#1A2B3C'.") },
+            ["name", "hex_code"]
+          ),
+        },
+        size_sets: {
+          type: "array",
+          description:
+            "Size sets — the source of truth for sizing. Each: { size_label, measurements: { <point>: number } }.",
+          items: obj(
+            {
+              size_label: STR("Size label, e.g. 'M'."),
+              measurements: {
+                type: "object",
+                description: "Measurement point -> numeric value.",
+              },
+            },
+            ["size_label", "measurements"]
+          ),
+        },
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["name"]
+    ),
+    nextSteps: ["get_design", "update_design", "link_design_partners"],
+  },
+  {
+    name: "update_design",
+    description:
+      "Update a design — status, priority, target date, tags, notes, colours and SIZE SETS (this route is the only way to set size_sets). Sensitive: requires confirm:true. Use dry_run to see the current design first.",
+    method: "PUT",
+    path: "/admin/designs/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/designs/:id",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "name",
+      "description",
+      "design_type",
+      "product_type",
+      "status",
+      "priority",
+      "target_completion_date",
+      "tags",
+      "designer_notes",
+      "estimated_cost",
+      "cost_currency",
+      "colors",
+      "size_sets",
+      "inspiration_sources",
+      "thumbnail_url",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        name: STR("New name."),
+        description: STR("New description."),
+        design_type: STR("'Original' | 'Derivative' | 'Custom' | 'Collaboration'."),
+        product_type: STR(
+          "What the design IS — the garment category ('trousers', 'saree', 'kurta'). Distinct from design_type, which is how ORIGINAL the design is. Normalised server-side; setting it marks the type as human-set so AI inference will not overwrite it. Send null to clear it and let inference suggest one."
+        ),
+        status: STR(
+          "'Conceptual' | 'In_Development' | 'Technical_Review' | 'Sample_Production' | 'Revision' | 'Approved' | 'Rejected' | 'On_Hold' | 'Commerce_Ready' | 'Superseded'."
+        ),
+        priority: STR("'Low' | 'Medium' | 'High' | 'Urgent'."),
+        target_completion_date: STR("New target completion date (ISO string)."),
+        tags: { type: "array", items: { type: "string" }, description: "Replacement tag list." },
+        designer_notes: STR("New designer notes."),
+        inspiration_sources: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Reference urls the design came from — a Pinterest pin, a lookbook, a supplier page. Replaces the existing list.",
+        },
+        thumbnail_url: STR("Url of the reference/hero image for this design."),
+        estimated_cost: { type: "number", description: "New estimated cost." },
+        cost_currency: STR("Currency code for estimated_cost."),
+        colors: {
+          type: "array",
+          description: "Replacement colourway. Each: { name, hex_code, usage_notes?, order? }.",
+          items: obj(
+            { name: STR("Colour name."), hex_code: STR("Hex code.") },
+            ["name", "hex_code"]
+          ),
+        },
+        size_sets: {
+          type: "array",
+          description:
+            "Replacement size sets. Each: { size_label, measurements: { <point>: number } }. This REPLACES the existing sets — send the full list.",
+          items: obj(
+            {
+              size_label: STR("Size label, e.g. 'M'."),
+              measurements: { type: "object", description: "Measurement point -> numeric value." },
+            },
+            ["size_label", "measurements"]
+          ),
+        },
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id"]
+    ),
+    sideEffects: "Setting status to 'Approved' here does NOT create a product — that is a separate approval action in the UI.",
+  },
+  {
+    name: "list_design_partners",
+    description:
+      "List a design's partner roster: each partner with its production stage (stage_role: supplier, weaving, dyeing, printing, embroidery, cutting, stitching, finishing, sampling, photoshoot; null = not chosen yet) and its relationship role (role: prospect / maker / designer / null).",
+    method: "GET",
+    path: "/admin/designs/:id/partner",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Design id, e.g. 'design_...'.") }, ["id"]),
+  },
+  {
+    name: "link_design_partners",
+    description:
+      "Add partners to a design's roster, optionally with the production stage each one does. Sends the partner NOTHING — it does not commission work. For a partner already on the roster, a given stage_role replaces theirs, null clears it, and omitting it leaves it alone. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/designs/:id/partner",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["partnerIds", "partners"],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        partnerIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Partner ids to link with no stage. Pass this or partners.",
+        },
+        partners: {
+          type: "array",
+          description: "Partners with a stage each. Pass this or partnerIds.",
+          items: {
+            type: "object",
+            properties: {
+              partner_id: STR("Partner id."),
+              stage_role: {
+                type: ["string", "null"],
+                enum: [...DESIGN_PARTNER_STAGE_ROLES, null],
+                description: "Production stage this partner does on the design; null clears it.",
+              },
+            },
+            required: ["partner_id"],
+          },
+        },
+      },
+      ["id"]
+    ),
+    nextSteps: ["create_design_production_run"],
+  },
+  {
+    name: "unlink_design_partner",
+    description:
+      "Unlink a partner from a design. Refused while that partner still has active production runs on the design — use cancel_design_partner_assignment for that. Sensitive: requires confirm:true.",
+    method: "DELETE",
+    path: "/admin/designs/:id/partner",
+    pathParams: ["id"],
+    write: true,
+    bodyParams: ["partnerId"],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        partnerId: STR("Partner id to unlink (required)."),
+      },
+      ["id", "partnerId"]
+    ),
+  },
+  {
+    name: "create_design_production_run",
+    description:
+      "Create a production run for a design and, when assignments are supplied, approve it and auto-dispatch the named task templates in one shot. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/designs/:id/production-runs",
+    pathParams: ["id"],
+    previewPath: "/admin/designs/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["quantity", "run_type", "planned_output", "assignments"],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        quantity: {
+          type: "number",
+          description:
+            "Total units. If both quantity and assignments are given, the assignment quantities MUST sum to this.",
+        },
+        run_type: STR("'production' (default) | 'sample'."),
+        planned_output: RUN_PLANNED_OUTPUT_PARAM,
+        assignments: {
+          type: "array",
+          description:
+            "Partner assignments. Each: { partner_id (required), quantity (required), role?, order?, template_names? }. Omit entirely to create an unassigned run.",
+          items: obj(
+            {
+              partner_id: STR("Partner to assign (required)."),
+              quantity: { type: "number", description: "Units for this partner (required)." },
+              role: STR("Role this partner plays."),
+              order: {
+                type: "integer",
+                description:
+                  "Dispatch sequence position — and the ONLY way to express a run-to-run dependency. Approval turns it into `depends_on_run_ids` (met at `completed`). For stages on the SAME pieces, attach the wait afterwards with update_production_run's depends_on_run_ids.",
+              },
+              template_names: {
+                type: "array",
+                items: { type: "string" },
+                description: "Task templates to auto-dispatch for this partner.",
+              },
+              depends_on_inventory_order_ids: RUN_INVENTORY_DEPENDENCY_PARAM,
+              planned_output: {
+                ...RUN_PLANNED_OUTPUT_PARAM,
+                description:
+                  "This partner's own split. Omit to inherit the run's planned_output when this assignment covers the same total.",
+              },
+            },
+            ["partner_id", "quantity"]
+          ),
+        },
+      },
+      ["id"]
+    ),
+    sideEffects: "With assignments, this also approves the run and fans out child runs — not just a draft.",
+    nextSteps: ["list_production_runs", "get_production_run"],
+  },
+  {
+    name: "produce_designs",
+    description:
+      "Send a batch of designs to one partner for production (no customer order involved): one run per design, each DISPATCHED with its own task templates, collated into a single work-order. Pass dry_run:true first to see which design gets which templates. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/designs/produce",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "design_ids",
+      "designs",
+      "partner_id",
+      "template_ids",
+      "dry_run",
+    ],
+    inputSchema: obj(
+      {
+        designs: {
+          type: "array",
+          description:
+            "Preferred. Per design: { design_id, template_ids?, quantity? }. Templates are per design — a batch rarely shares one process.",
+          items: obj(
+            {
+              design_id: STR("Design to produce."),
+              template_ids: {
+                type: "array",
+                items: { type: "string" },
+                description:
+                  "Task template IDS (not names — an ambiguous name is refused at dispatch).",
+              },
+              quantity: { type: "number", description: "Defaults to 1." },
+            },
+            ["design_id"]
+          ),
+        },
+        design_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Design ids to produce. Use with template_ids when the whole batch shares one process; otherwise prefer `designs`.",
+        },
+        partner_id: STR("Partner to assign every created run to (required)."),
+        template_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Fallback template ids for designs without their own selection. A design left with none is created but NOT dispatched, and is reported in not_dispatched.",
+        },
+        dry_run: {
+          type: "boolean",
+          description:
+            "Preview the design → templates plan and create nothing.",
+        },
+      },
+      ["partner_id"]
+    ),
+    sideEffects:
+      "Dispatches each design to the partner (creates tasks and notifies). Designs with no template selection are created without tasks and listed under not_dispatched.",
+    nextSteps: ["list_design_work_orders"],
+  },
+  {
+    name: "recreate_design_production_run",
+    description:
+      "Redo / rework: create a fresh production run for a set of designs with one partner, on top of whatever already exists. Sensitive: requires confirm:true. Use this after a run went wrong, not to make the first run.",
+    method: "POST",
+    path: "/admin/designs/recreate-production-run",
+    write: true,
+    sensitive: true,
+    bodyParams: ["designs", "partner_id", "run_type", "notes", "metadata"],
+    inputSchema: obj(
+      {
+        designs: {
+          type: "array",
+          description: "Designs to remake. Each: { design_id, quantity, notes? }.",
+          items: obj(
+            {
+              design_id: STR("Design id."),
+              quantity: { type: "number", description: "Units to remake." },
+            },
+            ["design_id", "quantity"]
+          ),
+        },
+        partner_id: STR("Partner to assign the rework to (required)."),
+        run_type: STR("'production' (default) | 'sample'."),
+        notes: STR("Why this rework is happening."),
+        metadata: { type: "object", description: "Optional key/value metadata." },
+      },
+      ["designs", "partner_id"]
+    ),
+    sideEffects: "Adds NEW runs — it does not cancel or replace the original ones. Cancel those separately if they are dead.",
+  },
+  {
+    name: "cancel_design_partner_assignment",
+    description:
+      "Back out a partner from a design: cancels that partner's production runs and open tasks on it, and optionally unlinks them. This is the safe reversal for create_design_production_run / produce_designs. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/designs/:id/cancel-partner-assignment",
+    pathParams: ["id"],
+    previewPath: "/admin/designs/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["partner_id", "unlink"],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        partner_id: STR("Partner whose assignment is being cancelled (required)."),
+        unlink: {
+          type: "boolean",
+          description: "Also unlink the partner from the design (default false).",
+        },
+      },
+      ["id", "partner_id"]
+    ),
+    sideEffects: "Cancels the partner's runs and open tasks on this design. Cancelled runs are terminal.",
+  },
+  {
+    name: "update_design_task",
+    description:
+      "Update a task on a design (title, description, status, priority, dates). Sensitive: requires confirm:true. Use dry_run to see the current task first.",
+    method: "POST",
+    path: "/admin/designs/:id/tasks/:taskId",
+    pathParams: ["id", "taskId"],
+    previewPath: "/admin/designs/:id/tasks/:taskId",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "title",
+      "description",
+      "status",
+      "priority",
+      "start_date",
+      "end_date",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        taskId: STR("Task id, e.g. 'task_...'."),
+        title: STR("New title."),
+        description: STR("New description."),
+        status: STR(
+          "New status — one of exactly: 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'accepted'."
+        ),
+        priority: STR("New priority — one of exactly: 'low' | 'medium' | 'high'."),
+        start_date: STR("New start date (ISO string)."),
+        end_date: STR("New due date (ISO string)."),
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id", "taskId"]
+    ),
+  },
+  {
+    name: "assign_design_task",
+    description:
+      "Assign a design's task to a partner and notify them. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/designs/:id/tasks/:taskId/assign",
+    pathParams: ["id", "taskId"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["taskId", "partnerId"],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        taskId: STR("Task id to assign, e.g. 'task_...'."),
+        partnerId: STR("Partner id to assign the task to (required)."),
+      },
+      ["id", "taskId", "partnerId"]
+    ),
+    sideEffects: "Links the task to the partner and notifies them.",
+  },
+
+  // ===== Images, materials and the idea -> design pipeline ================
+  // Everything here already existed as an admin route; what was missing was the
+  // assistant's ability to reach it. Two operator journeys drive the selection:
+  //   1. "here's a photo of what arrived" -> raw materials + inventory
+  //   2. "here's an idea and a reference"  -> design + attributes + construction
+  //      details + materials + partner + production run
+  {
+    name: "read_image",
+    description:
+      "Look at an image and answer a question about it (transcribe handwriting, describe a garment, read a label). Costs a real vision call and can take 30s — only use it when the operator asks, or when their request is impossible without seeing the image. Attaching an image is NOT a reason to read it.",
+    method: "POST",
+    path: "/admin/assistant/vision",
+    bodyParams: ["image_url", "prompt", "model"],
+    inputSchema: obj(
+      {
+        image_url: STR("Url of the image to read — take it from an [attachment] line."),
+        prompt: STR(
+          "The specific question to ask about the image. Be narrow: broad prompts on reasoning models can exhaust the token budget before they answer."
+        ),
+        model: STR(
+          "Optional model override, e.g. '@cf/meta/llama-4-scout-17b-16e-instruct' for a fast read or '@cf/google/gemma-4-26b-a4b-it' for an accurate one. Omit to use the configured ai_image_extraction platform."
+        ),
+      },
+      ["image_url"]
+    ),
+    sideEffects:
+      "Reads the image with a separately-configured vision model and returns text. Stores nothing and changes no records. Failures are configuration problems, not transient ones — relay the message rather than retrying.",
+  },
+  {
+    name: "create_person_from_id_card",
+    description:
+      "Read a photo of an identity document (Aadhaar, PAN, passport, driving licence, voter ID) and turn it into a person on the weaver/artisan directory. Run it WITHOUT persist first and show the operator the draft and its warnings; only persist:true with confirm:true creates a record. The ID number is stored masked to its last four digits and nothing here verifies an identity. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/people/id-extraction",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "image_url",
+      "notes",
+      "id_number_policy",
+      "persist",
+      "confirm",
+      "partner_id",
+      "person_type_ids",
+    ],
+    inputSchema: obj(
+      {
+        image_url: STR("URL or data URI of the identity document photo."),
+        notes: STR(
+          "Context from the operator, e.g. 'the card is laminated and glary on the left'."
+        ),
+        id_number_policy: {
+          type: "string",
+          enum: ["mask", "discard"],
+          description:
+            "What to keep of the document number. 'mask' (default) keeps only the last four digits; 'discard' keeps none. Storing the full number is deliberately not offered.",
+        },
+        persist: {
+          type: "boolean",
+          description:
+            "Create the person. Default false — preview the draft first, always.",
+        },
+        confirm: {
+          type: "boolean",
+          description: "Required alongside persist. Creating a person from a photograph is not undoable by the caller.",
+        },
+        partner_id: STR(
+          "Link the created person to this partner's roster."
+        ),
+        person_type_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Person-type ids to attach to the created person.",
+        },
+      },
+      ["image_url"]
+    ),
+    sideEffects:
+      "Without persist: reads the image with a vision model and returns a draft. Stores nothing. With persist+confirm: creates ONE person (and its address, best-effort) and optionally links it to a partner. The draft's warnings are the operator's only signal that a field was dropped or doubted — relay them rather than summarising them away.",
+  },
+  {
+    name: "extract_inventory_from_image",
+    description:
+      "Read a photo of fabric/trims/a delivery note and turn it into raw materials + inventory items. Run it with persist:false first to show the operator what was found; only persist:true creates records. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/ai/image-extraction",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "image_url",
+      "entity_type",
+      "notes",
+      "hints",
+      "verify",
+      "persist",
+      "defaults",
+    ],
+    inputSchema: obj(
+      {
+        image_url: STR("Url of the image to extract from."),
+        entity_type: STR(
+          "What to extract, e.g. 'raw_material' for fabric/trims or 'product'."
+        ),
+        notes: STR("Extra context for the extraction, in the operator's words."),
+        hints: {
+          type: "array",
+          items: { type: "string" },
+          description: "Hints that steer the extraction, e.g. 'metres not yards'.",
+        },
+        verify: {
+          type: "boolean",
+          description: "Ask the model to double-check its own extraction.",
+        },
+        persist: {
+          type: "boolean",
+          description:
+            "Create the raw materials and inventory items. Default false — preview first, always.",
+        },
+        defaults: {
+          type: "object",
+          description:
+            "Fallbacks for fields the image doesn't state: { notes, raw_materials: { width_inch, material_type }, inventory: { stock_location_id, default_stocked_quantity, default_incoming_quantity, incoming_from_extraction } }.",
+        },
+      },
+      ["image_url", "entity_type"]
+    ),
+    sideEffects:
+      "With persist:true, creates raw material records, inventory items and stock levels.",
+    nextSteps: ["list_raw_materials", "link_design_inventory"],
+  },
+  {
+    name: "list_raw_materials",
+    description:
+      "List raw materials (the inventory items that carry raw-material data: composition, unit of measure, unit cost).",
+    method: "GET",
+    path: "/admin/inventory-items/raw-materials",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "add_inventory_raw_material",
+    description:
+      "Attach raw-material data (composition, unit of measure, cost, material type) to an existing inventory item. Sensitive: requires confirm:true. " +
+      "🔑 Give it PHOTOS at the same time: `media` is `{ \"files\": [\"https://...jpg\"] }`. When the stock is a partner's product, reuse that product's own image URLs (get_product -> images[].url) rather than leaving it unphotographed — a material with no picture cannot be told apart from another grading of the same cloth. " +
+      "⚠️ `{ \"files\": [] }` is what a material gets when the media form is saved empty; it satisfies any `media != null` check while showing nothing, so send real URLs or omit the key. " +
+      "🔑 The free-form attribute store is `specifications` (the fabrics here use gi_status / technique / weave_type, often with comb, loom, pick, artist, weight). The `attributes` column is unused.",
+    method: "POST",
+    path: "/admin/inventory-items/:id/rawmaterials",
+    pathParams: ["id"],
+    previewPath: "/admin/inventory-items/:id",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["rawMaterialData"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory item id, e.g. 'iitem_...'."),
+        rawMaterialData: {
+          type: "object",
+          description:
+            "Required: name, composition. Optional: description, color, grade, width, weight, unit_of_measure (Meter|Yard|Kilogram|Gram|Piece|Roll|Other), unit_cost, cost_currency, minimum_order_quantity, lead_time_days, certification, usage_guidelines, storage_requirements, status (Active|Discontinued|Under_Review|Development), material_type (a category NAME, find-or-create) or material_type_id, group_id (the raw material group this colour belongs to; to group materials that already exist use link_raw_material_group_colors), metadata, specifications (the attribute store), media ({ files: [url] }).",
+        },
+      },
+      ["id", "rawMaterialData"]
+    ),
+    nextSteps: ["get_raw_material", "update_inventory_raw_material"],
+  },
+  {
+    name: "list_raw_material_groups",
+    description:
+      "List raw material groups — the colourway/spec families that designs pin their materials to.",
+    method: "GET",
+    path: "/admin/raw-material-groups",
+    queryParams: ["limit", "offset", "q"],
+    inputSchema: obj({ ...PAGINATION }),
+  },
+  {
+    name: "create_raw_material_group",
+    description:
+      "Create a raw material group holding the specs its colours inherit (composition, unit of measure, material type, cost). Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/raw-material-groups",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "name",
+      "description",
+      "status",
+      "composition",
+      "specifications",
+      "dimensions",
+      "unit_of_measure",
+      "material_type",
+      "material_type_id",
+      "unit_cost",
+      "cost_currency",
+      "lead_time_days",
+      "minimum_order_quantity",
+      "stock_location_id",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        name: STR("Group name (required)."),
+        description: STR("What this group covers."),
+        status: STR("Group status."),
+        composition: STR("e.g. '100% organic cotton'."),
+        specifications: { type: "object", description: "Arbitrary spec key/values." },
+        dimensions: {
+          type: "array",
+          items: { type: "object" },
+          description: "[{ key, label, values? }] — the group's variant axes.",
+        },
+        unit_of_measure: STR("Meter, Kilogram, Gram, Yard, Roll, Piece, ..."),
+        material_type: STR("Category NAME — resolved/created server-side."),
+        material_type_id: STR("Existing material type id, if known."),
+        unit_cost: { type: "number", description: "Cost per unit." },
+        cost_currency: STR("e.g. 'inr'."),
+        lead_time_days: { type: "integer", description: "Supplier lead time." },
+        minimum_order_quantity: { type: "integer", description: "MOQ." },
+        stock_location_id: STR("Default stock location."),
+        metadata: { type: "object", description: "Free-form metadata." },
+      },
+      ["name"]
+    ),
+    nextSteps: ["link_design_material_group"],
+  },
+  {
+    name: "link_design_inventory",
+    description:
+      "Link inventory items to a design as its bill of materials, with planned quantities. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/designs/:id/inventory",
+    pathParams: ["id"],
+    previewPath: "/admin/designs/:id/inventory",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["inventoryIds", "inventoryItems"],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        inventoryIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Inventory item ids to link.",
+        },
+        inventoryItems: {
+          type: "array",
+          items: { type: "object" },
+          description:
+            "Detailed links instead of bare ids: [{ inventoryId, plannedQuantity?, locationId?, metadata? }].",
+        },
+      },
+      ["id"]
+    ),
+    nextSteps: [
+      "list_design_inventory",
+      "update_design_inventory_link",
+      "create_design_production_run",
+    ],
+  },
+  {
+    name: "update_design_inventory_link",
+    description:
+      "Change ONE material already on a design's bill of materials — its planned quantity (e.g. metres per piece, decimals allowed), stock location or metadata. Sensitive: requires confirm:true. " +
+      "⚠️ link_design_inventory does NOT update an item that is already linked — re-linking is a silent no-op — so use this to change the metres. " +
+      "`inventoryLinkId` is the INVENTORY ITEM id as list_design_inventory shows it. Runs already created keep their own allocation; this changes the design, not them.",
+    method: "PATCH",
+    path: "/admin/designs/:id/inventory/:inventoryLinkId",
+    pathParams: ["id", "inventoryLinkId"],
+    previewPath: "/admin/designs/:id/inventory",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["plannedQuantity", "locationId", "metadata"],
+    inputSchema: obj(
+      {
+        id: STR("Design id."),
+        inventoryLinkId: STR("Inventory item id of the linked material ('iitem_...'), from list_design_inventory."),
+        plannedQuantity: NUM("Planned quantity per piece, e.g. 2.7 (metres). null clears it."),
+        locationId: STR("Stock location the material is drawn from."),
+        metadata: { type: "object", description: "Metadata for the link, e.g. { note }." },
+      },
+      ["id", "inventoryLinkId"]
+    ),
+    nextSteps: ["list_design_inventory"],
+  },
+  {
+    name: "unlink_design_inventory",
+    description:
+      "Remove materials from a design's bill of materials. Sensitive: requires confirm:true. " +
+      "Nothing is consumed or moved — the inventory item and its stock are untouched; the design just stops listing it. Runs already created keep their own allocation.",
+    method: "POST",
+    path: "/admin/designs/:id/inventory/delink",
+    pathParams: ["id"],
+    previewPath: "/admin/designs/:id/inventory",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["inventoryIds"],
+    inputSchema: obj(
+      {
+        id: STR("Design id."),
+        inventoryIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Inventory item ids to remove from the design.",
+        },
+      },
+      ["id", "inventoryIds"]
+    ),
+    nextSteps: ["list_design_inventory"],
+  },
+  {
+    name: "list_design_material_groups",
+    description: "List the raw material groups pinned to a design.",
+    method: "GET",
+    path: "/admin/designs/:id/material-groups",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Design id, e.g. 'design_...'.") }, ["id"]),
+  },
+  {
+    name: "link_design_material_group",
+    description:
+      "Pin a raw material group to a design — the Materials frame of its tech pack. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/designs/:id/material-groups",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "raw_material_group_id",
+      "resolved_raw_material_id",
+      "note",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        raw_material_group_id: STR("Raw material group id to pin (required)."),
+        resolved_raw_material_id: STR(
+          "The specific colour/material chosen from the group, if decided."
+        ),
+        note: STR("Why this material, in the designer's words."),
+        metadata: { type: "object", description: "Free-form metadata." },
+      },
+      ["id", "raw_material_group_id"]
+    ),
+  },
+  {
+    name: "list_construction_techniques",
+    description:
+      "List the canonical construction techniques a design can use — slug, label, family, garment areas, tunable params and ready-made presets. Call this BEFORE add_design_construction_detail: only these slugs are accepted.",
+    method: "GET",
+    path: "/admin/designs/:id/construction-techniques",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Design id, e.g. 'design_...'.") }, ["id"]),
+    nextSteps: ["add_design_construction_detail"],
+  },
+  {
+    name: "list_design_construction_details",
+    description:
+      "List a design's construction details (its Construction specifications — the tech-pack construction frame).",
+    method: "GET",
+    path: "/admin/designs/:id/construction-details",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Design id, e.g. 'design_...'.") }, ["id"]),
+  },
+  {
+    name: "add_design_construction_detail",
+    description:
+      "Add a construction detail to a design (dart, pleat, gather, topstitch, yoke, embroidery...). `technique` MUST be a slug from list_construction_techniques — free text is rejected. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/designs/:id/construction-details",
+    pathParams: ["id"],
+    previewPath: "/admin/designs/:id/construction-details",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["technique", "label", "params", "fabricRules", "note"],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        technique: STR(
+          "Technique slug from list_construction_techniques, e.g. 'dart', 'knife-pleat'."
+        ),
+        label: STR("Display label. Defaults to the technique's own label."),
+        params: {
+          type: "object",
+          description:
+            "Numeric params for the technique, e.g. { intake: 0.6 }. Omit to take the technique's defaults.",
+        },
+        fabricRules: {
+          type: "array",
+          items: { type: "string" },
+          description: "Sewing/fabric rules, e.g. 'press toward centre front'.",
+        },
+        note: STR("Anything the maker needs to know."),
+      },
+      ["id", "technique"]
+    ),
+    sideEffects:
+      "Creates a Construction specification on the design. Its params are the numbers the tech-pack renderer draws, so prefer a preset's values over invented ones.",
+  },
+  {
+    name: "update_design_brief",
+    description:
+      "Set a design's brief — the attributes that describe the idea rather than the garment: concept theme, aesthetic keywords, target persona, competitors, price point, budget and milestones. Partial: only the keys you pass change. Sensitive: requires confirm:true.",
+    method: "PUT",
+    path: "/admin/designs/:id/brief",
+    pathParams: ["id"],
+    previewPath: "/admin/designs/:id/brief",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "concept_theme",
+      "aesthetic_keywords",
+      "persona",
+      "competitors",
+      "price_point",
+      "design_budget",
+      "cost_currency",
+      "milestones",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Design id, e.g. 'design_...'."),
+        concept_theme: STR("Short story/title for the concept, e.g. '90s Tokyo streetwear'."),
+        aesthetic_keywords: {
+          type: "array",
+          items: { type: "string" },
+          description: "3-5 keywords defining the look, e.g. ['utilitarian','nostalgic'].",
+        },
+        persona: {
+          type: "object",
+          description: "{ age_range, lifestyle, values[], pain_points[] }.",
+        },
+        competitors: {
+          type: "array",
+          items: { type: "object" },
+          description: "[{ name, url?, differentiator }].",
+        },
+        price_point: STR("'luxury' | 'mid_market' | 'budget'."),
+        design_budget: { type: "number", description: "Design-phase budget." },
+        cost_currency: STR("e.g. 'inr'."),
+        milestones: {
+          type: "array",
+          items: { type: "object" },
+          description: "[{ label, date? }] in order.",
+        },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "search_pinterest",
+    description:
+      "Search Pinterest for reference images by keyword. Returns pins with image urls that can be read with read_image or recorded on a design as inspiration. Reads the access token from the connected Pinterest platform (Settings → External platforms); falls back to PINTEREST_ACCESS_TOKEN.",
+    method: "GET",
+    path: "/admin/pinterest",
+    queryParams: ["q", "bookmark"],
+    inputSchema: obj(
+      {
+        q: STR("Search query, e.g. 'indigo block print kurta'."),
+        bookmark: STR("Cursor from a previous response, for the next page."),
+      },
+      ["q"]
+    ),
+    nextSteps: ["read_image", "create_design"],
+  },
+
+  // ===== Data Plumbing (audited operational corrections) ==================
+  // These wrap the #457 maintenance-job surface. Every run is persisted to
+  // `ops_maintenance_run` with the acting admin, so assistant-driven repairs
+  // carry the same audit trail as hand-run ones.
+  {
+    name: "list_maintenance_jobs",
+    description:
+      "List the available Data Plumbing maintenance jobs — audited, guarded data corrections (repair a reversed inventory-order route, backfill a field, reconcile a mirror). Returns each job's id, label, description and parameter schema. Start here when an operator reports data that looks wrong rather than code that looks wrong.",
+    method: "GET",
+    path: "/admin/ops/maintenance-jobs",
+    inputSchema: obj({}),
+    nextSteps: ["run_maintenance_job", "list_maintenance_job_runs"],
+  },
+  {
+    name: "list_maintenance_job_runs",
+    description:
+      "Read the maintenance-job audit log — who ran what, when, dry-run or applied, and the change set. Use it to check whether a repair has already been attempted before running another.",
+    method: "GET",
+    path: "/admin/ops/maintenance-jobs/runs",
+    queryParams: ["limit", "offset", "job_id"],
+    inputSchema: obj({
+      ...PAGINATION,
+      job_id: STR("Only runs of this job id, e.g. 'repair-inventory-order-route'."),
+    }),
+  },
+  {
+    name: "run_maintenance_job",
+    description:
+      "Run a Data Plumbing maintenance job. SAFE BY DEFAULT: the job previews unless you say otherwise — always call with preview:true first and show the operator the exact change set before applying. Pass preview:false to apply, which requires confirm:true. Use `preview`, NOT `dry_run`: `dry_run` is this surface's own flag and is intercepted before the job runs, so it returns a planned request rather than the job's real change set. Per-job params are validated by the job itself; call list_maintenance_jobs first for the schema.",
+    method: "POST",
+    path: "/admin/ops/maintenance-jobs/:id/run",
+    pathParams: ["id"],
+    // NOT `dry_run` — that name is the dispatcher's own and never arrives at
+    // the route, so the job's change set was unreachable from a tool. See the
+    // note on `preview` in the ops maintenance-job validators.
+    bodyParams: ["preview", "params"],
+    write: true,
+    sensitive: true,
+    inputSchema: obj(
+      {
+        id: STR("Maintenance job id, e.g. 'repair-inventory-order-route'."),
+        preview: {
+          type: "boolean",
+          description:
+            "Preview only — returns the job's real change set without writing. Defaults to true; pass false to actually apply.",
+        },
+        params: {
+          type: "object",
+          description:
+            "Job-specific parameters. See the job's `params` from list_maintenance_jobs.",
+          additionalProperties: true,
+        },
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "With preview:false, mutates production data as described by the job. Every run is written to the ops_maintenance_run audit log.",
+    nextSteps: ["list_maintenance_job_runs"],
+  },
+
+  // ===== Tier 2: the first dangerous action ==============================
+  // Platform-destructive: hidden + refused unless ADMIN_MCP_ENABLE_DANGEROUS is
+  // on, and even then requires BOTH confirm:true AND a human-supplied reason.
+  {
+    name: "delete_product",
+    description:
+      "Permanently delete a product. PLATFORM-DESTRUCTIVE: requires confirm:true AND a human reason, and is only available when ADMIN_MCP_ENABLE_DANGEROUS is enabled. Always dry_run first.",
+    method: "DELETE",
+    path: "/admin/products/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/products/:id",
+    write: true,
+    dangerous: true,
+    inputSchema: obj({ id: STR("Product id to delete, e.g. 'prod_...'.") }, ["id"]),
+    sideEffects: "Irreversibly removes the product and its variants from the catalog.",
+  },
+
+  // ===== CRM (contacts, companies, deals, follow-ups) =======================
+  // The CRM is NOT Postgres: these routes proxy to the Autobase node over a
+  // Cloudflare tunnel (modules/crm/loaders/hyperbee-dal.ts). Behaviourally that
+  // matters in one place — there is no query.graph and no cross-module join, so
+  // a contact's company arrives as a `company_id` to look up, never as an
+  // embedded object.
+  {
+    name: "list_crm_contacts",
+    description:
+      "List CRM contacts (people in the sales pipeline). Filter by email, last_name or company_id. NOTE: a CRM contact is a prospect — somebody who has not necessarily bought. For people who HAVE placed orders use list_customers; for the weaver directory use the persons tools.",
+    method: "GET",
+    path: "/admin/crm/people",
+    queryParams: [
+      "email",
+      "last_name",
+      "company_id",
+      "engagement_state",
+      "limit",
+      "offset",
+    ],
+    inputSchema: obj({
+      email: STR("Exact email match."),
+      last_name: STR("Exact surname match."),
+      company_id: STR("Only contacts at this company, e.g. 'crmco_...'."),
+      engagement_state: STR(
+        "Where the CONVERSATION is (not the deal): 'not_contacted' | 'awaiting_reply' | 'in_conversation' | 'follow_up_due' | 'stalled' | 'do_not_contact' | 'closed'. Use 'follow_up_due' and 'not_contacted' to answer 'who needs chasing'."
+      ),
+      ...PAGINATION,
+    }),
+    sideEffects:
+      "engagement_state is derived from the activity log — never set it by hand; log an activity instead.",
+  },
+  {
+    name: "get_crm_contact",
+    description:
+      "Get one CRM contact by id, including the provenance metadata recording which ad campaign or capture produced them.",
+    method: "GET",
+    path: "/admin/crm/people/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Contact id, e.g. 'crmp_...'.") }, ["id"]),
+  },
+  {
+    name: "list_crm_companies",
+    description:
+      "List CRM companies (the organizations contacts belong to — boutiques, stockists, wholesale buyers).",
+    method: "GET",
+    path: "/admin/crm/companies",
+    queryParams: ["name", "industry", "region", "limit", "offset"],
+    inputSchema: obj({
+      name: STR("Exact company name match."),
+      industry: STR("Exact industry match."),
+      region: STR("Exact region match."),
+      ...PAGINATION,
+    }),
+  },
+  {
+    name: "list_crm_opportunities",
+    description:
+      "List CRM opportunities (open and closed deals). Filter by stage to read the pipeline: prospecting, sampling, quoted, negotiation, won, lost. 'sampling' means a swatch or sample has physically gone out.",
+    method: "GET",
+    path: "/admin/crm/opportunities",
+    queryParams: ["stage", "company_id", "owner_person_id", "limit", "offset"],
+    inputSchema: obj({
+      stage: STR(
+        "Pipeline stage: 'prospecting' | 'sampling' | 'quoted' | 'negotiation' | 'won' | 'lost'."
+      ),
+      company_id: STR("Only deals for this company."),
+      owner_person_id: STR("Only deals whose contact is this person."),
+      ...PAGINATION,
+    }),
+  },
+  {
+    name: "list_crm_tasks",
+    description:
+      "List CRM follow-up tasks. Filter by status or assignee to answer 'what do I owe somebody this week'.",
+    method: "GET",
+    path: "/admin/crm/tasks",
+    queryParams: [
+      "status",
+      "assignee_person_id",
+      "related_type",
+      "related_id",
+      "limit",
+      "offset",
+    ],
+    inputSchema: obj({
+      status: STR("'pending' | 'in_progress' | 'completed' | 'cancelled'."),
+      assignee_person_id: STR("Only tasks assigned to this contact."),
+      related_type: STR("'person' | 'company' | 'opportunity'."),
+      related_id: STR("Id of the related record."),
+      ...PAGINATION,
+    }),
+  },
+  {
+    name: "list_crm_notes",
+    description:
+      "List notes logged against a CRM record — the conversation history for a contact, company or deal. Pass related_type + related_id to scope it.",
+    method: "GET",
+    path: "/admin/crm/notes",
+    queryParams: ["related_type", "related_id", "limit", "offset"],
+    inputSchema: obj({
+      related_type: STR("'person' | 'company' | 'opportunity' | 'task'."),
+      related_id: STR("Id of the related record."),
+      ...PAGINATION,
+    }),
+  },
+  {
+    name: "list_ad_leads",
+    description:
+      "List raw ad-leads — the intake queue feeding the CRM (Meta/Instagram/Facebook lead-ad form fills and email enquiries). These are NOT yet CRM contacts. Use this to see what has come in and what is still unworked; status 'new' means nobody has touched it.",
+    method: "GET",
+    path: "/admin/meta-ads/leads",
+    queryParams: [
+      "status",
+      "campaign_id",
+      "form_id",
+      "platform_id",
+      "since",
+      "until",
+      "q",
+      "limit",
+      "offset",
+    ],
+    inputSchema: obj({
+      status: STR(
+        "'new' | 'contacted' | 'qualified' | 'unqualified' | 'converted' | 'lost' | 'archived'."
+      ),
+      campaign_id: STR("Only leads from this campaign."),
+      form_id: STR("Only leads from this lead form."),
+      platform_id: STR("Only leads from this social platform record."),
+      since: STR("ISO date — leads created after this."),
+      until: STR("ISO date — leads created before this."),
+      ...PAGINATION,
+    }),
+    sideEffects:
+      "Source platform is stored unnormalized: 'fb' and 'facebook' are the same channel, and 'ig' is Instagram.",
+    nextSteps: ["create_crm_contact", "list_crm_contacts"],
+  },
+  {
+    name: "create_crm_contact",
+    description:
+      "Create a CRM contact. Email must be unique across the CRM — creating a contact whose email already exists is rejected, so check with list_crm_contacts first. last_name is optional: many real contacts have a single-token name. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/crm/people",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "first_name",
+      "last_name",
+      "email",
+      "phone",
+      "title",
+      "company_id",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        first_name: STR("Given name. Required."),
+        last_name: STR("Surname. Omit when the contact has none."),
+        email: STR("Email — the uniqueness key for the whole CRM."),
+        phone: STR("Phone number."),
+        title: STR("Job title."),
+        company_id: STR("Company id, e.g. 'crmco_...'."),
+        metadata: {
+          type: "object",
+          description:
+            "Provenance and free-form detail (source, campaign, captured_at, page URL).",
+        },
+      },
+      ["first_name"]
+    ),
+  },
+  {
+    name: "update_crm_contact",
+    description:
+      "Update a CRM contact's details. Sensitive: requires confirm:true. Use dry_run to see the current record first.",
+    method: "POST",
+    path: "/admin/crm/people/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/crm/people/:id",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "first_name",
+      "last_name",
+      "email",
+      "phone",
+      "title",
+      "company_id",
+      "next_follow_up_at",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Contact id, e.g. 'crmp_...'."),
+        next_follow_up_at: STR(
+          "ISO datetime to chase this contact. When it passes, the contact moves to 'follow_up_due' and a crm.follow_up_due event fires for any visual flow listening."
+        ),
+        first_name: STR("New given name."),
+        last_name: STR("New surname."),
+        email: STR("New email (must stay unique)."),
+        phone: STR("New phone."),
+        title: STR("New job title."),
+        company_id: STR("Attach to this company."),
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id"]
+    ),
+  },
+  {
+    name: "create_crm_company",
+    description:
+      "Create a CRM company. The name must be unique. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/crm/companies",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["name", "website", "industry", "size", "region", "metadata"],
+    inputSchema: obj(
+      {
+        name: STR("Company name — unique across the CRM."),
+        website: STR("Website URL."),
+        industry: STR("Industry, e.g. 'boutique retail'."),
+        size: STR("Rough size, e.g. '1-10'."),
+        region: STR("Region or city."),
+        metadata: { type: "object", description: "Free-form detail." },
+      },
+      ["name"]
+    ),
+  },
+  {
+    name: "create_crm_opportunity",
+    description:
+      "Open a deal in the pipeline. Create this when a lead is genuinely qualified, not on first contact — an opportunity per enquiry makes the pipeline meaningless. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/crm/opportunities",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "title",
+      "stage",
+      "amount",
+      "currency",
+      "expected_close_date",
+      "company_id",
+      "owner_person_id",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        title: STR("What the deal is for, e.g. '40 pashmina stoles - Sharlho'."),
+        stage: STR(
+          "'prospecting' (default) | 'sampling' | 'quoted' | 'negotiation' | 'won' | 'lost'."
+        ),
+        amount: { type: "number", description: "Expected value, >= 0." },
+        currency: STR("ISO currency, defaults to INR."),
+        expected_close_date: STR("ISO datetime."),
+        company_id: STR("Buying company, e.g. 'crmco_...'."),
+        owner_person_id: STR("The contact this deal belongs to, 'crmp_...'."),
+        metadata: { type: "object", description: "Free-form detail." },
+      },
+      ["title"]
+    ),
+  },
+  {
+    name: "update_crm_opportunity",
+    description:
+      "Update a deal — most often to move its stage along the pipeline. Sensitive: requires confirm:true. Use dry_run to see the deal's current stage before moving it.",
+    method: "POST",
+    path: "/admin/crm/opportunities/:id",
+    pathParams: ["id"],
+    previewPath: "/admin/crm/opportunities/:id",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "title",
+      "stage",
+      "amount",
+      "currency",
+      "expected_close_date",
+      "company_id",
+      "owner_person_id",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Opportunity id, e.g. 'crmo_...'."),
+        title: STR("New title."),
+        stage: STR(
+          "'prospecting' | 'sampling' | 'quoted' | 'negotiation' | 'won' | 'lost'."
+        ),
+        amount: { type: "number", description: "Revised value." },
+        currency: STR("ISO currency."),
+        expected_close_date: STR("ISO datetime."),
+        company_id: STR("Reassign to this company."),
+        owner_person_id: STR("Reassign to this contact."),
+        metadata: { type: "object", description: "Metadata to merge." },
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Moving a deal to 'won' or 'lost' closes it and takes it off the working board.",
+  },
+  {
+    name: "log_crm_note",
+    description:
+      "Log a note against a CRM contact, company or deal — what was said on the call, what the buyer asked for. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/crm/notes",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: ["body", "author", "related_type", "related_id", "metadata"],
+    inputSchema: obj(
+      {
+        body: STR("The note text."),
+        author: STR("Who wrote it."),
+        related_type: STR("'person' | 'company' | 'opportunity' | 'task'."),
+        related_id: STR("Id of the record the note is about."),
+        metadata: { type: "object", description: "Free-form detail." },
+      },
+      ["body"]
+    ),
+  },
+  {
+    name: "create_crm_task",
+    description:
+      "Create a follow-up task against a contact, company or deal. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/crm/tasks",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "title",
+      "description",
+      "due_date",
+      "status",
+      "priority",
+      "assignee_person_id",
+      "related_type",
+      "related_id",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        title: STR("What needs doing, e.g. 'Send swatch pack'."),
+        description: STR("Detail."),
+        due_date: STR("ISO datetime."),
+        status: STR("'pending' (default) | 'in_progress' | 'completed' | 'cancelled'."),
+        priority: STR("'low' | 'medium' (default) | 'high'."),
+        assignee_person_id: STR("CRM contact responsible, 'crmp_...'."),
+        related_type: STR("'person' | 'company' | 'opportunity'."),
+        related_id: STR("Id of the related record."),
+        metadata: { type: "object", description: "Free-form detail." },
+      },
+      ["title"]
+    ),
+  },
+
+  {
+    name: "list_crm_activities",
+    description:
+      "Read the interaction timeline for a CRM contact, company or deal — every call, message and note, with its direction. Pass related_type + related_id to scope it. Answers 'what have we actually said to them' and 'when did they last reply'. Returned newest-first.",
+    method: "GET",
+    path: "/admin/crm/activities",
+    queryParams: [
+      "related_type",
+      "related_id",
+      "direction",
+      "channel",
+      "activity_type",
+      "limit",
+      "offset",
+    ],
+    inputSchema: obj({
+      related_type: STR("'person' | 'company' | 'opportunity'."),
+      related_id: STR("Id of the record, e.g. 'crmp_...'."),
+      direction: STR(
+        "'inbound' (they contacted us) | 'outbound' (we contacted them) | 'internal' (logged on our side, nobody was reached)."
+      ),
+      channel: STR("'whatsapp' | 'email' | 'phone' | 'instagram' | 'facebook' | 'in_person' | 'other'."),
+      activity_type: STR("'message' | 'call' | 'meeting' | 'note' | 'lifecycle' | 'system'."),
+      ...PAGINATION,
+    }),
+    nextSteps: ["log_crm_activity", "get_crm_contact"],
+  },
+  {
+    name: "log_crm_activity",
+    description:
+      "Record an interaction with a CRM contact — an inbound reply, an outbound message, a call, a meeting. This is how the conversation state moves: logging an inbound activity marks the contact as replying, an outbound one as awaiting reply. Use direction 'internal' for something that did not actually reach them. Sensitive: requires confirm:true.",
+    method: "POST",
+    path: "/admin/crm/activities",
+    write: true,
+    sensitive: true,
+    tier: "write",
+    bodyParams: [
+      "related_type",
+      "related_id",
+      "activity_type",
+      "kind",
+      "direction",
+      "channel",
+      "subject",
+      "body",
+      "summary",
+      "actor_type",
+      "actor_id",
+      "message_id",
+      "template_name",
+      "recipient",
+      "outcome",
+      "occurred_at",
+      "payload",
+    ],
+    inputSchema: obj(
+      {
+        related_type: STR("'person' | 'company' | 'opportunity'. Required."),
+        related_id: STR("Id of the record this happened with. Required."),
+        activity_type: STR(
+          "'message' | 'call' | 'meeting' | 'note' | 'lifecycle' | 'system'. Required."
+        ),
+        kind: STR(
+          "Finer type within the bucket, e.g. 'reply', 'quote_sent', 'no_answer'. Use 'opt_out' to mark somebody as do-not-contact."
+        ),
+        direction: STR(
+          "'inbound' | 'outbound' | 'internal' (default). Getting this right is what makes the engagement state correct."
+        ),
+        channel: STR("'whatsapp' | 'email' | 'phone' | 'instagram' | 'facebook' | 'in_person' | 'other'."),
+        subject: STR("Short subject line."),
+        body: STR("What was said."),
+        summary: STR("One-line timeline text. Computed automatically if omitted."),
+        actor_type: STR("'system' | 'admin' | 'contact' | 'flow'."),
+        actor_id: STR("Who did it."),
+        message_id: STR("Correlating messaging_message id, when this was a real send."),
+        template_name: STR("WhatsApp/email template used."),
+        recipient: STR("Address or number it went to."),
+        outcome: STR("'pending' | 'delivered' | 'replied' | 'no_answer' | 'bounced' | 'failed'."),
+        occurred_at: STR(
+          "ISO datetime the interaction happened. Defaults to now — pass it explicitly when recording something after the fact, which is normal for inbound messages."
+        ),
+        payload: { type: "object", description: "Type-specific structured extras." },
+      },
+      ["related_type", "related_id", "activity_type"]
+    ),
+    sideEffects:
+      "Also recomputes the contact's engagement_state, which is what visual flows select on. Logging an activity with kind 'opt_out' makes the contact permanently do_not_contact.",
+  },
+  // ===== B2B quotes (#1389 S5, #1439) =======================================
+  //
+  // 🔑 `partner_id` is the whole difference from the partner surface. An admin
+  // has no partner of their own, so the one being quoted FOR must be named —
+  // and it is exactly what the catalogue and price checks validate against. It
+  // is declared here and deliberately absent from the shared vocabulary,
+  // because on the partner surface a caller naming another partner's id is the
+  // one field that would let them freeze prices onto someone else's customers.
+  {
+    name: "list_quotes",
+    description:
+      "List B2B quotes across the platform (status, partner, buyer, totals, expiry, whether the buyer has viewed or accepted). Read.",
+    method: "GET",
+    path: "/admin/quotes",
+    queryParams: ["limit", "offset", "q", "status", "partner_id"],
+    inputSchema: obj({
+      ...PAGINATION,
+      status: STR(
+        "Filter by status: 'active' | 'accepted' | 'revoked' | 'superseded' | 'expired'."
+      ),
+      partner_id: STR("Only quotes minted for this partner."),
+    }),
+  },
+  {
+    name: "get_quote",
+    description:
+      "Get one B2B quote in full: its lines and frozen prices, freight, tax, any DDP undertaking, and the buyer's view/acceptance state. Read.",
+    method: "GET",
+    path: "/admin/quotes/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Quote id.") }, ["id"]),
+  },
+  {
+    name: "check_quote_readiness",
+    description:
+      "Dry-run a quote for a partner: price the basket, rate the freight, resolve the tax, and report EVERY blocking problem at once — without minting anything, emailing anyone or freezing a price. Always call this before `mint_quote`.",
+    method: "POST",
+    path: "/admin/quotes/readiness",
+    /**
+     * 🔑 A POST that is not a write, declared the same way `resolve_admin_query`
+     * is: no `write` flag. The verb is a POST only because a basket does not fit
+     * in a query string — the route freezes nothing and sends nothing.
+     *
+     * On this surface every write is `sensitive` by invariant, so flagging it
+     * would put the rehearsal behind the confirm rail — which is how an
+     * assistant ends up skipping the preflight and minting blind.
+     */
+    bodyParams: [...QUOTE_MINT_READINESS_BODY_PARAMS, "partner_id"],
+    inputSchema: obj(
+      {
+        ...quoteReadinessSchemaProps(),
+        partner_id: STR("The partner being quoted for. Required on this surface."),
+      },
+      ["partner_id", "lines", "destination_country_code", "currency_code"]
+    ),
+    sideEffects:
+      "Writes nothing and sends nothing. Prices the basket live and rates freight with the carrier, so it can be slow and it does consume a carrier rate call.",
+    nextSteps: ["mint_quote"],
+  },
+  {
+    name: "mint_quote",
+    description:
+      "Mint a B2B quote on a partner's behalf: freeze prices into a price list scoped to this buyer, and email them a link they can accept and pay a deposit against. " +
+      QUOTE_MINT_WRITE_GUIDANCE,
+    method: "POST",
+    path: "/admin/quotes",
+    write: true,
+    sensitive: true,
+    bodyParams: [...QUOTE_MINT_BODY_PARAMS, "partner_id"],
+    inputSchema: obj(
+      {
+        ...quoteMintSchemaProps(),
+        partner_id: STR(
+          "The partner this quote is minted FOR. Their catalogue, their store, their carrier, their prices — required on this surface."
+        ),
+      },
+      [
+        "partner_id",
+        "buyer_email",
+        "lines",
+        "destination_country_code",
+        "currency_code",
+      ]
+    ),
+    sideEffects:
+      "Creates a customer-group-scoped price list with a real expiry, sends the buyer an email containing the only copy of the quote link, and makes the quote acceptable into a cart. Re-minting for the same buyer SUPERSEDES their previous quote itself (#1435) — you do NOT need to revoke it first, and revoking first only costs the buyer a live link in the gap. Revoke a quote when it should not stand at all, not as a step before re-quoting.",
+    nextSteps: ["get_quote", "revoke_quote"],
+  },
+  {
+    name: "revoke_quote",
+    description:
+      "Revoke a quote: delete its frozen price list and make the buyer's link 404. Use it to WITHDRAW a quote that should not stand — a wrong price, a wrong buyer, a wrong lane. It is no longer needed before re-quoting the same buyer: the mint supersedes their previous quote itself, which is what #1435 fixed. Re-minting to kill a quote emails the buyer a second number they never asked for; revoking does not.",
+    method: "POST",
+    path: "/admin/quotes/:id/revoke",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    /**
+     * 🔴 No `bodyParams`, and no `reason` field — the route reads no body at
+     * all. Advertising one would be the #1348 defect exactly: the dispatcher's
+     * body assembly is an allowlist walk, so the model would supply a reason,
+     * get `ok: true`, and the reason would reach nothing. Better to offer
+     * nothing than to offer something that goes nowhere.
+     */
+    inputSchema: obj({ id: STR("Quote to revoke.") }, ["id"]),
+    sideEffects:
+      "The buyer's link stops working immediately and is indistinguishable from an unknown token — they are NOT told. Tell them yourself if they have already been sent it. An already-accepted quote keeps its cart.",
+  },
+
+  // ===== Stats dashboards + panels =========================================
+  {
+    name: "create_stats_dashboard",
+    description:
+      "Create an empty stats dashboard (a container that holds stats panels). Returns the dashboard id, which create_stats_panel needs. Pass a name and optionally a description/icon/color. Use this when the user wants a new stats view for a metric they care about.",
+    method: "POST",
+    path: "/admin/stats/dashboards",
+    write: true,
+    sensitive: true,
+    bodyParams: ["name", "description", "icon", "color", "metadata"],
+    inputSchema: obj(
+      {
+        name: STR("Dashboard name (required)."),
+        description: STR("What this dashboard shows."),
+        icon: STR("Icon key, e.g. 'chart-no-axes-combined'."),
+        color: STR("Hex accent color, e.g. '#10b981'."),
+        metadata: {
+          type: "object",
+          description:
+            "Free-form metadata. Set { investor: true } to expose the dashboard on the investor surface.",
+        },
+      },
+      ["name"]
+    ),
+    sideEffects:
+      "Creates an empty dashboard only — no panels, no data. Panels are added afterwards with create_stats_panel.",
+    nextSteps: ["create_stats_panel"],
+  },
+  {
+    name: "create_stats_panel",
+    description:
+      "Create a stats panel on a dashboard, driven by operation_type + operation_options JSON. The panel's data resolves LIVE from the configured operation — nothing is stored as a number. For the dynamic metric_sections operation, pass operation_options = { currency, window_days, sections: { <name>: { entity, filters, aggregates: { <key>: { fn, field?, range?, normalize_interval? } }, currency_key?, echo? } | { derived: { ref, aggregate, multiply?, add? }, echo? } } }. The `entity` MUST be a real query.graph name — call list_graph_entities first (plural snake_case, e.g. 'order_transactions' for paid orders, 'partner_fees' for commission, 'partner_subscriptions' for subscriptions); never invent names like 'orders'/'subscriptions'/'payments'. `echo` is an OBJECT of booleans like { window_days: true } or { currency: true } — it declares which context keys the section output carries; it is NOT text, and the section's label is the section NAME. A trailing-window aggregate uses `range: { date_field }` (no last_days) so it follows the panel's window_days. Set metadata.public true only if the panel is safe to expose publicly (GET /web/stats/panels/:id/data).",
+    method: "POST",
+    path: "/admin/stats/dashboards/:id/panels",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "name",
+      "type",
+      "operation_type",
+      "operation_options",
+      "display",
+      "cache_ttl_seconds",
+      "metadata",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Dashboard id from create_stats_dashboard."),
+        name: STR("Panel name (required)."),
+        type: STR("'metric' (default) | 'list' | 'table' | 'bar' | 'line' | 'area' | 'label'."),
+        operation_type: STR(
+          "Operation that computes this panel's data: 'metric_sections' (dynamic multi-metric), 'aggregate_data', 'time_series', and other registered operations."
+        ),
+        operation_options: {
+          type: "object",
+          description:
+            "Operation JSON. For metric_sections: { currency, window_days, sections: { name: { entity, filters, aggregates: { key: { fn, field?, range?, normalize_interval? } }, currency_key?, echo? } | { derived: { ref, aggregate, multiply?, add? }, echo? } } }. `echo` is an OBJECT of booleans ({ window_days: true }, { currency: true }) — not text; the section name is the label.",
+        },
+        display: {
+          type: "object",
+          description: "Renderer config (e.g. { exclude_columns: [...] }).",
+        },
+        cache_ttl_seconds: {
+          type: "integer",
+          description: "In-memory cache seconds for this panel's resolved data (null disables).",
+        },
+        metadata: {
+          type: "object",
+          description:
+            "Free-form metadata. Set { public: true } to expose via the unauthenticated GET /web/stats/panels/:id/data read.",
+        },
+      },
+      ["id", "name", "operation_type"]
+    ),
+    sideEffects:
+      "Creates a panel whose data resolves live from the configured operation on every read. Setting metadata.public true exposes the panel without auth — do that only for safe aggregates.",
+    nextSteps: ["get_admin_stats"],
+  },
+
+  // ===== Coverage follow-on: singular reads the money/inventory flows demand ===
+  //
+  // These close the reads a batch of write tools already required and never
+  // provided: `list_inventory_orders` had no `get_inventory_order` to open one
+  // row; `create_payment_submission` had no way to check whether a run was
+  // already billed; the partner-scoped write tools had no partner-scoped reads
+  // to answer "what does this partner have on the hook". A tool that demands an
+  // identifier must be reachable from a tool that produces it — this is the
+  // same id-producer rule the stock-location and region tools were written for.
+  {
+    name: "get_inventory_order",
+    description:
+      "Get one inventory order by id — the raw-material purchase / stock movement — with its lines, status and (best-effort) unified work-status and shipments. Read. The singular of the list_inventory_orders family: list_inventory_orders shows rows, this opens one. Call it before update_inventory_order_lines or mark_inventory_order_ready_for_delivery to see the order you are about to change.",
+    method: "GET",
+    path: "/admin/inventory-orders/:id",
+    pathParams: ["id"],
+    inputSchema: obj(
+      { id: STR("Inventory order id, e.g. 'inv_order_...'.") },
+      ["id"]
+    ),
+    nextSteps: [
+      "list_inventory_orders",
+      "get_inventory_order_charges",
+      "list_inventory_order_activities",
+    ],
+  },
+  {
+    name: "list_inventory_orders_awaiting_count",
+    description:
+      "Inventory orders a supplier DISPATCHED that nobody has COUNTED yet — oldest first, with per-line dispatched / received / awaiting, the destination, the supplier, days since dispatch and whether the carrier says delivered. Read. 🔴 Since #2289 a supplier's Complete posts NO stock: these goods are not on the books until someone counts them with receive_inventory_order (our warehouse) or the receiving partner confirms. Pass destination_location_id to narrow to one warehouse.",
+    method: "GET",
+    path: "/admin/inventory-orders/awaiting-count",
+    queryParams: ["destination_location_id"],
+    inputSchema: obj(
+      { destination_location_id: STR("Optional: only orders delivering to this stock location.") },
+      []
+    ),
+    nextSteps: ["get_inventory_order", "receive_inventory_order"],
+  },
+  {
+    name: "resolve_inventory_order_shortfall",
+    description:
+      "Close a SHORT delivery on an inventory order (the receiver counted less than the supplier dispatched, #2289) with what was done about it: re-sent, credited, written off. Write. Moves no stock and no money; the note is the record. Shortfall ids are on get_inventory_order (`shortfalls`). Goods that arrive later resolve their shortfall by themselves when counted with receive_inventory_order.",
+    method: "POST",
+    path: "/admin/inventory-orders/:id/shortfalls/:shortfallId/resolve",
+    pathParams: ["id", "shortfallId"],
+    write: true,
+    sensitive: true,
+    bodyParams: ["note"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id."),
+        shortfallId: STR("Shortfall id, e.g. 'inv_short_...'."),
+        note: STR("What was done: re-sent / credited / written off, and any reference."),
+      },
+      ["id", "shortfallId", "note"]
+    ),
+    previewPath: "/admin/inventory-orders/:id",
+    nextSteps: ["get_inventory_order"],
+  },
+  {
+    name: "get_inventory_order_charges",
+    description:
+      "Read the non-goods amounts on an inventory order — tax, shipping, a discount or a write-off — plus the folded totals and the payable ceiling a claim may reach. Read. A charge changes what the partner is owed (#1737): this is where 'why is the payable different from total_price?' is answered.",
+    method: "GET",
+    path: "/admin/inventory-orders/:id/charges",
+    pathParams: ["id"],
+    inputSchema: obj(
+      { id: STR("Inventory order id, e.g. 'inv_order_...'.") },
+      ["id"]
+    ),
+    nextSteps: [
+      "get_inventory_order",
+      "list_payable_inventory_orders",
+      "update_inventory_order_charge",
+    ],
+  },
+  {
+    name: "update_inventory_order_charge",
+    description:
+      "Correct ONE charge on an inventory order — its `amount` and/or `note` (#2315). E.g. an order's goods were cut and its 5% tax must follow: read get_inventory_order_charges for the charge id, then send the new amount. Sensitive: requires confirm:true. ALWAYS dry_run first. " +
+      "⚠️ The type cannot be changed (a tax turned into a discount is a different fact). " +
+      "🔴 Refused if the new payable ceiling would fall below what live payouts already claim on the order — reject or reduce the payout first. A discount/adjustment must keep a note.",
+    method: "POST",
+    path: "/admin/inventory-orders/:id/charges/:chargeId",
+    pathParams: ["id", "chargeId"],
+    previewPath: "/admin/inventory-orders/:id/charges",
+    write: true,
+    sensitive: true,
+    bodyParams: ["amount", "note"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        chargeId: STR("Charge id, e.g. 'invchg_...', from get_inventory_order_charges."),
+        amount: NUM("New amount, always positive — the charge's type carries the direction."),
+        note: STR("Why. Required to stay non-empty on a discount/adjustment."),
+      },
+      ["id", "chargeId"]
+    ),
+    nextSteps: ["get_inventory_order_charges"],
+  },
+  {
+    name: "list_inventory_order_activities",
+    description:
+      "Read an inventory order's activity/timeline log, newest first — status changes, notes and events. Read. Use to answer 'what happened to this order, and when'. Supports limit (default 50, max 100) and offset.",
+    method: "GET",
+    path: "/admin/inventory-orders/:id/activities",
+    pathParams: ["id"],
+    queryParams: ["limit", "offset"],
+    inputSchema: obj(
+      {
+        id: STR("Inventory order id, e.g. 'inv_order_...'."),
+        limit: INT("Max results (default 50, max 100)."),
+        offset: INT("Pagination offset."),
+      },
+      ["id"]
+    ),
+    nextSteps: ["get_inventory_order"],
+  },
+  {
+    name: "get_order_balance",
+    description:
+      "Read what a customer order still owes — the payment schedule, total due, deposit and balance, whether a balance can be raised, and the buyer's link if one was minted. Read. Answers 'is this order fully paid?' and 'can we collect the balance?'. A GET never charges anybody; raising the balance is a separate, confirm-gated write.",
+    method: "GET",
+    path: "/admin/orders/:id/balance",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Order id, e.g. 'order_...'.") }, ["id"]),
+    nextSteps: ["get_order"],
+  },
+  {
+    name: "request_order_balance",
+    description:
+      "Raise the outstanding balance on a deposit order and mint the buyer's pay link: a PayU link for an INR deal, otherwise the Stripe balance page. Sensitive: requires confirm:true. " +
+      "Read get_order_balance first: the amount must agree with the order's outstanding total, and the deposit must be paid. Idempotent: a balance already raised returns the SAME link rather than a second one. " +
+      "On a deal whose balance is released by the sample (balance_trigger sample_approved), use approve_order_sample instead, so the approval is on the record.",
+    method: "POST",
+    path: "/admin/orders/:id/balance",
+    pathParams: ["id"],
+    previewPath: "/admin/orders/:id/balance",
+    write: true,
+    sensitive: true,
+    // The route itself refuses without confirm:true, so the rail's confirm is
+    // forwarded rather than consumed.
+    bodyParams: ["confirm"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        confirm: {
+          type: "boolean",
+          description: "Must be true: this asks a real buyer for money. Forwarded to the route, which refuses without it.",
+        },
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Creates a payment collection for the balance on the order, marks the schedule's balance due and mints a live pay link the buyer can pay.",
+    nextSteps: ["get_order_balance"],
+  },
+  {
+    name: "approve_order_sample",
+    description:
+      "Record the buyer's verdict on the first SAMPLE of a made-to-order deal. On a deal minted with balance_trigger 'sample_approved', decision 'approved' raises the balance and returns the buyer's pay link; 'rejected' is recorded and asks for nothing. Sensitive: requires confirm:true. " +
+      "`production_run_id` must be a run_type 'sample' run created with this order's id (create_production_run with run_type 'sample' and order_id). Refused on a deal released on dispatch or by hand. " +
+      "Pass `notes` with what the buyer said, especially on a rejection.",
+    method: "POST",
+    path: "/admin/orders/:id/sample-approval",
+    pathParams: ["id"],
+    previewPath: "/admin/orders/:id/balance",
+    write: true,
+    sensitive: true,
+    bodyParams: ["production_run_id", "decision", "notes", "confirm"],
+    inputSchema: obj(
+      {
+        id: STR("Order id, e.g. 'order_...'."),
+        production_run_id: STR("The SAMPLE production run the buyer judged."),
+        decision: {
+          type: "string",
+          enum: ["approved", "rejected"],
+          description: "The buyer's verdict on the sample.",
+        },
+        notes: STR("What the buyer said about the sample."),
+        confirm: {
+          type: "boolean",
+          description: "Must be true: this asks a real buyer for money. Forwarded to the route, which refuses without it.",
+        },
+      },
+      ["id", "production_run_id", "decision"]
+    ),
+    sideEffects:
+      "Appends the decision to the order's payment schedule. An approval raises the balance and mints a live pay link for the buyer.",
+    nextSteps: ["get_order_balance", "send_production_run_to_production"],
+  },
+  {
+    name: "get_production_run_payments",
+    description:
+      "Read whether a production run has already been billed and by which payout — the run's billing status, the live claim, what remains billable, and every line naming this run. Read. 🔴 The run does not know it has been billed; this is the one place to learn that before creating a payout for it. Call it BEFORE create_payment_submission so a completed run already paid for is not claimed twice.",
+    method: "GET",
+    path: "/admin/production-runs/:id/payments",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Production run id.") }, ["id"]),
+    nextSteps: ["list_payable_runs", "create_payment_submission"],
+  },
+  {
+    name: "get_payment",
+    description:
+      "Get one payment record by id (status, amount, currency, provider, order/cart). Read. list_payments shows rows; this opens one — e.g. the payment whose id link_payment_to_payout would settle.",
+    method: "GET",
+    path: "/admin/payments/:id",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Payment id, e.g. 'pay_...'.") }, ["id"]),
+    nextSteps: ["list_payments", "get_partner_ledger"],
+  },
+
+  // ---- Partner inspection mirrors (#843 follow-on): the reads behind
+  // 'what does this partner have on the hook'. Each is the admin side of an
+  // existing partner route — same workflow, partner resolved from `:id` instead
+  // of a partner bearer — so the mirror cannot show a partner anything their
+  // own portal would not. All read-only.
+  {
+    name: "list_partner_orders",
+    description:
+      "List a partner's orders as the partner sees them in their own portal — the inspection mirror of the partner orders route. Filters by kind (retail | design | inventory | all) and the same status/q/date/region/sales-channel filters. Read. Use to answer 'what has this partner sold, and what work-orders do they have on the hook'.",
+    method: "GET",
+    path: "/admin/partners/:id/orders",
+    pathParams: ["id"],
+    queryParams: [
+      "kind",
+      "status",
+      "q",
+      "created_at",
+      "updated_at",
+      "region_id",
+      "sales_channel_id",
+      "order",
+      "limit",
+      "offset",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        kind: STR(
+          "'retail' (default) | 'design' | 'inventory' | 'all' — the order family to list."
+        ),
+        status: STR("Order status filter."),
+        q: STR("Free-text search."),
+        created_at: STR("Filter by created_at."),
+        updated_at: STR("Filter by updated_at."),
+        region_id: STR("Filter by region (retail kind only)."),
+        sales_channel_id: STR("Filter by sales channel (retail kind only)."),
+        order: STR("Sort field; a leading '-' means descending, e.g. '-created_at'."),
+        limit: INT("Max results (default 20)."),
+        offset: INT("Pagination offset."),
+      },
+      ["id"]
+    ),
+    nextSteps: ["get_partner", "get_order"],
+  },
+  {
+    name: "list_partner_inventory_orders",
+    description:
+      "List a partner's inventory orders as the partner sees them — the inspection mirror of the partner inventory-orders route. Filters: status, q, limit, offset. Read. Use to answer 'what raw materials has this partner been commissioned for'.",
+    method: "GET",
+    path: "/admin/partners/:id/inventory-orders",
+    pathParams: ["id"],
+    queryParams: ["status", "q", "limit", "offset"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        ...PAGINATION,
+        status: STR("Optional status filter."),
+      },
+      ["id"]
+    ),
+    nextSteps: ["get_partner", "get_inventory_order", "list_payable_inventory_orders"],
+  },
+  {
+    name: "list_partner_inventory_items",
+    description:
+      "List a partner's inventory as the partner sees it — the inspection mirror of the partner inventory-items route, scoped to the partner's default stock location. Filters: q, limit, offset. Read. A partner with no store or location returns an empty list, which is a state worth seeing. Use to answer 'what does this partner hold'.",
+    method: "GET",
+    path: "/admin/partners/:id/inventory-items",
+    pathParams: ["id"],
+    queryParams: ["q", "limit", "offset"],
+    inputSchema: obj(
+      { id: STR("Partner id, e.g. 'partner_...'."), ...PAGINATION },
+      ["id"]
+    ),
+    nextSteps: ["get_partner", "get_inventory_item"],
+  },
+  {
+    name: "list_partner_production_runs",
+    description:
+      "List a partner's production runs as the partner sees them — the inspection mirror of the partner production-runs route, scoped to the run's own partner_id. Filters: status, role, run_type, design_id, limit, offset. Read. Use to answer 'what is this partner on the hook for right now'.",
+    method: "GET",
+    path: "/admin/partners/:id/production-runs",
+    pathParams: ["id"],
+    queryParams: ["status", "role", "run_type", "design_id", "limit", "offset"],
+    inputSchema: obj(
+      {
+        id: STR("Partner id, e.g. 'partner_...'."),
+        status: STR("Run status filter."),
+        role: STR("Role filter."),
+        run_type: STR("'production' | 'sample'."),
+        design_id: STR("Only runs for this design."),
+        limit: INT("Max results (default 20)."),
+        offset: INT("Pagination offset."),
+      },
+      ["id"]
+    ),
+    nextSteps: ["get_partner", "get_production_run", "get_production_run_payments"],
+  },
+  {
+    name: "get_partner_storefront",
+    description:
+      "Read a partner's storefront hosting status — whether it is provisioned, the provider project state, configured domains and any stale-project flag. Read. Use to answer 'is this partner's store live?' and 'why is their storefront down?'. Reports state and writes nothing.",
+    method: "GET",
+    path: "/admin/partners/:id/storefront",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id, e.g. 'partner_...'.") }, ["id"]),
+    nextSteps: ["get_partner", "list_partner_products", "list_stores", "verify_partner_storefront_domain"],
+  },
+  {
+    name: "get_partner_storefront_website",
+    description:
+      "Read a partner storefront's website record and THEME — the one place its logo, store name, tagline, hero, colours and home sections live. Read. Use before update_partner_storefront_theme to see what is there; `preview_url` opens the storefront with the cache bypassed.",
+    method: "GET",
+    path: "/admin/partners/:id/storefront/website",
+    pathParams: ["id"],
+    inputSchema: obj({ id: STR("Partner id.") }, ["id"]),
+    nextSteps: ["update_partner_storefront_theme"],
+  },
+  {
+    name: "update_partner_storefront_theme",
+    description:
+      "Set a partner storefront's logo, store name, hero and home-page sections — what the partner's own theme editor writes. 🔑 The storefront nav reads branding.logo_url here, NOT the partner's `logo` (update_partner). Each top-level key you send is merged ONE level deep: `hero: {title}` keeps the other hero fields, but an array (sections_order, items, features) replaces the stored one wholesale. Flushes the storefront cache; `revalidation.ok` says whether the change is visible yet. Sensitive: requires confirm:true.",
+    method: "PUT",
+    path: "/admin/partners/:id/storefront/website/theme",
+    pathParams: ["id"],
+    previewPath: "/admin/partners/:id/storefront/website",
+    write: true,
+    sensitive: true,
+    bodyParams: [
+      "branding",
+      "colors",
+      "typography",
+      "buttons",
+      "animations",
+      "hero",
+      "navigation",
+      "footer",
+      "home_sections",
+      "product_page",
+      "cart",
+    ],
+    inputSchema: obj(
+      {
+        id: STR("Partner id."),
+        branding: {
+          type: "object",
+          description: "{ logo_url, store_name, favicon_url, tagline }. logo_url is what the storefront header shows.",
+        },
+        colors: { type: "object", description: "Theme colours, each '#RRGGBB'." },
+        typography: { type: "object", description: "Font settings." },
+        buttons: { type: "object", description: "Button styling." },
+        animations: { type: "object", description: "Section animations." },
+        hero: {
+          type: "object",
+          description:
+            "{ title, subtitle, description, badge_text, background_image_url, overlay_opacity, cta_text, cta_link, secondary_cta_text, secondary_cta_link, layout, min_height, features: [{ title, description, icon }] }.",
+        },
+        navigation: { type: "object", description: "Header links: { links: [{ label, href }] }." },
+        footer: { type: "object", description: "Footer text, links and social_links ([{ platform, url }])." },
+        home_sections: {
+          type: "object",
+          description:
+            "{ sections_order: [...], trust_banner: { items: [{ text, icon }] }, text_with_image: { title, description, image_url, cta_text, cta_link, layout }, testimonials: { items: [{ quote, author, role }] }, banner, newsletter }. sections_order values: hero | trust_banner | collections | text_with_image | categories | testimonials | banner | newsletter; the default is [hero, collections, categories]. The /about page falls back to text_with_image.",
+        },
+        product_page: { type: "object", description: "Product page display options." },
+        cart: { type: "object", description: "Cart display options." },
+      },
+      ["id"]
+    ),
+    sideEffects:
+      "Writes the partner website's theme column (merged into what is stored) and asks the storefront to flush its cache.",
+    nextSteps: ["get_partner_storefront_website"],
+  },
+  {
+    name: "verify_partner_storefront_domain",
+    description:
+      "Bring a partner's provisioned storefront subdomain (e.g. shramdaan.cicilabel.com) to VERIFIED on Vercel, so it gets a certificate and serves. Publishes Vercel's `_vercel` TXT challenge in our Cloudflare zone — ADDED beside the other stores' records, never replacing one — then asks Vercel to verify. Sensitive: requires confirm:true. " +
+      "Idempotent: a verified domain returns at once. `verified: false` with a TXT `created` or `exists` usually means DNS is still propagating — call again in a few minutes; an hourly job also retries. For a partner's CUSTOM domain use the storefront domain tools instead.",
+    method: "POST",
+    path: "/admin/partners/:id/storefront/verify-domain",
+    pathParams: ["id"],
+    previewPath: "/admin/partners/:id/storefront",
+    write: true,
+    sensitive: true,
+    inputSchema: obj({ id: STR("Partner id.") }, ["id"]),
+    sideEffects:
+      "May create one TXT record on _vercel.<root domain> in our Cloudflare zone, and asks Vercel to verify the domain.",
+    nextSteps: ["get_partner_storefront"],
+  },
+
+  // ---- Production ops: the note on a run's timeline ----------------------
+  {
+    name: "pause_production_run_reminders",
+    description:
+      "Pause or resume the daily partner reminders on ONE production run. Write; sensitive: requires confirm:true. " +
+      "A paused run gets no reminder, no re-send at the reminder cap and no reassignment from the reminder flow until resumed; nothing else about the run changes and the partner is not told. " +
+      "Use it when a run was sent but must WAIT (e.g. a stage order was reversed after dispatch) and a reminder would tell the partner to start. " +
+      "The pause holds until resumed (paused:false). It is recorded on the run's timeline; get_production_run shows it in metadata.reminders_paused.",
+    method: "POST",
+    path: "/admin/production-runs/:id/reminders",
+    pathParams: ["id"],
+    previewPath: "/admin/production-runs/:id",
+    write: true,
+    sensitive: true,
+    bodyParams: ["paused", "reason"],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        paused: BOOL("true to pause the reminders, false to resume them."),
+        reason: STR("Why (shown on the run's timeline)."),
+      },
+      ["id", "paused"]
+    ),
+    sideEffects: "Sets or clears metadata.reminders_paused and writes one timeline note. Sends nothing.",
+    nextSteps: ["list_production_run_activities"],
+  },
+  {
+    name: "add_production_run_activity_note",
+    description:
+      "Append a free-form note to a production run's activity timeline — designed for logging what a partner actually said in WhatsApp against the run it concerns. Sensitive: requires confirm:true. `summary` is required; pass `message_id` when the note came from a real WhatsApp message (it is stamped channel=whatsapp so the timeline can tell messages-originated notes from admin-typed ones).",
+    method: "POST",
+    path: "/admin/production-runs/:id/activities/note",
+    pathParams: ["id"],
+    write: true,
+    sensitive: true,
+    previewPath: "/admin/production-runs/:id/activities",
+    bodyParams: ["summary", "message_id", "conversation_id", "partner_id", "payload"],
+    inputSchema: obj(
+      {
+        id: STR("Production run id."),
+        summary: STR(
+          "The note text (required). What the partner said, or what the admin is recording."
+        ),
+        message_id: STR(
+          "The WhatsApp message id, when this note came from a real message."
+        ),
+        conversation_id: STR("The WhatsApp conversation id, when known."),
+        partner_id: STR(
+          "Partner the note concerns — defaults to the run's own partner."
+        ),
+        payload: {
+          type: "object",
+          description: "Extra structured detail recorded on the activity.",
+        },
+      },
+      ["id", "summary"]
+    ),
+    sideEffects:
+      "Creates one 'note' activity on the run's timeline. Nothing else changes — no status, no money, no message to anybody.",
+    nextSteps: ["list_production_run_activities", "get_production_run"],
+  },
+]

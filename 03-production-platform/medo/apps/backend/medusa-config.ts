@@ -1,0 +1,964 @@
+import { loadEnv, defineConfig, Modules } from "@medusajs/framework/utils";
+import path from "path";
+import { parseFlatFallbackAmounts } from "./src/modules/shipping-providers/shiprocket/flat-fallback"
+import { SOCIALS_MODULE } from "./src/modules/socials"
+import { ENCRYPTION_MODULE } from "./src/modules/encryption"
+import { authModuleConfig } from "./src/lib/auth/auth-module-config"
+
+loadEnv(process.env.NODE_ENV || 'development', process.cwd())
+
+module.exports = defineConfig({
+  projectConfig: {
+    databaseUrl: process.env.DATABASE_URL,
+    /**
+     * 🔴 A CAP ON MEDUSA'S OWN POOL, because the database may have very few
+     * connections to give. The Aiven free tier allows 20 in total and its own
+     * processes hold ~13 of them; knex defaults to a max of 10 and a min of 2,
+     * and Mastra opens three more pools beside this one (see
+     * `src/mastra/memory.ts`), so a plain seed answered "sorry, too many
+     * clients already".
+     *
+     * ⚠️ `min` is set alongside `max` deliberately: Medusa's own default min is
+     * 2, and knex throws when min exceeds max, so a max of 1 is unreachable
+     * without it.
+     *
+     * Unset means Medusa's defaults, so CI and any roomy Postgres are
+     * untouched — this is opt-in per environment through `.env`/`.env.test`.
+     */
+    ...(process.env.DB_POOL_MAX
+      ? {
+          databaseDriverOptions: {
+            pool: {
+              min: Number(process.env.DB_POOL_MIN ?? 0),
+              max: Number(process.env.DB_POOL_MAX),
+            },
+          },
+        }
+      : {}),
+    http: {
+      storeCors: process.env.STORE_CORS!,
+      adminCors: process.env.ADMIN_CORS!,
+      authCors: process.env.AUTH_CORS!,
+      jwtSecret: process.env.JWT_SECRET || "supersecret",
+      cookieSecret: process.env.COOKIE_SECRET || "supersecret",
+      // Require email verification for partners registering with emailpass.
+      // Native Medusa 2.16+ flow: login returns { verification_required, token },
+      // then /auth/verification/request emits `auth.verification_requested`
+      // (handled by src/subscribers/partner-verification-requested.ts to email
+      // the code) and /auth/verification/confirm marks the identity verified.
+      //
+      // Opt-in via env (read at boot, mirrors STRIPE_CONNECT_ENABLED): when
+      // required, an unverified partner's login returns an actorless token and
+      // can't reach `/partners/*` until they verify. Left OFF by default so the
+      // existing partner test suite (which never verifies) is unaffected; set
+      // PARTNER_EMAIL_VERIFICATION=true in dev/prod to switch it on.
+      // Spread a cast object so the extra key doesn't trip the excess-property
+      // check on @medusajs/types versions that predate authVerificationsPerActor
+      // (the prod build resolves an older type than local 2.17.1). Runtime is
+      // unchanged — validate-verification reads projectConfig.http.authVerificationsPerActor.
+      ...({
+        authVerificationsPerActor: {
+          partner:
+            process.env.PARTNER_EMAIL_VERIFICATION === "true"
+              ? [{ entity_type: "email", auth_provider: "emailpass" }]
+              : [],
+          investor:
+            process.env.INVESTOR_EMAIL_VERIFICATION === "true"
+              ? [{ entity_type: "email", auth_provider: "emailpass" }]
+              : [],
+        },
+      } as any),
+    },
+    //redisUrl: process.env.REDIS_URL,
+    //workerMode: process.env.MEDUSA_WORKER_MODE as "shared" | "worker" | "server",
+  },
+
+  admin: {
+    /**
+     * Where the admin's "Copy payment link" button points (#1985).
+     *
+     * ⚠️ This is baked into the admin bundle at BUILD time and has exactly ONE
+     * consumer in the dashboard — `copy-payment-link.tsx`, which builds
+     * `${storefrontUrl}/payment-collection/:id?order_id=:order`.
+     *
+     * It names the SHOP, so a buyer lands on the storefront they bought from
+     * and sees the order they are topping up. `apps/storefront` serves
+     * cicilabel.com and implements `/payment-collection/:id`.
+     *
+     * ⚠️ Single build-time constant, one value for every tenant. Partner shops
+     * live on their own domains, so a partner order's link still points at the
+     * house shop. The backend keeps its own `/payment-collection/:id` redirect
+     * to the hosted Stripe page as a fallback for links already sent and for
+     * any tenant this cannot name — see #1985.
+     *
+     * 🔴 Left unset, `@medusajs/admin-bundler` defines it as `""` — and the
+     * dashboard's `__STOREFRONT_URL__ ?? "http://localhost:8000"` does NOT
+     * catch an empty string, so the button copied a link with no host at all.
+     * `||` rather than `??` here for the same reason.
+     */
+    storefrontUrl:
+      process.env.MEDUSA_STOREFRONT_URL || "https://cicilabel.com",
+    vite: () => ({
+      resolve: {
+        alias: {
+          "@": path.resolve(__dirname, "./src/admin"),
+        },
+        dedupe: [
+          "react",
+          "react-dom",
+          "react/jsx-runtime",
+          "react-router-dom",
+        ],
+      },
+      optimizeDeps: {
+        include: ["pdf-lib", "qrcode"],
+      },
+      // `css.preprocessorOptions.scss.api: "modern-compiler"` was removed here on
+      // the Medusa 2.19 upgrade: Vite 7 dropped the legacy Sass API entirely and
+      // deleted the `api` option, so keeping it is a type error and a no-op —
+      // modern-compiler is now the only behaviour. Nothing changes at runtime.
+    }),
+    disable: process.env.DISABLE_MEDUSA_ADMIN === "true",
+    backendUrl: process.env.MEDUSA_BACKEND_URL,
+    
+  },
+  featureFlags: {
+     translation: true,
+     index_engine: true,
+     view_configrations: true,
+  },
+
+  plugins: [
+    {
+      resolve: "@medusajs/draft-order",
+      options: {},
+    },
+    {
+      resolve: "@medusajs/loyalty-plugin",
+      options: {},
+    },
+    {
+      resolve: "@jytextiles/medusa-plugin-etsy-sync",
+      options: {
+        keystring: process.env.ETSY_KEYSTRING ?? "",
+        sharedSecret: process.env.ETSY_SHARED_SECRET ?? "",
+        redirectUri:
+          process.env.ETSY_REDIRECT_URI ??
+          "http://localhost:9000/app/settings/oauth/etsy/callback",
+        scope:
+          process.env.ETSY_SCOPE ??
+          "listings_r listings_w listings_d shops_r",
+      },
+    },
+    {
+      resolve: "@jytextiles/medusa-plugin-faire-store-sync",
+      options: {
+        clientId: process.env.FAIRE_APP_ID ?? "",
+        clientSecret: process.env.FAIRE_APP_SECRET ?? "",
+        redirectUri:
+          process.env.FAIRE_REDIRECT_URI ??
+          "http://localhost:9000/app/settings/oauth/faire/callback",
+      },
+    },
+  ],
+
+  modules: [
+    // Auth: emailpass + phone-pin (#2320). Re-declares emailpass — see the helper.
+    authModuleConfig(),
+    // Custom app modules
+    {
+      resolve: "./src/modules/census",
+    },
+    {
+      resolve: "./src/modules/person",
+    },
+    {
+      resolve: "./src/modules/persontype",
+    },
+    {
+      resolve: "./src/modules/personproperty",
+    },
+    {
+      resolve: "./src/modules/crm",
+    },
+    {
+      resolve: "./src/modules/inventory_orders",
+    },
+    {
+      resolve: "./src/modules/internal_payments",
+    },
+    {
+      resolve: "./src/modules/company",
+    },
+    {
+      resolve: "./src/modules/website",
+    },
+    {
+      resolve: "./src/modules/designs",
+      dependencies: [Modules.LINK],
+    },
+    {
+      resolve: "./src/modules/raw_material",
+    },
+    {
+      resolve: "./src/modules/tasks",
+    },
+    {
+      resolve: "./src/modules/notes",
+    },
+    {
+      resolve: "./src/modules/partner",
+    },
+    {
+      resolve: "./src/modules/partner-plan",
+    },
+    {
+      resolve: "./src/modules/deployment",
+      definition: { isQueryable: false },
+    },
+    {
+      resolve: "./src/modules/custom-s3-provider",
+    },
+    {
+      resolve: "./src/modules/socials",
+    },
+    {
+      resolve: "./src/modules/social-provider",
+      definition: { isQueryable: false },
+    },
+    {
+      resolve: "./src/modules/partner-payment-config",
+    },
+    {
+      resolve: "./src/modules/partner-onboarding-profile",
+    },
+    {
+      resolve: "./src/modules/partner-ui-prefs",
+    },
+    {
+      resolve: "./src/modules/partner-assistant",
+    },
+    {
+      resolve: "./src/modules/admin-assistant",
+    },
+    {
+      // Chat design editor — per-design chat thread history (email-scoped
+      // mirror of admin-assistant). Registered in BOTH config files: prod
+      // loads its own, so a module listed only here is absent on ECS.
+      resolve: "./src/modules/storefront-design-assistant",
+    },
+    {
+      // The assistants' cross-conversation context cache. Registered in BOTH
+      // config files: prod loads its own, so a module listed only here is
+      // absent on ECS, and the chat routes resolve it on every turn.
+      resolve: "./src/modules/assistant-context-cache",
+    },
+    {
+      resolve: "./src/modules/artisan-product-detail",
+    },
+    {
+      resolve: "./src/modules/product-spec",
+    },
+    {
+      resolve: "./src/modules/designer-invite",
+    },
+    {
+      resolve: "./src/modules/design_inquiry",
+    },
+    {
+      resolve: "./src/modules/partner_capability",
+    },
+    {
+      resolve: "./src/modules/partner-quote",
+    },
+    {
+      resolve: "./src/modules/payment_schedule",
+    },
+    {
+      resolve: "./src/modules/partner_billing",
+    },
+    {
+      resolve: "./src/modules/fx_rates",
+    },
+    {
+      resolve: "./src/modules/consumption_log",
+    },
+    {
+      resolve: "./src/modules/energy_rates",
+    },
+    {
+      resolve: "./src/modules/ai_usage",
+    },
+    {
+      resolve: "./src/modules/mcp_access",
+    },
+    {
+      resolve: "./src/modules/mcp_oauth",
+    },
+    {
+      resolve: "./src/modules/unified_order_status",
+    },
+    {
+      resolve: "./src/modules/unified_order_kind",
+    },
+    {
+      resolve: "./src/modules/work_orders",
+    },
+    {
+      resolve: "./src/modules/platform-tax-identity",
+    },
+    {
+      resolve: "./src/modules/platform-cost-config",
+    },
+    {
+      resolve: "./src/modules/investor",
+    },
+
+    /**
+     * The CACHING module (`Modules.CACHING`) — the replacement for the
+     * deprecated Cache module. Registered with NO provider on purpose: the
+     * module ships a memory provider as its default, so dev needs no Redis.
+     * `medusa-config.prod.ts` gives it the Redis provider.
+     *
+     * ⚠️ Distinct from `cache-redis` below, which is the DEPRECATED Cache
+     * module and stays registered in prod only because `@medusajs/auth` still
+     * reads it for MFA challenges and OAuth state (#1849). Measured, with
+     * prod's exact module set: registering `caching` leaves `cache` on the
+     * in-memory fallback, and Auth holds that fallback.
+     */
+    {
+      resolve: "@medusajs/medusa/caching",
+      options: {
+        // 🔴 `in_memory.enable` is REQUIRED. The module does NOT fall back to
+        // its memory provider on its own — with no providers and this unset it
+        // THROWS at boot: "No providers have been configured and the built in
+        // memory cache has not been enabled." Verified by booting without it.
+        in_memory: { enable: true },
+      },
+    },
+    // Production-ready modules.
+    //
+    // ⚠️ These stay OFF here on purpose — a dev machine is one process, so the
+    // in-memory fallbacks behave identically and nobody needs Redis running to
+    // boot the app. `medusa-config.prod.ts` DOES register `cache-redis`, and
+    // that divergence is deliberate rather than drift.
+    //
+    // 🔴 It is also why the MFA lockout could not reproduce locally: MFA
+    // challenges live in `Modules.CACHE` (`auth:mfa:challenge:<id>`), not in
+    // Postgres, so with two server tasks behind the ALB an in-memory cache
+    // loses the challenge whenever the verify request lands on the other task.
+    // One process here, one cache, always found.
+    // {
+    //   resolve: "@medusajs/medusa/cache-redis",
+    //   options: {
+    //     redisUrl: process.env.REDIS_URL,
+    //   },
+    // },
+    // {
+    //   resolve: "@medusajs/medusa/event-bus-redis",
+    //   options: {
+    //     redisUrl: process.env.REDIS_URL,
+    //   },
+    // },
+    // {
+    //   resolve: "@medusajs/medusa/workflow-engine-redis",
+    //   options: {
+    //     redis: {
+    //       redisUrl: process.env.REDIS_URL,
+    //     },
+    //   },
+    // },
+
+    // #342 PR-D (Chunk 8 / H2) — Locking Module with the Redis provider.
+    // ACTIVE in prod via medusa-config.prod.ts (prod runs split server+worker,
+    // so the #342 per-unified-order locks must hold across processes). Here in
+    // the dev/test base config it stays commented — single-process dev/test use
+    // the built-in in-memory locking provider, which needs no config. Kept as a
+    // commented block to mirror the cache/event-bus/workflow-engine-redis blocks
+    // above. The provider ships inside @medusajs/medusa as
+    // `@medusajs/medusa/locking-redis` (NOT a separate top-level package).
+    // {
+    //   resolve: "@medusajs/medusa/locking",
+    //   options: {
+    //     providers: [
+    //       {
+    //         resolve: "@medusajs/medusa/locking-redis",
+    //         id: "locking-redis",
+    //         is_default: true,
+    //         options: {
+    //           redisUrl: process.env.LOCKING_REDIS_URL || process.env.REDIS_URL,
+    //         },
+    //       },
+    //     ],
+    //   },
+    // },
+
+    {
+      resolve: "@medusajs/medusa/notification",
+      // #1339 pattern — puts the partner device-token store into the push
+      // provider's container. Without it the provider logs
+      // [partner-push] token lookup failed and the push leg degrades to
+      // "not delivered" (never blocking the producing workflow).
+      dependencies: ["partnerPush"],
+      options: {
+        providers: [
+          {
+            resolve: "@medusajs/medusa/notification-local",
+            id: "local",
+            options: {
+              // `email_partner` is added here (prod routes it to Maileroo) so
+              // partner-order notifications persist a row in the test env and can
+              // be inspected — see partner-order-email-notification.spec.ts.
+              channels: ["feed", "email", "email_partner"],
+            },
+          },
+          {
+            // The APNs/FCM leg of the partner notification system. Rides the
+            // same rows createPartnerNotification writes — every partner feed
+            // notification has a `push` twin routed here by channel.
+            resolve: "./src/modules/notification-push",
+            id: "partner-push",
+            options: {
+              channels: ["push"],
+            },
+          },
+          {
+            // Audit-only — the real WhatsApp send happens in
+            // src/modules/social-provider/whatsapp-service.ts. This provider
+            // exists so callers can persist a notification row via
+            // notificationModuleService.createNotifications({ channel: "whatsapp", … })
+            // after the upstream send succeeds.
+            resolve: "./src/modules/notification-whatsapp-audit",
+            id: "whatsapp-audit",
+            options: {
+              channels: ["whatsapp"],
+            },
+          },
+        ],
+      },
+    },
+    // {
+    //   resolve: "@medusajs/medusa/caching",
+    //   options: {
+    //     providers: [
+    //       {
+    //         resolve: "@medusajs/caching-redis",
+    //         id: "caching-redis",
+    //         // Optional, makes this the default caching provider
+    //         is_default: true,
+    //         options: {
+    //           redisUrl: process.env.REDIS_URL,
+    //           // more options...
+    //         },
+    //       },
+    //     ],
+    //   },
+    // },
+    // {
+    //   resolve: "@medusajs/medusa/file",
+    //   options: {
+    //     providers: [
+    //       {
+    //         resolve: "@medusajs/medusa/file-s3",
+    //         id: "s3",
+    //         options: {
+    //           file_url: process.env.S3_FILE_URL,
+    //           access_key_id: process.env.S3_ACCESS_KEY_ID,
+    //           secret_access_key: process.env.S3_SECRET_ACCESS_KEY,
+    //           region: process.env.S3_REGION,
+    //           bucket: process.env.S3_BUCKET,
+    //           endpoint: process.env.S3_ENDPOINT,
+    //         },
+    //       },
+    //     ],
+    //   },
+    // },
+    // Payment module: register providers only when their creds are present, so
+    // dev/test stay clean without keys (mirrors medusa-config.prod.ts). The
+    // built-in system provider (pp_system_default) is always available.
+    ...(process.env.STRIPE_API_KEY || process.env.PAYU_MERCHANT_KEY
+      ? [
+          {
+            resolve: "@medusajs/medusa/payment",
+            options: {
+              providers: [
+                ...(process.env.STRIPE_API_KEY
+                  ? [
+                      {
+                        resolve: "@medusajs/medusa/payment-stripe",
+                        id: "stripe",
+                        options: {
+                          apiKey: process.env.STRIPE_API_KEY,
+                          webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+                          /**
+                           * 🔴 Without this the intent is created with NEITHER
+                           * `payment_method_types` NOR `automatic_payment_methods`,
+                           * and Stripe answers `payment_method_types: ["card"]`.
+                           * Measured, not assumed — an intent created exactly
+                           * the way this provider creates one came back card-only
+                           * every time. So the Payment Element could only ever
+                           * render a card field, in every region this provider
+                           * serves (America, Australia, Indonesia, Israel and
+                           * half of Europe).
+                           *
+                           * Enabled, Stripe returns what the account actually
+                           * supports for the currency: eur → card, klarna, link,
+                           * satispay; aud/usd → card, link. The rest is a
+                           * Dashboard setting, not a code change.
+                           *
+                           * 🔑 `./src/modules/stripe-connect-payment` has always
+                           * set `automatic_payment_methods: { enabled: true }`
+                           * on its own intents. This is the stock provider
+                           * catching up with the one beside it.
+                           */
+                          automaticPaymentMethods: true,
+
+                          /**
+                           * 🔴 Without this the provider creates **manual-capture**
+                           * intents (`this.options_.capture ? "automatic" : "manual"`),
+                           * and Stripe excludes every method that cannot be
+                           * authorised-now-captured-later. Measured on the live API,
+                           * eur loses four:
+                           *
+                           *   automatic → card, bancontact, eps, giropay, ideal,
+                           *               klarna, link, satispay
+                           *   manual    → card, klarna, link, satispay
+                           *
+                           * iDeal, Bancontact, EPS and Giropay are single-use bank
+                           * redirects: funds move at authorisation, so they cannot
+                           * exist inside a manual-capture intent at all. No amount of
+                           * Dashboard configuration brings them back.
+                           *
+                           * 🔑 `./src/modules/stripe-connect-payment` beside this one
+                           * never sets `capture_method`, so Stripe defaults it to
+                           * automatic — the two providers serving the same storefront
+                           * disagreed. This is the stock one catching up, again.
+                           *
+                           * The charge is now taken at checkout rather than
+                           * authorised and captured later (#1840).
+                           */
+                          capture: true,
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.STRIPE_API_KEY &&
+                process.env.STRIPE_CONNECT_ENABLED === "true"
+                  ? [
+                      {
+                        resolve: "./src/modules/stripe-connect-payment",
+                        id: "stripe-connect",
+                        options: {
+                          apiKey: process.env.STRIPE_API_KEY,
+                          // Fee falls back to the partner plan's
+                          // payment_processing_fee at runtime; this is only used
+                          // when no plan is resolvable.
+                          defaultFeePercent: process.env
+                            .STRIPE_CONNECT_DEFAULT_FEE_PERCENT
+                            ? Number(process.env.STRIPE_CONNECT_DEFAULT_FEE_PERCENT)
+                            : 0,
+                          refundApplicationFee: true,
+                          allowPlatformFallback:
+                            process.env.STRIPE_CONNECT_PLATFORM_FALLBACK === "true",
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.PAYU_MERCHANT_KEY
+                  ? [
+                      {
+                        resolve: "./src/modules/payu-payment",
+                        id: "payu",
+                        options: {
+                          merchant_key: process.env.PAYU_MERCHANT_KEY,
+                          merchant_salt: process.env.PAYU_MERCHANT_SALT,
+                          mode: process.env.PAYU_MODE || "test",
+                          auto_capture: true,
+                        },
+                      },
+                    ]
+                  : []),
+  ],
+            },
+          },
+        ]
+      : []),
+    // Carrier fulfillment providers are OFF by default in dev. The tokens in
+    // `.env` are LIVE — Delhivery has no usable sandbox — so an accidental local
+    // fulfilment would mint a real, billable waybill. Opt in explicitly, and pair
+    // it with DELHIVERY_STUB=1 unless you truly mean to call the carrier.
+    ...(process.env.ENABLE_CARRIER_FULFILLMENT === "1"
+      ? [
+          {
+            resolve: "@medusajs/medusa/fulfillment",
+            /**
+             * 🔴 Load-bearing and invisible (#1451 follow-on). A fulfillment
+             * PROVIDER is built with the parent module's cradle, which carries
+             * six default keys and nothing else — so without these two, the
+             * Shiprocket service cannot read the carrier credentials that live
+             * in the `category:shipping` SocialPlatform record, and its rate
+             * calls fall back to env vars that are DELIBERATELY unset (see the
+             * copilot manifest). That is what made every live rate call answer
+             * `422 — The password is required`.
+             *
+             * Drop these and the symptom returns silently. The service logs
+             * loudly on the missing branch for that reason.
+             */
+            /**
+             * 🔴 `fx_rates` is here because Shiprocket quotes in RUPEES while
+             * `calculated_amount` is denominated in the CART's currency. Prod
+             * measured an AU cart being quoted ₹890 as A$890. Drop this key and
+             * the provider stops converting and falls back — loudly, but it
+             * stops quoting live rates. See shiprocket/rate-currency.ts.
+             */
+            dependencies: [SOCIALS_MODULE, ENCRYPTION_MODULE, "fx_rates"],
+            options: {
+              providers: [
+                {
+                  resolve: "@medusajs/medusa/fulfillment-manual",
+                  id: "manual",
+                },
+                ...(process.env.DELHIVERY_API_TOKEN
+                  ? [
+                      {
+                        resolve: "./src/modules/shipping-providers/delhivery",
+                        id: "delhivery",
+                        options: {
+                          api_token: process.env.DELHIVERY_API_TOKEN,
+                          sandbox: process.env.DELHIVERY_SANDBOX === "true",
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.PACKLINK_ENABLED === "true"
+                  ? [
+                      {
+                        /**
+                         * Packlink — live rates for partners shipping from EUROPE.
+                         *
+                         * Shiprocket originates in India; the EasyPost account
+                         * originates only in US/CA (verified 2026-09-12: every
+                         * carrier answered "from_address.country is required to
+                         * be US", while the same payload from a US origin
+                         * returned 8 rates). So an EU partner had NO way to
+                         * quote, and its international shipping was a hand-set
+                         * flat rate — which the live Packlink rates then showed
+                         * to be loss-making on 3 of its 4 lanes, by EUR 52 per
+                         * parcel to the UAE.
+                         *
+                         * Enabled with PACKLINK_ENABLED=true. The API KEY is NOT
+                         * here: it lives on a `socials` platform record of
+                         * category "shipping" (provider_type "packlink"),
+                         * encrypted, so it rotates in the UI without a deploy
+                         * and each partner can hold their own account.
+                         */
+                        resolve: "./src/modules/shipping-providers/packlink",
+                        id: "packlink",
+                        options: {
+                          origin_country: process.env.PACKLINK_ORIGIN_COUNTRY,
+                          origin_zip: process.env.PACKLINK_ORIGIN_ZIP,
+                          // Cost + 20% by default; margin 1 would quote at cost.
+                          margin: Number(process.env.PACKLINK_MARGIN || 1.2),
+                          // Same shape and same reason as Shiprocket's: an
+                          // unquotable lane must cost SOMETHING, not 0.
+                          flat_fallback_amounts: parseFlatFallbackAmounts(
+                            process.env.PACKLINK_FLAT_FALLBACK_AMOUNTS
+                          ),
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.SHIPROCKET_EMAIL
+                  ? [
+                      {
+                        resolve: "./src/modules/shipping-providers/shiprocket",
+                        id: "shiprocket",
+                        options: {
+                          email: process.env.SHIPROCKET_EMAIL,
+                          password: process.env.SHIPROCKET_PASSWORD,
+                          pickup_location: process.env.SHIPROCKET_PICKUP_LOCATION,
+                          // What an UNQUOTABLE lane costs (#1417). Without one,
+                          // calculatePrice used to answer 0 — free shipping
+                          // wearing the shape of a real quote. `IN=9900,US=249000`
+                          // (ISO2=minor units); see shiprocket/flat-fallback.ts.
+                          flat_fallback_amounts: parseFlatFallbackAmounts(
+                            process.env.SHIPROCKET_FLAT_FALLBACK_AMOUNTS
+                          ),
+                          flat_fallback_amount: process.env
+                            .SHIPROCKET_FLAT_FALLBACK_AMOUNT
+                            ? Number(process.env.SHIPROCKET_FLAT_FALLBACK_AMOUNT)
+                            : undefined,
+                        },
+                      },
+                    ]
+                  : []),
+                // Gated on an explicit ON/OFF SWITCH, not on a credential.
+                //
+                // Gating on BLUE_DART_LICENCE_KEY (as this did until #1285's
+                // follow-up) coupled "is this provider offered?" to "is this
+                // secret wired?" — and prod had neither, so #1297 shipped a
+                // registered provider that never appeared. A boolean is the same
+                // shape as STRIPE_CONNECT_ENABLED and is checkable at a glance.
+                //
+                // Credentials are NOT the gate: they live in the encrypted
+                // category:shipping SocialPlatform record. The env values below
+                // are a documented FALLBACK for when the module container cannot
+                // reach that store — see resolveAdapter() in bluedart/service.ts.
+                ...(process.env.BLUE_DART_PROVIDER_ENABLED === "true"
+                  ? [
+                      {
+                        resolve: "./src/modules/shipping-providers/bluedart",
+                        id: "bluedart",
+                        options: {
+                          client_id: process.env.BLUE_DART_CLIENT_ID,
+                          client_secret: process.env.BLUE_DART_CLIENT_SECRET,
+                          login_id: process.env.BLUE_DART_LOGIN_ID,
+                          licence_key: process.env.BLUE_DART_LICENCE_KEY,
+                          customer_code: process.env.BLUE_DART_CUSTOMER_CODE,
+                          api_type: process.env.BLUE_DART_API_TYPE,
+                          version: process.env.BLUE_DART_VERSION,
+                          origin_area: process.env.BLUE_DART_ORIGIN_AREA,
+                          tracking_licence_key:
+                            process.env.BLUE_DART_TRACKING_LICENCE_KEY,
+                          sandbox: process.env.BLUE_DART_SANDBOX === "true",
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.DTDC_API_KEY
+                  ? [
+                      {
+                        resolve: "@jytextiles/medusa-plugin-dtdc-shipping/providers/dtdc",
+                        id: "dtdc",
+                        options: {
+                          customer_code: process.env.DTDC_CUSTOMER_CODE,
+                          api_key: process.env.DTDC_API_KEY,
+                          sandbox: process.env.DTDC_SANDBOX === "true",
+                          tracking_username: process.env.DTDC_TRACKING_USERNAME,
+                          tracking_password: process.env.DTDC_TRACKING_PASSWORD,
+                          tracking_access_token:
+                            process.env.DTDC_TRACKING_ACCESS_TOKEN,
+                          default_service_type:
+                            process.env.DTDC_DEFAULT_SERVICE_TYPE,
+                          /**
+                           * 🔴 What the parcel CONTAINS, on the waybill. The
+                           * plugin's wire default used to be "2" = MOBILE, so a
+                           * textile parcel was declared as a phone. Accepts an
+                           * id ("38") or a name ("CLOTHING"); unset falls to
+                           * CLOTHING in the plugin.
+                           */
+                          default_commodity_id:
+                            process.env.DTDC_DEFAULT_COMMODITY_ID,
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.DHL_API_KEY
+                  ? [
+                      {
+                        resolve: "./src/modules/shipping-providers/dhl",
+                        id: "dhl-express",
+                        options: {
+                          api_key: process.env.DHL_API_KEY,
+                          api_secret: process.env.DHL_API_SECRET,
+                          account_number: process.env.DHL_ACCOUNT_NUMBER,
+                          sandbox: process.env.DHL_SANDBOX === "true",
+                          // What an UNQUOTABLE lane costs. Mirrors Shiprocket's
+                          // fallback: without it, calculatePrice answers 0 — free
+                          // international freight wearing a real quote. `US=3500`
+                          // (ISO2=minor units); see shiprocket/flat-fallback.ts.
+                          flat_fallback_amounts: parseFlatFallbackAmounts(
+                            process.env.DHL_FLAT_FALLBACK_AMOUNTS
+                          ),
+                          flat_fallback_amount: process.env.DHL_FLAT_FALLBACK_AMOUNT
+                            ? Number(process.env.DHL_FLAT_FALLBACK_AMOUNT)
+                            : undefined,
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.UPS_CLIENT_ID
+                  ? [
+                      {
+                        resolve: "./src/modules/shipping-providers/ups",
+                        id: "ups",
+                        options: {
+                          client_id: process.env.UPS_CLIENT_ID,
+                          client_secret: process.env.UPS_CLIENT_SECRET,
+                          account_number: process.env.UPS_ACCOUNT_NUMBER,
+                          sandbox: process.env.UPS_SANDBOX === "true",
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.FEDEX_CLIENT_ID
+                  ? [
+                      {
+                        resolve: "./src/modules/shipping-providers/fedex",
+                        id: "fedex",
+                        options: {
+                          client_id: process.env.FEDEX_CLIENT_ID,
+                          client_secret: process.env.FEDEX_CLIENT_SECRET,
+                          account_number: process.env.FEDEX_ACCOUNT_NUMBER,
+                          sandbox: process.env.FEDEX_SANDBOX === "true",
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.AUSPOST_CLIENT_ID
+                  ? [
+                      {
+                        resolve: "./src/modules/shipping-providers/auspost",
+                        id: "auspost",
+                        options: {
+                          client_id: process.env.AUSPOST_CLIENT_ID,
+                          client_secret: process.env.AUSPOST_CLIENT_SECRET,
+                          account_number: process.env.AUSPOST_ACCOUNT_NUMBER,
+                          sandbox: process.env.AUSPOST_SANDBOX === "true",
+                        },
+                      },
+                    ]
+                  : []),
+                ...(process.env.SHIPGLOBAL_USERNAME
+                  ? [
+                      {
+                        resolve: "./src/modules/shipping-providers/shipglobal",
+                        id: "shipglobal",
+                        options: {
+                          username: process.env.SHIPGLOBAL_USERNAME,
+                          password: process.env.SHIPGLOBAL_PASSWORD,
+                          service: process.env.SHIPGLOBAL_SERVICE,
+                          // What an UNQUOTABLE lane costs. Mirrors Shiprocket's
+                          // fallback: without it, calculatePrice answers 0 — free
+                          // international freight wearing a real quote.
+                          flat_fallback_amounts: parseFlatFallbackAmounts(
+                            process.env.SHIPGLOBAL_FLAT_FALLBACK_AMOUNTS
+                          ),
+                          flat_fallback_amount: process.env
+                            .SHIPGLOBAL_FLAT_FALLBACK_AMOUNT
+                            ? Number(process.env.SHIPGLOBAL_FLAT_FALLBACK_AMOUNT)
+                            : undefined,
+                        },
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          },
+        ]
+      : []),
+  {
+    resolve: "./src/modules/email_templates",
+  },
+  {
+    resolve: "./src/modules/agreements",
+  },
+  {
+    resolve: "./src/modules/agreement-responses",
+  },
+  {
+    resolve: "./src/modules/media",
+  },
+  {
+    // What a vision model saw in a textile image. Typed because "show me more
+    // fabrics like this" filters on pattern / weight / cloth type, and
+    // query.graph cannot filter into JSON subkeys.
+    resolve: "./src/modules/textile-analysis",
+  },
+  {
+    resolve: "./src/modules/fullfilled_orders",
+  },
+  {
+    resolve: "@medusajs/index",
+  },
+  {
+    resolve: "./src/modules/feedback",
+  },
+  {
+    resolve: "./src/modules/analytics",
+  },
+  {
+    resolve: "./src/modules/etsysync",
+  },
+  {
+    resolve: "./src/modules/external_stores",
+    definition: { isQueryable: false },
+  },
+  {
+    resolve: "./src/modules/google_merchant",
+  },
+  {
+    resolve: "./src/modules/ops_audit",
+  },
+  {
+    resolve: "./src/modules/location_ownership",
+  },
+  {
+    resolve: "./src/modules/marketing",
+  },
+  {
+    resolve: "./src/modules/encryption",
+    definition: { isQueryable: false },
+  },
+  {
+    resolve: "./src/modules/visual_flows",
+  },
+  {
+    resolve: "./src/modules/aivtwo",
+  },
+  {
+    resolve: "./src/modules/forms",
+  },
+  {
+      resolve: "./src/modules/production_runs",
+  },
+  {
+    resolve: "./src/modules/production_policy",
+  },
+  {
+    resolve: "./src/modules/ad-planning",
+  },
+  {
+    resolve: "./src/modules/spec_store",
+  },
+    {
+      resolve: "@medusajs/medusa/translation",
+    },
+    {
+    resolve: "./src/modules/inbound_emails",
+  },
+   {
+      resolve: "./src/modules/hang_tag_settings",
+    },
+  {
+    resolve: "./src/modules/payment_reports",
+  },
+  {
+    resolve: "./src/modules/payment_submissions",
+  },
+  {
+    resolve: "./src/modules/email-provider-manager",
+  },
+  {
+    resolve: "./src/modules/email_suppression",
+  },
+  {
+    resolve: "./src/modules/email_engagement",
+  },
+  {
+    resolve: "./src/modules/kit",
+  },
+  {
+    resolve: "./src/modules/audience",
+  },
+  {
+    resolve: "./src/modules/partner-push",
+  },
+  {
+    resolve: "./src/modules/messaging",
+  },
+  {
+    resolve: "./src/modules/stats",
+  },
+],
+});
