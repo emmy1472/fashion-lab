@@ -131,44 +131,473 @@ function getRibbedKnitBumpMap(): THREE.CanvasTexture | null {
   return tex;
 }
 
-/**
- * Ghost-mannequin studio floor plinth.
- * Keeps the interior of all 3D garments completely unobstructed (zero cylinder clipping)
- * while grounding the 3D viewport with a sleek architectural turntable ring below the garment.
- */
-export function createMannequinPedestal(_category: string = "Outerwear"): THREE.Group {
-  const group = new THREE.Group();
-  group.name = "mannequin_pedestal";
+export type MannequinGender = "female" | "male" | "none";
+export type MannequinFinish = "linen" | "alabaster" | "charcoal";
 
+export interface MannequinOptions {
+  gender?: MannequinGender;
+  category?: string;
+  finish?: MannequinFinish;
+  showTapes?: boolean;
+}
+
+/**
+ * Procedural Anatomical 3D Human Mannequin (Male, Female, or Ghost).
+ * Sculpted for authentic tailor dress form proportions with realistic bust/chest,
+ * waistline taper, pelvic form, slender legs fitting inside trousers/jeans,
+ * chrome neck finials, shoulder scye caps, and architectural plinth stand.
+ */
+export function createHumanMannequin(
+  gender: MannequinGender = "female",
+  _category: string = "Tops",
+  skinFinish: MannequinFinish = "linen"
+): THREE.Group {
+  const group = new THREE.Group();
+  group.name = "human_mannequin";
+
+  const isFemale = gender === "female";
+  const isNone = gender === "none";
+
+  // Base materials
   const brushedMetal = new THREE.MeshStandardMaterial({
+    name: "mat_mannequin_base",
     color: 0xcbd5e1,
     roughness: 0.25,
     metalness: 0.8,
   });
 
   const accentRingMat = new THREE.MeshStandardMaterial({
-    color: 0x10b981,
+    name: "mat_mannequin_accent",
+    color: isFemale ? 0x10b981 : 0xd97706,
     roughness: 0.3,
     metalness: 0.4,
-    emissive: new THREE.Color(0x064e3b),
+    emissive: new THREE.Color(isFemale ? 0x064e3b : 0x78350f),
     emissiveIntensity: 0.25,
   });
 
-  // Low-profile architectural turntable disc far below the garment hem
+  // Architectural turntable plinth disc far below the garment hem
   const baseGeom = new THREE.CylinderGeometry(0.46, 0.50, 0.035, 48);
   const baseMesh = new THREE.Mesh(baseGeom, brushedMetal);
   baseMesh.position.set(0, -1.52, 0);
   baseMesh.receiveShadow = true;
   group.add(baseMesh);
 
-  // Subtle emerald studio ring
+  // Studio accent ring around the plinth
   const ringGeom = new THREE.TorusGeometry(0.465, 0.006, 12, 64);
   const ringMesh = new THREE.Mesh(ringGeom, accentRingMat);
   ringMesh.rotation.x = Math.PI / 2;
   ringMesh.position.set(0, -1.502, 0);
   group.add(ringMesh);
 
+  // Center chrome stand collar
+  const collarGeom = new THREE.CylinderGeometry(0.060, 0.070, 0.024, 32);
+  const collarMesh = new THREE.Mesh(collarGeom, brushedMetal);
+  collarMesh.position.set(0, -1.492, 0);
+  group.add(collarMesh);
+
+  // If ghost mode selected, stop here (clean floating garment on plinth)
+  if (isNone) {
+    return group;
+  }
+
+  // --- Human Mannequin Materials ---
+  const bodyColor =
+    skinFinish === "alabaster"
+      ? 0xf8fafc
+      : skinFinish === "charcoal"
+      ? 0x242933
+      : 0xede8e1; // warm tailor canvas linen
+
+  const mannequinMat = new THREE.MeshStandardMaterial({
+    name: "mat_mannequin_body",
+    color: bodyColor,
+    roughness: skinFinish === "alabaster" ? 0.42 : 0.68,
+    metalness: skinFinish === "alabaster" ? 0.08 : 0.04,
+    side: THREE.DoubleSide,
+  });
+
+  const chromeMat = new THREE.MeshStandardMaterial({
+    name: "mat_mannequin_chrome",
+    color: 0xdce3ea,
+    roughness: 0.18,
+    metalness: 0.9,
+  });
+
+  const tapeColor = isFemale ? 0x0e6e55 : 0xc9a877;
+  const tapeMat = new THREE.MeshStandardMaterial({
+    name: "mat_mannequin_tape",
+    color: tapeColor,
+    roughness: 0.45,
+    metalness: 0.12,
+  });
+
+  // 1. Center Upright Chrome Stand Rod (runs from plinth base up to pelvic base)
+  const standRodGeom = new THREE.CylinderGeometry(0.015, 0.015, 1.95, 24);
+  const standRodMesh = new THREE.Mesh(standRodGeom, chromeMat);
+  standRodMesh.position.set(0, -0.55, -0.04);
+  standRodMesh.castShadow = true;
+  group.add(standRodMesh);
+
+  // 2. Neck & Finial Hardware
+  // Finial Knob
+  const knobGeom = new THREE.SphereGeometry(0.018, 16, 16);
+  const knobMesh = new THREE.Mesh(knobGeom, chromeMat);
+  knobMesh.position.set(0, 1.66, 0.005);
+  knobMesh.castShadow = true;
+  group.add(knobMesh);
+
+  // Finial Cap Disc
+  const capDiscGeom = new THREE.CylinderGeometry(
+    isFemale ? 0.046 : 0.058,
+    isFemale ? 0.054 : 0.068,
+    0.03,
+    32
+  );
+  const capDiscMesh = new THREE.Mesh(capDiscGeom, chromeMat);
+  capDiscMesh.position.set(0, 1.625, 0.005);
+  capDiscMesh.castShadow = true;
+  group.add(capDiscMesh);
+
+  // Contoured Neck
+  const neckGeom = new THREE.CylinderGeometry(
+    isFemale ? 0.056 : 0.072,
+    isFemale ? 0.070 : 0.088,
+    0.16,
+    32
+  );
+  const neckMesh = new THREE.Mesh(neckGeom, mannequinMat);
+  neckMesh.position.set(0, 1.52, 0.005);
+  neckMesh.castShadow = true;
+  neckMesh.receiveShadow = true;
+  group.add(neckMesh);
+
+  // 3. Parametric Sculpted Anatomical Torso
+  const segsU = 48;
+  const segsV = 28;
+  const yTop = 1.44;
+  const yBot = 0.36;
+  const torsoGeom = new THREE.BufferGeometry();
+  const tPos: number[] = [];
+  const tUvs: number[] = [];
+  const tIdx: number[] = [];
+
+  for (let iv = 0; iv <= segsV; iv++) {
+    const v = iv / segsV;
+    const y = yTop - v * (yTop - yBot);
+
+    let rx = 0.2;
+    let rz = 0.14;
+    let zCenter = 0;
+
+    if (isFemale) {
+      if (y > 1.34) {
+        // Neck to shoulder slope
+        const t = (1.44 - y) / 0.10;
+        rx = 0.07 + 0.19 * t;
+        rz = 0.07 + 0.04 * t;
+        zCenter = 0.005;
+      } else if (y > 1.16) {
+        // Shoulder to bust apex
+        const t = (1.34 - y) / 0.18;
+        rx = 0.26 - 0.04 * t;
+        rz = 0.11 + 0.035 * t;
+        zCenter = 0.008 * t;
+      } else if (y > 0.86) {
+        // Bust to natural waist (hourglass taper)
+        const t = (1.16 - y) / 0.30;
+        rx = 0.22 - 0.055 * Math.sin(t * Math.PI * 0.5);
+        rz = 0.145 - 0.030 * Math.sin(t * Math.PI * 0.5);
+        zCenter = 0.008 * (1 - t * 0.5);
+      } else if (y > 0.52) {
+        // Waist to high hip / pelvis flare
+        const t = (0.86 - y) / 0.34;
+        rx = 0.165 + 0.080 * Math.sin(t * Math.PI * 0.5);
+        rz = 0.115 + 0.050 * Math.sin(t * Math.PI * 0.5);
+        zCenter = 0.004 - 0.015 * t;
+      } else {
+        // Pelvis to crotch fork base
+        const t = (0.52 - y) / 0.16;
+        rx = 0.245 - 0.045 * t;
+        rz = 0.165 - 0.020 * t;
+        zCenter = -0.011;
+      }
+    } else {
+      // Male proportions: broad shoulders, athletic chest plate, V-taper
+      if (y > 1.35) {
+        const t = (1.44 - y) / 0.09;
+        rx = 0.088 + 0.26 * t; // slopes out to 0.348 broad shoulders
+        rz = 0.088 + 0.045 * t;
+        zCenter = 0.005;
+      } else if (y > 1.18) {
+        const t = (1.35 - y) / 0.17;
+        rx = 0.348 - 0.085 * t;
+        rz = 0.133 + 0.022 * t;
+        zCenter = 0.012;
+      } else if (y > 0.88) {
+        const t = (1.18 - y) / 0.30;
+        rx = 0.263 - 0.058 * Math.sin(t * Math.PI * 0.5);
+        rz = 0.155 - 0.020 * Math.sin(t * Math.PI * 0.5);
+        zCenter = 0.008;
+      } else if (y > 0.52) {
+        const t = (0.88 - y) / 0.36;
+        rx = 0.205 + 0.020 * Math.sin(t * Math.PI * 0.5);
+        rz = 0.135 + 0.017 * Math.sin(t * Math.PI * 0.5);
+        zCenter = -0.005 * t;
+      } else {
+        const t = (0.52 - y) / 0.16;
+        rx = 0.225 - 0.022 * t;
+        rz = 0.152 - 0.012 * t;
+        zCenter = -0.008;
+      }
+    }
+
+    for (let iu = 0; iu <= segsU; iu++) {
+      const u = iu / segsU;
+      const theta = u * Math.PI * 2;
+      const sinT = Math.sin(theta);
+      const cosT = Math.cos(theta);
+
+      let bustBulge = 0;
+      let pecBulge = 0;
+      let gluteBulge = 0;
+
+      if (isFemale) {
+        // Feminine breast contours centered at apexes
+        if (y >= 1.06 && y <= 1.28) {
+          const bustV = Math.max(0, 1 - Math.pow((y - 1.18) / 0.09, 2));
+          const leftDist = Math.hypot(sinT - 0.42, cosT - 0.88);
+          const rightDist = Math.hypot(sinT + 0.42, cosT - 0.88);
+          bustBulge =
+            bustV *
+            (Math.exp(-Math.pow(leftDist / 0.38, 2)) +
+              Math.exp(-Math.pow(rightDist / 0.38, 2))) *
+            0.036;
+        }
+        // Glute curvature in back
+        if (y >= 0.36 && y <= 0.62 && cosT < -0.2) {
+          const gluteV = Math.max(0, 1 - Math.pow((y - 0.48) / 0.12, 2));
+          gluteBulge = gluteV * Math.pow(-cosT, 1.4) * 0.022;
+        }
+      } else {
+        // Male pectoral plates
+        if (y >= 1.12 && y <= 1.28 && cosT > 0.3) {
+          const pecV = Math.max(0, 1 - Math.pow((y - 1.21) / 0.075, 2));
+          pecBulge = pecV * Math.pow(cosT, 1.2) * 0.015;
+        }
+        // Athletic glute in back
+        if (y >= 0.36 && y <= 0.62 && cosT < -0.25) {
+          const gluteV = Math.max(0, 1 - Math.pow((y - 0.48) / 0.12, 2));
+          gluteBulge = gluteV * Math.pow(-cosT, 1.3) * 0.016;
+        }
+      }
+
+      const px = sinT * rx;
+      const pz = cosT * rz + zCenter + (bustBulge || pecBulge || 0) - gluteBulge;
+      const py = y;
+
+      tPos.push(px, py, pz);
+      tUvs.push(u, v);
+    }
+  }
+
+  for (let iv = 0; iv < segsV; iv++) {
+    for (let iu = 0; iu < segsU; iu++) {
+      const a = iv * (segsU + 1) + iu;
+      const b = a + 1;
+      const c = a + (segsU + 1);
+      const d = c + 1;
+      tIdx.push(a, c, b, b, c, d);
+    }
+  }
+
+  torsoGeom.setIndex(tIdx);
+  torsoGeom.setAttribute("position", new THREE.Float32BufferAttribute(tPos, 3));
+  torsoGeom.setAttribute("uv", new THREE.Float32BufferAttribute(tUvs, 2));
+  torsoGeom.computeVertexNormals();
+
+  const torsoMesh = new THREE.Mesh(torsoGeom, mannequinMat);
+  torsoMesh.castShadow = true;
+  torsoMesh.receiveShadow = true;
+  group.add(torsoMesh);
+
+  // 4. Shoulder Scye Arm Caps (Chrome hardware discs at shoulder edges)
+  const shoulderX = isFemale ? 0.255 : 0.34;
+  for (const side of [-1, 1]) {
+    const scyeGeom = new THREE.CylinderGeometry(0.046, 0.05, 0.018, 24);
+    const scyeMesh = new THREE.Mesh(scyeGeom, chromeMat);
+    scyeMesh.position.set(side * shoulderX, 1.32, 0.005);
+    scyeMesh.rotation.z = side * 0.38;
+    scyeMesh.castShadow = true;
+    group.add(scyeMesh);
+
+    // Natural resting tailor arms alongside torso
+    const armGroup = new THREE.Group();
+    // Upper Arm
+    const upperArmGeom = new THREE.CylinderGeometry(
+      isFemale ? 0.042 : 0.05,
+      isFemale ? 0.038 : 0.044,
+      0.38,
+      20
+    );
+    const upperArmMesh = new THREE.Mesh(upperArmGeom, mannequinMat);
+    upperArmMesh.position.set(side * (shoulderX + 0.032), 1.11, 0.005);
+    upperArmMesh.rotation.z = side * 0.08;
+    upperArmMesh.castShadow = true;
+    armGroup.add(upperArmMesh);
+
+    // Elbow Joint
+    const elbowGeom = new THREE.SphereGeometry(isFemale ? 0.036 : 0.042, 16, 12);
+    const elbowMesh = new THREE.Mesh(elbowGeom, mannequinMat);
+    elbowMesh.position.set(side * (shoulderX + 0.046), 0.91, -0.005);
+    armGroup.add(elbowMesh);
+
+    // Forearm
+    const foreArmGeom = new THREE.CylinderGeometry(
+      isFemale ? 0.035 : 0.041,
+      isFemale ? 0.03 : 0.035,
+      0.34,
+      20
+    );
+    const foreArmMesh = new THREE.Mesh(foreArmGeom, mannequinMat);
+    foreArmMesh.position.set(side * (shoulderX + 0.048), 0.74, 0.012);
+    foreArmMesh.rotation.z = -side * 0.04;
+    foreArmMesh.castShadow = true;
+    armGroup.add(foreArmMesh);
+
+    // Wrist Chrome Cap
+    const wristGeom = new THREE.CylinderGeometry(
+      isFemale ? 0.028 : 0.034,
+      isFemale ? 0.03 : 0.036,
+      0.014,
+      16
+    );
+    const wristMesh = new THREE.Mesh(wristGeom, chromeMat);
+    wristMesh.position.set(side * (shoulderX + 0.05), 0.565, 0.015);
+    armGroup.add(wristMesh);
+
+    group.add(armGroup);
+  }
+
+  // 5. Full Mannequin Legs (Both Left & Right, contoured to fit inside trousers & jeans)
+  const legOffsetX = isFemale ? 0.125 : 0.136;
+  for (const side of [-1, 1]) {
+    const legGroup = new THREE.Group();
+    const lPosX = side * legOffsetX;
+
+    // Upper Thigh (from crotch base y=0.36 down to y=0.04)
+    const upperThighGeom = new THREE.CylinderGeometry(
+      isFemale ? 0.092 : 0.105,
+      isFemale ? 0.076 : 0.086,
+      0.32,
+      24
+    );
+    const upperThighMesh = new THREE.Mesh(upperThighGeom, mannequinMat);
+    upperThighMesh.position.set(lPosX, 0.2, 0);
+    upperThighMesh.castShadow = true;
+    upperThighMesh.receiveShadow = true;
+    legGroup.add(upperThighMesh);
+
+    // Lower Thigh (from y=0.04 down to knee y=-0.26)
+    const lowerThighGeom = new THREE.CylinderGeometry(
+      isFemale ? 0.076 : 0.086,
+      isFemale ? 0.064 : 0.072,
+      0.3,
+      24
+    );
+    const lowerThighMesh = new THREE.Mesh(lowerThighGeom, mannequinMat);
+    lowerThighMesh.position.set(lPosX, -0.11, 0);
+    lowerThighMesh.castShadow = true;
+    lowerThighMesh.receiveShadow = true;
+    legGroup.add(lowerThighMesh);
+
+    // Knee Cap / Patella Joint
+    const kneeGeom = new THREE.SphereGeometry(isFemale ? 0.056 : 0.064, 20, 16);
+    const kneeMesh = new THREE.Mesh(kneeGeom, mannequinMat);
+    kneeMesh.position.set(lPosX, -0.27, 0.008);
+    kneeMesh.scale.set(1, 1.1, 0.85);
+    legGroup.add(kneeMesh);
+
+    // Calf (from knee y=-0.28 down to ankle y=-0.68)
+    const calfGeom = new THREE.CylinderGeometry(
+      isFemale ? 0.064 : 0.072,
+      isFemale ? 0.048 : 0.054,
+      0.4,
+      24
+    );
+    const calfMesh = new THREE.Mesh(calfGeom, mannequinMat);
+    calfMesh.position.set(lPosX, -0.48, -0.005);
+    calfMesh.castShadow = true;
+    calfMesh.receiveShadow = true;
+    legGroup.add(calfMesh);
+
+    // Lower Leg to Ankle (from y=-0.68 down to y=-0.94)
+    const ankleGeom = new THREE.CylinderGeometry(
+      isFemale ? 0.048 : 0.054,
+      isFemale ? 0.04 : 0.046,
+      0.26,
+      20
+    );
+    const ankleMesh = new THREE.Mesh(ankleGeom, mannequinMat);
+    ankleMesh.position.set(lPosX, -0.81, 0);
+    ankleMesh.castShadow = true;
+    legGroup.add(ankleMesh);
+
+    // Minimalist Tailor Foot / Shoe Stand Form (peeks cleanly through trousers & jeans cuff)
+    const footGroup = new THREE.Group();
+    const footGeom = new THREE.BoxGeometry(
+      isFemale ? 0.068 : 0.076,
+      0.065,
+      isFemale ? 0.17 : 0.19
+    );
+    const footMesh = new THREE.Mesh(footGeom, mannequinMat);
+    footMesh.position.set(lPosX, -0.97, 0.035);
+    footMesh.castShadow = true;
+    footGroup.add(footMesh);
+
+    // Chrome Ankle Cuff Ring
+    const cuffGeom = new THREE.TorusGeometry(isFemale ? 0.042 : 0.048, 0.004, 8, 24);
+    const cuffMesh = new THREE.Mesh(cuffGeom, chromeMat);
+    cuffMesh.rotation.x = Math.PI / 2;
+    cuffMesh.position.set(lPosX, -0.938, 0);
+    footGroup.add(cuffMesh);
+
+    // Vertical Stand Rod connection extending down to plinth
+    const pegGeom = new THREE.CylinderGeometry(0.01, 0.01, 0.5, 16);
+    const pegMesh = new THREE.Mesh(pegGeom, chromeMat);
+    pegMesh.position.set(lPosX, -1.24, 0);
+    footGroup.add(pegMesh);
+
+    legGroup.add(footGroup);
+    group.add(legGroup);
+  }
+
+  // 6. Tailor Measurement Style Line Tapes (Ribbon rings hugging the form)
+  const bustTapeGeom = new THREE.TorusGeometry(isFemale ? 0.224 : 0.265, 0.0035, 8, 48);
+  const bustTapeMesh = new THREE.Mesh(bustTapeGeom, tapeMat);
+  bustTapeMesh.rotation.x = Math.PI / 2;
+  bustTapeMesh.position.set(0, 1.18, 0.008);
+  group.add(bustTapeMesh);
+
+  const waistTapeGeom = new THREE.TorusGeometry(isFemale ? 0.168 : 0.208, 0.0035, 8, 48);
+  const waistTapeMesh = new THREE.Mesh(waistTapeGeom, tapeMat);
+  waistTapeMesh.rotation.x = Math.PI / 2;
+  waistTapeMesh.position.set(0, isFemale ? 0.86 : 0.88, 0.004);
+  group.add(waistTapeMesh);
+
+  const hipTapeGeom = new THREE.TorusGeometry(isFemale ? 0.248 : 0.228, 0.0035, 8, 48);
+  const hipTapeMesh = new THREE.Mesh(hipTapeGeom, tapeMat);
+  hipTapeMesh.rotation.x = Math.PI / 2;
+  hipTapeMesh.position.set(0, 0.52, -0.005);
+  group.add(hipTapeMesh);
+
   return group;
+}
+
+export function createMannequinPedestal(
+  category: string = "Outerwear",
+  gender: MannequinGender = "female"
+): THREE.Group {
+  return createHumanMannequin(gender, category);
 }
 
 /**

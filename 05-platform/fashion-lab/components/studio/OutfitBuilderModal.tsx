@@ -18,7 +18,8 @@ import {
   User,
 } from "lucide-react";
 import {
-  createMannequinPedestal,
+  createHumanMannequin,
+  MannequinGender,
   buildGarment3DModel,
   ScratchConfig3D,
 } from "./garment3DBuilder";
@@ -38,6 +39,7 @@ const TOPS_CATALOG = [
 ];
 const BOTTOMS_CATALOG = [
   { id: "denim-jeans", name: "Wide-Leg Jeans", emoji: "👖" },
+  { id: "tailored-trousers", name: "Tailored Trousers", emoji: "👖" },
   { id: "drawstring-jeans", name: "Drawstring Jeans", emoji: "👖" },
   { id: "joggers", name: "Joggers", emoji: "👖" },
 ];
@@ -46,6 +48,9 @@ const BOTTOMS_CATALOG = [
 function defaultZones(garmentId: string): Record<string, string> {
   if (garmentId === "denim-jeans" || garmentId === "jeans") {
     return { body: "#6B9AC4", waistband: "#5A88B2", pocket: "#6B9AC4", placket: "#5A88B2", yoke: "#5A88B2", cuff: "#6B9AC4", collar: "#8B5A2B" };
+  }
+  if (garmentId === "tailored-trousers" || garmentId === "trousers" || garmentId === "trouser" || garmentId === "slacks") {
+    return { body: "#2A2D34", waistband: "#20232A", pocket: "#2A2D34", placket: "#20232A", cuff: "#2A2D34", pleat: "#1A1C22" };
   }
   if (garmentId === "drawstring-jeans") {
     return { body: "#2A2D34", waistband: "#24272D", pocket: "#2A2D34", placket: "#24272D", yoke: "#2A2D34", cuff: "#2A2D34", collar: "#1E2024", drawstring: "#E2E8F0" };
@@ -184,6 +189,7 @@ export function OutfitBuilderModal({
   const [showTopPicker, setShowTopPicker] = useState(false);
   const [showBottomPicker, setShowBottomPicker] = useState(false);
   const [fitNote, setFitNote] = useState<string | null>(null);
+  const [mannequinGender, setMannequinGender] = useState<MannequinGender>("female");
 
   // ── Init Three.js scene (runs once when modal opens) ────────────────────────
   useEffect(() => {
@@ -245,11 +251,6 @@ export function OutfitBuilderModal({
     floor.position.y = -1.56;
     floor.receiveShadow = true;
     scene.add(floor);
-
-    // Pedestal (full-body mannequin)
-    const pedestal = createMannequinPedestal("Tops");
-    pedestalRef.current = pedestal;
-    scene.add(pedestal);
 
     // Offscreen canvases — top garment
     const mkCanvas = () => {
@@ -374,6 +375,23 @@ export function OutfitBuilderModal({
   useEffect(() => {
     if (isOpen && sceneRef.current) buildBottomMesh();
   }, [isOpen, buildBottomMesh]);
+
+  // ── Rebuild Mannequin when gender changes ──────────────────────────────────
+  useEffect(() => {
+    if (!isOpen || !sceneRef.current) return;
+    if (pedestalRef.current) {
+      sceneRef.current.remove(pedestalRef.current);
+      pedestalRef.current.traverse((c) => {
+        if ((c as THREE.Mesh).isMesh) {
+          (c as THREE.Mesh).geometry?.dispose();
+        }
+      });
+      pedestalRef.current = null;
+    }
+    const mannequin = createHumanMannequin(mannequinGender, "Tops", "linen");
+    pedestalRef.current = mannequin;
+    sceneRef.current.add(mannequin);
+  }, [isOpen, mannequinGender]);
 
   // ── Sync top texture from current design's SVG (if current is top) ─────────
   useEffect(() => {
@@ -506,13 +524,43 @@ export function OutfitBuilderModal({
               <p className="text-[10px] text-emerald-200">Combine garments on a mannequin to check fit &amp; style</p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-8 h-8 rounded-xl bg-white/15 hover:bg-white/30 text-white flex items-center justify-center transition"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3">
+            {/* Mannequin Gender Toggle */}
+            <div className="flex items-center bg-black/25 p-0.5 rounded-lg border border-white/10 text-[11px] font-semibold text-white">
+              <button
+                type="button"
+                onClick={() => setMannequinGender("female")}
+                className={`px-2.5 py-1 rounded-md transition ${mannequinGender === "female" ? "bg-emerald-500 text-white shadow-xs" : "text-emerald-100 hover:text-white"}`}
+                title="Female Human Mannequin"
+              >
+                ♀ Female
+              </button>
+              <button
+                type="button"
+                onClick={() => setMannequinGender("male")}
+                className={`px-2.5 py-1 rounded-md transition ${mannequinGender === "male" ? "bg-emerald-500 text-white shadow-xs" : "text-emerald-100 hover:text-white"}`}
+                title="Male Human Mannequin"
+              >
+                ♂ Male
+              </button>
+              <button
+                type="button"
+                onClick={() => setMannequinGender("none")}
+                className={`px-2 py-1 rounded-md transition ${mannequinGender === "none" ? "bg-emerald-500 text-white shadow-xs" : "text-emerald-100 hover:text-white"}`}
+                title="Ghost / Floating"
+              >
+                Ghost
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-8 h-8 rounded-xl bg-white/15 hover:bg-white/30 text-white flex items-center justify-center transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* ── Body ── */}

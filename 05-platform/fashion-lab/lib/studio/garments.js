@@ -1163,6 +1163,11 @@ function modernJeansGarment({ id, name, drawstring = false, fabric }) {
 
 modernJeansGarment({ id: 'denim-jeans', name: 'Baggy Wide-Leg Jeans' });
 modernJeansGarment({
+  id: 'tailored-trousers',
+  name: 'Tailored Wide-Leg Trousers',
+  fabric: '100% Super 120s Worsted Wool Twill, Front Pleats, Clean Creased Leg',
+});
+modernJeansGarment({
   id: 'drawstring-jeans',
   name: 'Drawstring Wide-Leg Jeans',
   drawstring: true,
@@ -1688,6 +1693,10 @@ export function getGarment(id, scratchConfig) {
     'jacket': 'track-jacket',
     'urban-jacket': 'track-jacket',
     'jeans': 'denim-jeans',
+    'trousers': 'tailored-trousers',
+    'trouser': 'tailored-trousers',
+    'pants': 'denim-jeans',
+    'slacks': 'tailored-trousers',
     'coat': 'blazer',
     'sweater': 'crewneck',
     't-shirt': 'tee',

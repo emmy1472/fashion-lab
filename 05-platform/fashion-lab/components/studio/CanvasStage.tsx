@@ -176,7 +176,119 @@ const CORELDRAW_PATTERN_SHAPES: Array<{
   },
 ];
 
+// 17 Anatomical Landmarks on the Trousers & Jeans Leg Frame Guide (600x700 Tailor Grid)
+const LEG_PATTERN_LANDMARKS: Array<{ id: string; label: string; x: number; y: number }> = [
+  { id: "waist-c", label: "Center Waist", x: 300, y: 150 },
+  { id: "waist-l", label: "Left Waist", x: 168, y: 150 },
+  { id: "waist-r", label: "Right Waist", x: 432, y: 150 },
+  { id: "hip-l", label: "Left Hip Outseam", x: 146, y: 262 },
+  { id: "hip-r", label: "Right Hip Outseam", x: 454, y: 262 },
+  { id: "fly-c", label: "Fly Placket Base", x: 300, y: 248 },
+  { id: "crotch-c", label: "Crotch / Fork Point", x: 300, y: 344 },
+  { id: "thigh-l", label: "Left Mid-Thigh", x: 216, y: 430 },
+  { id: "thigh-r", label: "Right Mid-Thigh", x: 384, y: 430 },
+  { id: "knee-l", label: "Left Knee Pivot", x: 216, y: 500 },
+  { id: "knee-r", label: "Right Knee Pivot", x: 384, y: 500 },
+  { id: "calf-l", label: "Left Calf Girth", x: 216, y: 570 },
+  { id: "calf-r", label: "Right Calf Girth", x: 384, y: 570 },
+  { id: "hem-out-l", label: "Left Outseam Hem", x: 138, y: 664 },
+  { id: "hem-in-l", label: "Left Inseam Hem", x: 292, y: 664 },
+  { id: "hem-in-r", label: "Right Inseam Hem", x: 308, y: 664 },
+  { id: "hem-out-r", label: "Right Outseam Hem", x: 462, y: 664 },
+];
+
+// CorelDRAW Editable Pattern Shapes for Trousers & Denim Jeans
+const TROUSER_JEANS_PATTERN_SHAPES: Array<{
+  id: string;
+  label: string;
+  symmetry: boolean;
+  nodes: VectorShapeNode[];
+}> = [
+  {
+    id: "curved-scoop-pocket",
+    label: "Front Scoop Pocket",
+    symmetry: false,
+    nodes: [
+      { x: 168, y: 182, cx: 198, cy: 196 },
+      { x: 236, y: 226, cx: 244, cy: 262 },
+      { x: 232, y: 288 },
+      { x: 152, y: 242 },
+    ],
+  },
+  {
+    id: "coin-pocket",
+    label: "Coin / Watch Pocket",
+    symmetry: false,
+    nodes: [
+      { x: 202, y: 192 },
+      { x: 234, y: 192 },
+      { x: 234, y: 224 },
+      { x: 202, y: 224 },
+    ],
+  },
+  {
+    id: "back-western-yoke",
+    label: "Back Western Yoke",
+    symmetry: false,
+    nodes: [
+      { x: 164, y: 182 },
+      { x: 436, y: 182 },
+      { x: 446, y: 222 },
+      { x: 300, y: 246 },
+      { x: 154, y: 222 },
+    ],
+  },
+  {
+    id: "spade-back-pocket",
+    label: "Spade Patch Pocket",
+    symmetry: false,
+    nodes: [
+      { x: 182, y: 254 },
+      { x: 272, y: 254 },
+      { x: 270, y: 334, cx: 248, cy: 345 },
+      { x: 227, y: 356, cx: 206, cy: 345 },
+      { x: 184, y: 334 },
+    ],
+  },
+  {
+    id: "knee-articulation-dart",
+    label: "Knee Biker / Cargo Patch",
+    symmetry: false,
+    nodes: [
+      { x: 158, y: 476 },
+      { x: 274, y: 476 },
+      { x: 272, y: 524, cx: 216, cy: 532 },
+      { x: 160, y: 524 },
+    ],
+  },
+  {
+    id: "crotch-gusset",
+    label: "Inseam Diamond Gusset",
+    symmetry: false,
+    nodes: [
+      { x: 300, y: 326 },
+      { x: 326, y: 358 },
+      { x: 300, y: 390 },
+      { x: 274, y: 358 },
+    ],
+  },
+  {
+    id: "fly-shield",
+    label: "J-Stitch Fly Placket",
+    symmetry: false,
+    nodes: [
+      { x: 300, y: 150 },
+      { x: 314, y: 150 },
+      { x: 314, y: 228, cx: 312, cy: 248 },
+      { x: 276, y: 248 },
+      { x: 300, y: 248 },
+    ],
+  },
+];
+
 interface Props {
+  garmentId?: string;
+  garmentCategory?: string;
   svgMarkup: string;
   frontSvgMarkup?: string;
   backSvgMarkup?: string;
@@ -285,6 +397,8 @@ interface Props {
 }
 
 export function CanvasStage({
+  garmentId,
+  garmentCategory,
   svgMarkup,
   frontSvgMarkup,
   backSvgMarkup,
@@ -341,6 +455,21 @@ export function CanvasStage({
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [activeTool, setActiveTool] = useState<StudioCanvasTool>("move");
   const [selectionTarget, setSelectionTarget] = useState<"piece" | "layer">("piece");
+
+  // Determine if active garment is trousers / denim jeans / bottoms (to activate Leg Frame format)
+  const isBottom =
+    garmentCategory === "Bottoms" ||
+    (Boolean(garmentId) &&
+      (garmentId!.includes("jean") ||
+        garmentId!.includes("pant") ||
+        garmentId!.includes("trouser") ||
+        garmentId!.includes("jogger") ||
+        garmentId!.includes("shorts") ||
+        garmentId!.includes("legging") ||
+        garmentId!.includes("bottom")));
+
+  const activeLandmarks = isBottom ? LEG_PATTERN_LANDMARKS : HUMAN_PATTERN_LANDMARKS;
+  const activePatternShapes = isBottom ? TROUSER_JEANS_PATTERN_SHAPES : CORELDRAW_PATTERN_SHAPES;
   const [swatchTargetMode, setSwatchTargetMode] = useState<"fill" | "outline">("fill");
   const [selectedNodeIdx, setSelectedNodeIdx] = useState<number>(0);
   const [snappedLandmark, setSnappedLandmark] = useState<{
@@ -461,9 +590,9 @@ export function CanvasStage({
     }
   };
 
-  // Insert 1-Click CorelDRAW Clothing Shape fitted to Human Pattern Guide
+  // Insert 1-Click CorelDRAW Clothing Shape fitted to Human Pattern Guide / Leg Frame
   const handleInsertClothingShape = (
-    preset: (typeof CORELDRAW_PATTERN_SHAPES)[number]
+    preset: { id: string; label: string; symmetry: boolean; nodes: VectorShapeNode[] }
   ) => {
     if (!onAddSketchLayer) return;
     const clonedNodes: VectorShapeNode[] = preset.nodes.map((n) => ({ ...n }));
@@ -598,7 +727,7 @@ export function CanvasStage({
       if (snap && showPatternGuide) {
         let bestDist = 13.5;
         let matched: { label: string; x: number; y: number } | null = null;
-        for (const lm of HUMAN_PATTERN_LANDMARKS) {
+        for (const lm of activeLandmarks) {
           const d = Math.hypot(x - lm.x, y - lm.y);
           if (d < bestDist) {
             bestDist = d;
@@ -611,11 +740,27 @@ export function CanvasStage({
           setSnappedLandmark({ label: matched.label, x, y });
           return { x, y };
         }
-        // Magnetic snap to Human Center Grainline (X = 300)
+        // Magnetic snap to Grainlines (Center X=300, Left Leg X=216, Right Leg X=384)
         if (Math.abs(x - 300) < 9) {
           x = 300;
-          setSnappedLandmark({ label: "Center Grainline (X=300)", x: 300, y });
+          setSnappedLandmark({
+            label: isBottom ? "Center Fly / Rise Axis (X=300)" : "Center Grainline (X=300)",
+            x: 300,
+            y,
+          });
           return { x, y };
+        }
+        if (isBottom) {
+          if (Math.abs(x - 216) < 9) {
+            x = 216;
+            setSnappedLandmark({ label: "Left Leg Grainline (X=216)", x: 216, y });
+            return { x, y };
+          }
+          if (Math.abs(x - 384) < 9) {
+            x = 384;
+            setSnappedLandmark({ label: "Right Leg Grainline (X=384)", x: 384, y });
+            return { x, y };
+          }
         }
       }
       setSnappedLandmark(null);
@@ -1603,9 +1748,19 @@ export function CanvasStage({
                     ? "bg-[#ECFDF5] text-[#0E6E55] border-[#10B981]/40"
                     : "bg-white text-gray-600 border-gray-200 hover:text-gray-900"
                 }`}
-                title="Toggle Anatomical Dress Form, Tailor Ruler & Human Fit Landmark Snapping"
+                title={
+                  isBottom
+                    ? "Toggle Trousers / Jeans Leg Frame Anatomical Calibration Guide & Grainlines"
+                    : "Toggle Anatomical Dress Form, Tailor Ruler & Human Fit Landmark Snapping"
+                }
               >
-                {showPatternGuide ? "Pattern Guide: ON" : "Pattern Guide"}
+                {showPatternGuide
+                  ? isBottom
+                    ? "Leg Frame Guide: ON"
+                    : "Pattern Guide: ON"
+                  : isBottom
+                  ? "Leg Frame Guide"
+                  : "Pattern Guide"}
               </button>
             )}
 
@@ -1937,9 +2092,11 @@ export function CanvasStage({
               ) : (
                 <div className="flex items-center flex-wrap justify-center gap-1">
                   <span className="font-bold text-gray-600 mr-1">
-                    Drag ◆ Green Fit Nodes on garment OR insert a Clothing Shape:
+                    {isBottom
+                      ? "Drag ◆ Green Fit Nodes on trousers OR insert a Leg Pattern Template:"
+                      : "Drag ◆ Green Fit Nodes on garment OR insert a Clothing Shape:"}
                   </span>
-                  {CORELDRAW_PATTERN_SHAPES.map((preset) => (
+                  {activePatternShapes.map((preset) => (
                     <button
                       key={preset.id}
                       type="button"
@@ -2018,16 +2175,18 @@ export function CanvasStage({
                 </button>
               </div>
 
-              {/* Row of 1-Click Editable Clothing Shapes fitted to the Human Pattern Guide */}
+              {/* Row of 1-Click Editable Clothing Shapes fitted to the Human Pattern Guide / Leg Frame */}
               <div className="flex items-center flex-wrap justify-center gap-1 pt-0.5 border-t border-gray-100 w-full">
-                <span className="font-bold text-gray-500 mr-0.5">Pattern Shapes:</span>
-                {CORELDRAW_PATTERN_SHAPES.map((preset) => (
+                <span className="font-bold text-gray-500 mr-0.5">
+                  {isBottom ? "Leg Templates:" : "Pattern Shapes:"}
+                </span>
+                {activePatternShapes.map((preset) => (
                   <button
                     key={preset.id}
                     type="button"
                     onClick={() => handleInsertClothingShape(preset)}
                     className="px-1.5 py-0.5 rounded bg-[#F8FAFC] hover:bg-[#ECFDF5] text-gray-700 hover:text-[#0E6E55] border border-gray-200 hover:border-emerald-300 font-semibold transition"
-                    title={`Insert editable "${preset.label}" fitted to the human clothing guide`}
+                    title={`Insert editable "${preset.label}" fitted to the pattern frame`}
                   >
                     + {preset.label}
                   </button>
@@ -2385,9 +2544,9 @@ export function CanvasStage({
                   viewBox="0 0 600 700"
                   className="absolute inset-0 w-full h-full pointer-events-none z-20"
                 >
-                  {/* Subtle Human Pattern Landmark Target Dots */}
+                  {/* Subtle Human / Leg Pattern Landmark Target Dots */}
                   {showPatternGuide &&
-                    HUMAN_PATTERN_LANDMARKS.map((lm) => (
+                    activeLandmarks.map((lm) => (
                       <circle
                         key={lm.id}
                         cx={lm.x}
@@ -2481,41 +2640,75 @@ export function CanvasStage({
                     );
                   })}
 
-                {/* 5 Interactive Human Clothing Pattern Fit Nodes (◆) on the Garment Silhouette */}
+                {/* 5 Interactive Pattern Fit Nodes (◆) on Garment / Leg Silhouette */}
                 {showPatternGuide &&
                   onUpdateFitFromNodes &&
-                  [
-                    {
-                      id: "shoulder",
-                      label: "Shoulder Slope",
-                      x: 174 + (fitMeasurements.shoulderWidth || 0),
-                      y: 138,
-                    },
-                    {
-                      id: "chest",
-                      label: "Bust / Chest Width",
-                      x: 152 - (fitMeasurements.chestWidth || 0),
-                      y: 268,
-                    },
-                    {
-                      id: "waist",
-                      label: "Natural Waist Taper",
-                      x: 164 - (fitMeasurements.waistTaper || 0),
-                      y: 392,
-                    },
-                    {
-                      id: "hip",
-                      label: "Hip Flare",
-                      x: 152 - (fitMeasurements.hipWidth || 0),
-                      y: 525,
-                    },
-                    {
-                      id: "hem",
-                      label: "Garment Hem Length",
-                      x: 300,
-                      y: 590 + (fitMeasurements.hemLength || 0),
-                    },
-                  ].map((fp) => (
+                  (isBottom
+                    ? [
+                        {
+                          id: "waist",
+                          label: "Waistband Width",
+                          x: 168 - (fitMeasurements.waistTaper || 0),
+                          y: 150,
+                        },
+                        {
+                          id: "hip",
+                          label: "Seat / Hip Flare",
+                          x: 146 - (fitMeasurements.hipWidth || 0),
+                          y: 262,
+                        },
+                        {
+                          id: "crotch",
+                          label: "Crotch Rise Drop",
+                          x: 300,
+                          y: 344 + (fitMeasurements.shoulderWidth || 0),
+                        },
+                        {
+                          id: "knee",
+                          label: "Knee Articulation Width",
+                          x: 150 - (fitMeasurements.chestWidth || 0),
+                          y: 500,
+                        },
+                        {
+                          id: "hem",
+                          label: "Inseam / Leg Hem Length",
+                          x: 216,
+                          y: 664 + (fitMeasurements.hemLength || 0),
+                        },
+                      ]
+                    : [
+                        {
+                          id: "shoulder",
+                          label: "Shoulder Slope",
+                          x: 174 + (fitMeasurements.shoulderWidth || 0),
+                          y: 138,
+                        },
+                        {
+                          id: "chest",
+                          label: "Bust / Chest Width",
+                          x: 152 - (fitMeasurements.chestWidth || 0),
+                          y: 268,
+                        },
+                        {
+                          id: "waist",
+                          label: "Natural Waist Taper",
+                          x: 164 - (fitMeasurements.waistTaper || 0),
+                          y: 392,
+                        },
+                        {
+                          id: "hip",
+                          label: "Hip Flare",
+                          x: 152 - (fitMeasurements.hipWidth || 0),
+                          y: 525,
+                        },
+                        {
+                          id: "hem",
+                          label: "Garment Hem Length",
+                          x: 300,
+                          y: 590 + (fitMeasurements.hemLength || 0),
+                        },
+                      ]
+                  ).map((fp) => (
                     <div
                       key={fp.id}
                       data-fit-node={fp.id}

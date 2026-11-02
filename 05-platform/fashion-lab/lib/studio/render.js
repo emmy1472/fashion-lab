@@ -324,12 +324,172 @@ function layerSVG(l, defs, project, opts) {
 
 /* ------------------------------------------- anatomical human clothing pattern guide */
 
-function fashionCroquisUnderlaySVG(view, sc, forceShow = false) {
+/* ------------------------------------------- anatomical trousers / jeans leg frame template */
+
+function bottomLegFrameCroquisSVG(view, sc, g) {
+  let rulerTicks = '';
+  // Measure along trousers rise and leg from waist (150) to hem (664)
+  for (let y = 150; y <= 664; y += 40) {
+    const cm = Math.round((y - 150) / 4.6);
+    rulerTicks += `<line x1="22" y1="${y}" x2="34" y2="${y}" stroke="#94a3b8" stroke-width="1.2"/>
+      <text x="38" y="${y + 3}" font-family="Inter, sans-serif" font-size="8.5" font-weight="600" fill="#64748b">${cm}cm</text>`;
+  }
+
+  const isBack = view === 'back';
+
+  return `<g class="cp-croquis-underlay cp-leg-frame-underlay" pointer-events="none">
+    <!-- Height & Outseam Calibration Ruler -->
+    <line x1="22" y1="130" x2="22" y2="675" stroke="#cbd5e1" stroke-width="1.2"/>
+    ${rulerTicks}
+
+    <!-- Upper Body / Pelvis Ghost Mount Line -->
+    <path d="M 235 95 C 248 90, 352 90, 365 95 L 362 148 C 322 152, 278 152, 238 148 Z"
+      fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.6"/>
+    <line x1="300" y1="92" x2="300" y2="150" stroke="#0E6E55" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.6"/>
+
+    <!-- Pelvis & Hip Contour -->
+    <path d="M 168 150 C 150 195, 146 255, 146 295 C 146 320, 148 340, 150 360"
+      fill="none" stroke="#94a3b8" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.75"/>
+    <path d="M 432 150 C 450 195, 454 255, 454 295 C 454 320, 452 340, 450 360"
+      fill="none" stroke="#94a3b8" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.75"/>
+
+    <!-- Left Leg Silhouette Contour Frame -->
+    <path d="M 168 150
+             C 148 200, 146 262, 148 340
+             C 148 430, 150 490, 150 500
+             C 150 535, 146 570, 144 610
+             L 138 664
+             L 292 664
+             L 293 610
+             C 294 570, 294 535, 294 500
+             C 294 450, 296 400, 298 360
+             C 299 350, 300 344, 300 344
+             C 299 344, 295 340, 280 320
+             C 260 290, 240 260, 230 220
+             C 220 180, 200 160, 168 150 Z"
+      fill="#f8fafc" stroke="#94a3b8" stroke-width="1.3" stroke-dasharray="5 3" opacity="0.75"/>
+
+    <!-- Right Leg Silhouette Contour Frame -->
+    <path d="M 432 150
+             C 452 200, 454 262, 452 340
+             C 452 430, 450 490, 450 500
+             C 450 535, 454 570, 456 610
+             L 462 664
+             L 308 664
+             L 307 610
+             C 306 570, 306 535, 306 500
+             C 306 450, 304 400, 302 360
+             C 301 350, 300 344, 300 344
+             C 301 344, 305 340, 320 320
+             C 340 290, 360 260, 370 220
+             C 380 180, 400 160, 432 150 Z"
+      fill="#f8fafc" stroke="#94a3b8" stroke-width="1.3" stroke-dasharray="5 3" opacity="0.75"/>
+
+    <!-- Center Fly / Rise Axis -->
+    <line x1="300" y1="145" x2="300" y2="344" stroke="#0E6E55" stroke-width="1.4" stroke-dasharray="5 3" opacity="0.8"/>
+    <circle cx="300" cy="344" r="3.5" fill="#0E6E55" opacity="0.85"/>
+
+    <!-- Dual Leg Center Grainlines with Directional Arrows -->
+    <!-- Left Leg Grainline (x = 216) -->
+    <line x1="216" y1="155" x2="216" y2="655" stroke="#0E6E55" stroke-width="1.3" stroke-dasharray="6 4" opacity="0.75"/>
+    <path d="M 213 162 L 216 155 L 219 162" fill="none" stroke="#0E6E55" stroke-width="1.4"/>
+    <path d="M 213 648 L 216 655 L 219 648" fill="none" stroke="#0E6E55" stroke-width="1.4"/>
+    <text x="210" y="390" transform="rotate(-90 210 390)" font-family="Inter, sans-serif" font-size="7.5" font-weight="700" fill="#0E6E55" letter-spacing="1" opacity="0.85">GRAINLINE ↑↓</text>
+
+    <!-- Right Leg Grainline (x = 384) -->
+    <line x1="384" y1="155" x2="384" y2="655" stroke="#0E6E55" stroke-width="1.3" stroke-dasharray="6 4" opacity="0.75"/>
+    <path d="M 381 162 L 384 155 L 387 162" fill="none" stroke="#0E6E55" stroke-width="1.4"/>
+    <path d="M 381 648 L 384 655 L 387 648" fill="none" stroke="#0E6E55" stroke-width="1.4"/>
+    <text x="378" y="390" transform="rotate(-90 378 390)" font-family="Inter, sans-serif" font-size="7.5" font-weight="700" fill="#0E6E55" letter-spacing="1" opacity="0.85">GRAINLINE ↑↓</text>
+
+    <!-- Horizontal Anatomical Fit Lines -->
+    <!-- Natural Waistline -->
+    <line x1="140" y1="150" x2="460" y2="150" stroke="#0E6E55" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.85"/>
+    <!-- High Hip -->
+    <line x1="144" y1="210" x2="456" y2="210" stroke="#0284c7" stroke-width="1.1" stroke-dasharray="3 3" opacity="0.65"/>
+    <!-- Full Hip / Seat Line -->
+    <line x1="142" y1="262" x2="458" y2="262" stroke="#0284c7" stroke-width="1.2" stroke-dasharray="4 4" opacity="0.75"/>
+    <!-- Crotch Fork Level -->
+    <line x1="280" y1="344" x2="320" y2="344" stroke="#0E6E55" stroke-width="1.2" stroke-dasharray="2 2" opacity="0.8"/>
+    <!-- Mid-Thigh Level -->
+    <line x1="144" y1="430" x2="456" y2="430" stroke="#0284c7" stroke-width="1.1" stroke-dasharray="4 3" opacity="0.7"/>
+    <circle cx="216" cy="430" r="3.5" fill="#FFFFFF" stroke="#0284c7" stroke-width="1.2"/>
+    <circle cx="384" cy="430" r="3.5" fill="#FFFFFF" stroke="#0284c7" stroke-width="1.2"/>
+    <!-- Knee Articulation Pivot -->
+    <line x1="144" y1="500" x2="456" y2="500" stroke="#0E6E55" stroke-width="1.3" stroke-dasharray="4 3" opacity="0.85"/>
+    <circle cx="216" cy="500" r="4" fill="#FFFFFF" stroke="#0E6E55" stroke-width="1.4"/>
+    <circle cx="384" cy="500" r="4" fill="#FFFFFF" stroke="#0E6E55" stroke-width="1.4"/>
+    <!-- Calf Line -->
+    <line x1="140" y1="570" x2="460" y2="570" stroke="#0284c7" stroke-width="1.1" stroke-dasharray="3 3" opacity="0.65"/>
+    <circle cx="216" cy="570" r="3" fill="#FFFFFF" stroke="#0284c7" stroke-width="1.1"/>
+    <circle cx="384" cy="570" r="3" fill="#FFFFFF" stroke="#0284c7" stroke-width="1.1"/>
+    <!-- Finished Hem / Ankle Line -->
+    <line x1="130" y1="664" x2="470" y2="664" stroke="#0F172A" stroke-width="1.5" opacity="0.8"/>
+
+    <!-- Minimalist Tailor Foot / Shoe Stand Plinth -->
+    <path d="M 144 664 C 140 676, 172 684, 216 684 C 260 684, 288 676, 284 664 Z"
+      fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.2" opacity="0.85"/>
+    <path d="M 316 664 C 312 676, 340 684, 384 684 C 428 684, 460 676, 456 664 Z"
+      fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.2" opacity="0.85"/>
+    <line x1="110" y1="688" x2="490" y2="688" stroke="#64748b" stroke-width="1.2" stroke-linecap="round" opacity="0.7"/>
+
+    <!-- Tailor Labels & Dimension Badges -->
+    <text x="466" y="153" font-family="Inter, sans-serif" font-size="8.5" font-weight="700" fill="#0E6E55" opacity="0.9">WAIST (150)</text>
+    <text x="464" y="213" font-family="Inter, sans-serif" font-size="8" font-weight="700" fill="#0284c7" opacity="0.85">HIGH HIP (210)</text>
+    <text x="464" y="265" font-family="Inter, sans-serif" font-size="8.5" font-weight="700" fill="#0284c7" opacity="0.9">FULL SEAT / HIP (262)</text>
+    <text x="312" y="347" font-family="Inter, sans-serif" font-size="8" font-weight="700" fill="#0E6E55" opacity="0.9">CROTCH FORK (344)</text>
+    <text x="462" y="433" font-family="Inter, sans-serif" font-size="8" font-weight="700" fill="#0284c7" opacity="0.85">MID-THIGH (430)</text>
+    <text x="462" y="503" font-family="Inter, sans-serif" font-size="8.5" font-weight="700" fill="#0E6E55" opacity="0.9">KNEE PIVOT (500)</text>
+    <text x="464" y="573" font-family="Inter, sans-serif" font-size="8" font-weight="700" fill="#0284c7" opacity="0.85">CALF (570)</text>
+    <text x="474" y="667" font-family="Inter, sans-serif" font-size="8.5" font-weight="700" fill="#0f172a" opacity="0.9">HEM / INSEAM (664)</text>
+    <text x="300" y="696" text-anchor="middle" font-family="Inter, sans-serif" font-size="7.5" font-weight="600" fill="#94a3b8" letter-spacing="1">FLOOR / GROUND LEVEL</text>
+
+    <!-- Specific Details for Front / Back -->
+    ${
+      !isBack
+        ? `<!-- Front J-Stitch Placket Guide -->
+           <path d="M 300 150 L 300 226 C 300 246, 282 248, 274 248" fill="none" stroke="#0284c7" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.75"/>
+           <!-- Front Scoop Pocket Reference Lines -->
+           <path d="M 168 182 C 195 192, 230 216, 234 250" fill="none" stroke="#64748b" stroke-width="1" stroke-dasharray="3 3" opacity="0.7"/>
+           <path d="M 432 182 C 405 192, 370 216, 366 250" fill="none" stroke="#64748b" stroke-width="1" stroke-dasharray="3 3" opacity="0.7"/>
+           <rect x="204" y="192" width="28" height="28" rx="2" fill="none" stroke="#64748b" stroke-width="0.9" stroke-dasharray="2 2" opacity="0.6"/>
+           <text x="218" y="210" text-anchor="middle" font-family="Inter, sans-serif" font-size="6.5" font-weight="600" fill="#64748b" opacity="0.8">COIN</text>`
+        : `<!-- Back Western V-Yoke Reference Guide -->
+           <path d="M 164 182 L 436 182 L 446 222 L 300 246 L 154 222 Z" fill="none" stroke="#0E6E55" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.75"/>
+           <!-- Back Patch Pocket Target Boxes -->
+           <path d="M 182 254 L 272 254 L 270 334 L 227 356 L 184 334 Z" fill="none" stroke="#0284c7" stroke-width="1.1" stroke-dasharray="3 3" opacity="0.7"/>
+           <path d="M 328 254 L 418 254 L 416 334 L 373 356 L 330 334 Z" fill="none" stroke="#0284c7" stroke-width="1.1" stroke-dasharray="3 3" opacity="0.7"/>
+           <text x="227" y="295" text-anchor="middle" font-family="Inter, sans-serif" font-size="7.5" font-weight="700" fill="#0284c7" opacity="0.75">POCKET L</text>
+           <text x="373" y="295" text-anchor="middle" font-family="Inter, sans-serif" font-size="7.5" font-weight="700" fill="#0284c7" opacity="0.75">POCKET R</text>`
+    }
+  </g>`;
+}
+
+/* ------------------------------------------- anatomical human clothing pattern guide */
+
+function fashionCroquisUnderlaySVG(view, sc, forceShow = false, g = null) {
   if (!forceShow) {
     if (!sc) return '';
     if (sc.showCroquis === false && sc.baseMode !== 'croquis' && sc.baseMode !== 'exploded') {
       return '';
     }
+  }
+
+  const isBottom =
+    g?.kind === 'bottom' ||
+    g?.category === 'Bottoms' ||
+    (g?.id && (
+      g.id.includes('jean') ||
+      g.id.includes('pant') ||
+      g.id.includes('trouser') ||
+      g.id.includes('jogger') ||
+      g.id.includes('shorts') ||
+      g.id.includes('legging') ||
+      g.id.includes('bottom')
+    ));
+
+  if (isBottom) {
+    return bottomLegFrameCroquisSVG(view, sc, g);
   }
 
   let rulerTicks = '';
@@ -709,7 +869,7 @@ export function renderSVG(project, opts = {}) {
 
   const croquisUnderlay =
     isScratch || opts.patternGuide
-      ? fashionCroquisUnderlaySVG(view, sc, Boolean(opts.patternGuide))
+      ? fashionCroquisUnderlaySVG(view, sc, Boolean(opts.patternGuide), g)
       : '';
   const sewingThreads = isScratch ? sewingThreadsOverlaySVG(sc) : '';
   const layers = (project.layers[view] || []).map((l) => layerSVG(l, defs, project, opts)).join('');

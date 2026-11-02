@@ -1091,6 +1091,8 @@ export function StudioWorkspace({ initialGarmentId = "track-jacket" }: Props) {
         {/* Column 2: 2D Interactive Canvas Stage (hidden only when Full 3D Preview is active) */}
         {!is3DPreviewActive && (
           <CanvasStage
+            garmentId={selectedGarmentId}
+            garmentCategory={garment.category}
             svgMarkup={currentSvgMarkup}
             frontSvgMarkup={frontSvgMarkup}
             backSvgMarkup={backSvgMarkup}

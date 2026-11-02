@@ -21,6 +21,9 @@ import {
 } from "lucide-react";
 import {
   createMannequinPedestal,
+  createHumanMannequin,
+  MannequinGender,
+  MannequinFinish,
   buildGarment3DModel,
   ScratchConfig3D,
 } from "./garment3DBuilder";
@@ -54,6 +57,8 @@ export function Live3DPanel({
   const [isWireframe, setIsWireframe] = useState(false);
   const [lightingMode, setLightingMode] = useState<"studio" | "dramatic" | "warm">("studio");
   const [renderPreset, setRenderPreset] = useState<"softbox" | "runway" | "cyber">("softbox");
+  const [mannequinGender, setMannequinGender] = useState<MannequinGender>("female");
+  const [mannequinFinish, setMannequinFinish] = useState<MannequinFinish>("linen");
   const [isCapturing, setIsCapturing] = useState(false);
   const [gltfShirtModel, setGltfShirtModel] = useState<THREE.Group | null>(null);
   const isRotatingRef = useRef(isRotating);
@@ -233,19 +238,24 @@ export function Live3DPanel({
     };
   }, []);
 
-  // 2. Manage Mannequin Pedestal per Category
+  // 2. Manage 3D Human Mannequin (Male / Female / Ghost) per Category & Finish
   useEffect(() => {
     if (!sceneRef.current) return;
 
     if (pedestalRef.current) {
       sceneRef.current.remove(pedestalRef.current);
+      pedestalRef.current.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          (child as THREE.Mesh).geometry.dispose();
+        }
+      });
       pedestalRef.current = null;
     }
 
-    const newPedestal = createMannequinPedestal(garmentCategory);
+    const newPedestal = createHumanMannequin(mannequinGender, garmentCategory, mannequinFinish);
     pedestalRef.current = newPedestal;
     sceneRef.current.add(newPedestal);
-  }, [garmentCategory]);
+  }, [mannequinGender, garmentCategory, mannequinFinish]);
 
   // 3. Re-build 3D Garment Mesh whenever garmentId, category, or gltfShirtModel changes
   useEffect(() => {
@@ -530,6 +540,48 @@ export function Live3DPanel({
             Render
           </button>
         </div>
+
+        {/* 3D Human Mannequin Switcher: Female / Male / Ghost */}
+        <div className="flex items-center gap-0.5 bg-gray-100/90 p-0.5 rounded-lg border border-gray-200">
+          <button
+            type="button"
+            onClick={() => setMannequinGender("female")}
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-0.5 ${
+              mannequinGender === "female"
+                ? "bg-[#0E6E55] text-white shadow-2xs"
+                : "text-gray-500 hover:text-gray-900"
+            }`}
+            title="Female Mannequin (Tailor Dress Form with Bust & Hourglass Curve)"
+          >
+            <span>♀</span>
+            <span>Fem</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setMannequinGender("male")}
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-0.5 ${
+              mannequinGender === "male"
+                ? "bg-[#0E6E55] text-white shadow-2xs"
+                : "text-gray-500 hover:text-gray-900"
+            }`}
+            title="Male Mannequin (Athletic Dress Form with Broad Shoulders)"
+          >
+            <span>♂</span>
+            <span>Male</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setMannequinGender("none")}
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition ${
+              mannequinGender === "none"
+                ? "bg-gray-800 text-white shadow-2xs"
+                : "text-gray-400 hover:text-gray-700"
+            }`}
+            title="Ghost Mannequin Mode (Plinth Stand Only)"
+          >
+            Ghost
+          </button>
+        </div>
       </div>
 
       {/* Main 3D Viewport */}
@@ -686,6 +738,32 @@ export function Live3DPanel({
                   >
                     <div className="text-base mb-0.5">{p.icon}</div>
                     <div className="text-[10px] leading-tight">{p.name}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Mannequin Form & Finish */}
+            <div className="space-y-2">
+              <span className="text-[11px] font-bold text-gray-700">Mannequin Form</span>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { id: "linen", name: "Tailor Canvas", sub: "Warm Ecru Linen" },
+                  { id: "alabaster", name: "Alabaster", sub: "Gloss Fiberglass" },
+                  { id: "charcoal", name: "Obsidian", sub: "Slate Matte" },
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setMannequinFinish(f.id as any)}
+                    className={`p-2 rounded-xl border text-center transition ${
+                      mannequinFinish === f.id
+                        ? "border-[#0E6E55] bg-[#ECFDF5] text-[#0E6E55] font-bold ring-2 ring-[#0E6E55]/20"
+                        : "border-gray-200 text-gray-600 hover:border-gray-300"
+                    }`}
+                  >
+                    <div className="text-[10.5px] font-bold">{f.name}</div>
+                    <div className="text-[8.5px] text-gray-400">{f.sub}</div>
                   </button>
                 ))}
               </div>
