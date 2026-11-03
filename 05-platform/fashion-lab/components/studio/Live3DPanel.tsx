@@ -27,7 +27,10 @@ import {
   buildGarment3DModel,
   buildComplementaryStudioGarment,
   ScratchConfig3D,
+  GarmentFit3DConfig,
+  DEFAULT_FIT_3D_CONFIG,
 } from "./garment3DBuilder";
+import { Fit3DEditor } from "./Fit3DEditor";
 
 interface Props {
   garmentId?: string;
@@ -71,7 +74,8 @@ export function Live3DPanel({
   onExitExpanded,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [activeTab, setActiveTab] = useState<"view" | "render">("view");
+  const [activeTab, setActiveTab] = useState<"view" | "edit3d" | "render">("view");
+  const [fitConfig, setFitConfig] = useState<GarmentFit3DConfig>(DEFAULT_FIT_3D_CONFIG);
   const [isRotating, setIsRotating] = useState(true);
   const [isWireframe, setIsWireframe] = useState(false);
   const [lightingMode, setLightingMode] = useState<"studio" | "dramatic" | "warm">("studio");
@@ -352,6 +356,7 @@ export function Live3DPanel({
       zoneColors,
       gltfShirtModel,
       scratchConfig,
+      fitConfig,
     });
 
     // Apply wireframe mode if active
@@ -368,7 +373,7 @@ export function Live3DPanel({
 
     garmentMeshGroupRef.current = newGarmentMesh;
     turntableGroupRef.current?.add(newGarmentMesh);
-  }, [garmentId, garmentCategory, gltfShirtModel, scratchConfig]);
+  }, [garmentId, garmentCategory, gltfShirtModel, scratchConfig, fitConfig]);
 
   // 4. Dynamic Real-time UV Texture Projection (rasterize SVG markups to canvases)
   useEffect(() => {
@@ -654,6 +659,18 @@ export function Live3DPanel({
           </button>
           <button
             type="button"
+            onClick={() => setActiveTab("edit3d")}
+            className={`h-full flex items-center gap-1.5 text-xs font-semibold border-b-2 transition ${
+              activeTab === "edit3d"
+                ? "text-[#0E6E55] border-[#0E6E55] font-bold"
+                : "text-gray-400 hover:text-gray-700 border-transparent"
+            }`}
+          >
+            <Sliders className="w-3 h-3" />
+            <span>3D Editor</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab("render")}
             className={`h-full flex items-center text-xs font-semibold border-b-2 transition ${
               activeTab === "render"
@@ -715,6 +732,18 @@ export function Live3DPanel({
 
         {/* Top-Left Vertical Pill Strip matching mockup */}
         <div className="absolute left-3 top-3 bg-white/95 backdrop-blur-xs border border-gray-200/80 rounded-xl p-1 flex flex-col gap-1 shadow-2xs z-10">
+          <button
+            type="button"
+            onClick={() => setActiveTab(activeTab === "edit3d" ? "view" : "edit3d")}
+            title={activeTab === "edit3d" ? "Close 3D Fit Editor" : "Open 3D Fit & Style Editor"}
+            className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${
+              activeTab === "edit3d"
+                ? "bg-[#ECFDF5] text-[#0E6E55]"
+                : "text-gray-500 hover:text-gray-900 hover:bg-gray-100"
+            }`}
+          >
+            <Sliders className="w-3.5 h-3.5" />
+          </button>
           <button
             type="button"
             onClick={handleResetView}
@@ -851,6 +880,19 @@ export function Live3DPanel({
           </button>
         </div>
       </div>
+
+      {/* Interactive 3D Fit & Style Editor Drawer */}
+      {activeTab === "edit3d" && (
+        <Fit3DEditor
+          fitConfig={fitConfig}
+          onChange={setFitConfig}
+          onReset={() => setFitConfig(DEFAULT_FIT_3D_CONFIG)}
+          onClose={() => setActiveTab("view")}
+          garmentCategory={garmentCategory}
+          garmentName={garmentName}
+          isExpanded={expanded}
+        />
+      )}
 
       {/* Render Showroom Modal Drawer if activeTab === "render" */}
       {activeTab === "render" && (

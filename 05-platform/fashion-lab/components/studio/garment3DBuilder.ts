@@ -27,14 +27,174 @@ export interface ScratchConfig3D {
   parts?: string[] | Record<string, boolean>;
 }
 
-interface BuildOptions {
+export interface GarmentFit3DConfig {
+  fitPreset?: "regular" | "slim" | "relaxed" | "oversized" | "boxy-crop";
+  torsoWidthScale?: number;     // 0.85 to 1.30 (default 1.0)
+  torsoDepthScale?: number;     // 0.85 to 1.30 (default 1.0)
+  garmentLengthScale?: number;  // 0.80 to 1.25 (default 1.0)
+  shoulderDrop?: number;        // 0.0 to 0.05 (default 0.0)
+  sleeveLengthScale?: number;   // 0.20 to 1.30 (default 1.0)
+  sleeveVolumeScale?: number;   // 0.80 to 1.35 (default 1.0)
+  cuffSnugness?: number;        // 0.65 to 1.35 (default 1.0)
+  drapeFoldIntensity?: number;  // 0.0 to 2.0 (default 1.0)
+  fabricType?: "cotton" | "fleece" | "denim" | "tech-nylon" | "silk-satin" | "leather";
+  roughness?: number;           // 0.15 to 0.95
+  sheen?: number;               // 0.0 to 0.8
+  bumpScale?: number;           // 0.0005 to 0.0040
+  zipperFinish?: "silver" | "brass" | "gunmetal" | "matte";
+}
+
+export const DEFAULT_FIT_3D_CONFIG: GarmentFit3DConfig = {
+  fitPreset: "regular",
+  torsoWidthScale: 1.0,
+  torsoDepthScale: 1.0,
+  garmentLengthScale: 1.0,
+  shoulderDrop: 0.0,
+  sleeveLengthScale: 1.0,
+  sleeveVolumeScale: 1.0,
+  cuffSnugness: 1.0,
+  drapeFoldIntensity: 1.0,
+  fabricType: "cotton",
+  roughness: 0.62,
+  sheen: 0.0,
+  bumpScale: 0.0016,
+  zipperFinish: "silver",
+};
+
+export const FIT_3D_PRESETS: Record<string, Partial<GarmentFit3DConfig> & { label: string; desc: string; icon: string }> = {
+  regular: {
+    label: "Regular Classic",
+    desc: "Balanced tailored everyday fit",
+    icon: "👔",
+    fitPreset: "regular",
+    torsoWidthScale: 1.0,
+    torsoDepthScale: 1.0,
+    garmentLengthScale: 1.0,
+    shoulderDrop: 0.0,
+    sleeveLengthScale: 1.0,
+    sleeveVolumeScale: 1.0,
+    cuffSnugness: 1.0,
+    drapeFoldIntensity: 1.0,
+  },
+  slim: {
+    label: "Slim Tailored",
+    desc: "Tapered chest, streamlined sleeves",
+    icon: "📐",
+    fitPreset: "slim",
+    torsoWidthScale: 0.92,
+    torsoDepthScale: 0.93,
+    garmentLengthScale: 0.98,
+    shoulderDrop: 0.0,
+    sleeveLengthScale: 0.98,
+    sleeveVolumeScale: 0.88,
+    cuffSnugness: 0.85,
+    drapeFoldIntensity: 0.7,
+  },
+  relaxed: {
+    label: "Relaxed Casual",
+    desc: "Comfort ease with soft natural drape",
+    icon: "🛋️",
+    fitPreset: "relaxed",
+    torsoWidthScale: 1.08,
+    torsoDepthScale: 1.06,
+    garmentLengthScale: 1.04,
+    shoulderDrop: 0.015,
+    sleeveLengthScale: 1.02,
+    sleeveVolumeScale: 1.08,
+    cuffSnugness: 1.0,
+    drapeFoldIntensity: 1.2,
+  },
+  oversized: {
+    label: "Oversized Streetwear",
+    desc: "Drop shoulder, wide chest, slouchy sleeves",
+    icon: "🛹",
+    fitPreset: "oversized",
+    torsoWidthScale: 1.20,
+    torsoDepthScale: 1.18,
+    garmentLengthScale: 1.14,
+    shoulderDrop: 0.035,
+    sleeveLengthScale: 1.08,
+    sleeveVolumeScale: 1.22,
+    cuffSnugness: 0.90,
+    drapeFoldIntensity: 1.6,
+  },
+  "boxy-crop": {
+    label: "Boxy Crop",
+    desc: "Wide contemporary chest with cropped hem",
+    icon: "✂️",
+    fitPreset: "boxy-crop",
+    torsoWidthScale: 1.16,
+    torsoDepthScale: 1.12,
+    garmentLengthScale: 0.84,
+    shoulderDrop: 0.025,
+    sleeveLengthScale: 0.96,
+    sleeveVolumeScale: 1.12,
+    cuffSnugness: 1.05,
+    drapeFoldIntensity: 1.1,
+  },
+};
+
+export const FABRIC_3D_PRESETS: Record<string, { label: string; desc: string; icon: string; roughness: number; sheen: number; bumpScale: number }> = {
+  cotton: {
+    label: "Organic Cotton",
+    desc: "Matte 240 GSM combed jersey",
+    icon: "🌱",
+    roughness: 0.72,
+    sheen: 0.0,
+    bumpScale: 0.0016,
+  },
+  fleece: {
+    label: "French Terry Fleece",
+    desc: "Heavyweight 450 GSM structured fleece",
+    icon: "☁️",
+    roughness: 0.85,
+    sheen: 0.0,
+    bumpScale: 0.0028,
+  },
+  denim: {
+    label: "Selvedge Denim",
+    desc: "14oz raw rigid diagonal twill",
+    icon: "👖",
+    roughness: 0.78,
+    sheen: 0.0,
+    bumpScale: 0.0026,
+  },
+  "tech-nylon": {
+    label: "Technical Nylon",
+    desc: "Water-repellent ripstop windbreaker",
+    icon: "🌧️",
+    roughness: 0.40,
+    sheen: 0.28,
+    bumpScale: 0.0010,
+  },
+  "silk-satin": {
+    label: "Liquid Silk Satin",
+    desc: "High luster fluid drapey silk",
+    icon: "✨",
+    roughness: 0.22,
+    sheen: 0.65,
+    bumpScale: 0.0006,
+  },
+  leather: {
+    label: "Nappa Leather",
+    desc: "Supple full-grain structured leather",
+    icon: "🧥",
+    roughness: 0.36,
+    sheen: 0.42,
+    bumpScale: 0.0020,
+  },
+};
+
+export interface BuildOptions {
   garmentId: string;
   category: string;
+  gender?: MannequinGender;
   frontTexture: THREE.CanvasTexture | null;
   backTexture: THREE.CanvasTexture | null;
   zoneColors: Record<string, string>;
   gltfShirtModel?: THREE.Group | null;
   scratchConfig?: ScratchConfig3D;
+  fitConfig?: GarmentFit3DConfig;
 }
 
 // Cached procedural textile bump maps for authentic cloth surface grain
@@ -1451,7 +1611,8 @@ function buildMorphedClothFromGLB(
     drawstringMat: THREE.MeshStandardMaterial;
     zipperMat: THREE.MeshStandardMaterial;
   },
-  scratchConfig?: ScratchConfig3D
+  scratchConfig?: ScratchConfig3D,
+  fitConfig?: GarmentFit3DConfig
 ): THREE.Group {
   const rootGroup = new THREE.Group();
 
@@ -1555,18 +1716,27 @@ function buildMorphedClothFromGLB(
         isBlazer ||
         id === "dress-shirt";
 
+  const userTorsoWidth = fitConfig?.torsoWidthScale ?? 1.0;
+  const userTorsoDepth = fitConfig?.torsoDepthScale ?? 1.0;
+  const userSleeveLength = fitConfig?.sleeveLengthScale ?? 1.0;
+  const userSleeveVolume = fitConfig?.sleeveVolumeScale ?? 1.0;
+  const userCuffSnugness = fitConfig?.cuffSnugness ?? 1.0;
+  const userFoldIntensity = fitConfig?.drapeFoldIntensity ?? 1.0;
+  const userLengthScale = fitConfig?.garmentLengthScale ?? 1.0;
+  const userShoulderDrop = fitConfig?.shoulderDrop ?? 0.0;
+
   // Continuous sleeve extension multiplier for scratch designs (short=0, 3/4=0.55, long=1.0)
-  const sleeveExtensionRatio = isScratch
+  const sleeveExtensionRatio = (isScratch
     ? scratchConfig?.sleeveType === "three-quarter"
       ? 0.56
       : scratchConfig?.sleeveType === "cap"
       ? -0.35
       : 1.0
-    : 1.0;
+    : 1.0) * userSleeveLength;
   const isBellSleeve = isScratch && scratchConfig?.sleeveType === "bell";
 
   // Anatomical fit multipliers per garment silhouette - generous ease so clothes dominate
-  const torsoScaleX = isScratch
+  const baseTorsoScaleX = isScratch
     ? (scratchConfig?.chestWidth || 148) / 148
     : isHoodie
     ? 1.08
@@ -1579,7 +1749,7 @@ function buildMorphedClothFromGLB(
     : isGown
     ? 0.96
     : 1.03;
-  const torsoScaleZ = isHoodie
+  const baseTorsoScaleZ = isHoodie
     ? 1.12
     : isSweater
     ? 1.08
@@ -1590,6 +1760,9 @@ function buildMorphedClothFromGLB(
     : isGown
     ? 0.96
     : 1.04;
+
+  const torsoScaleX = baseTorsoScaleX * userTorsoWidth;
+  const torsoScaleZ = baseTorsoScaleZ * userTorsoDepth;
 
   const morphedWrapper = new THREE.Group();
 
@@ -1666,22 +1839,22 @@ function buildMorphedClothFromGLB(
           const angleAroundArm = Math.atan2(dzLocal, dyLocal);
 
           // Taper radius toward the wrist, with a soft blouson gather just above the cuff
-          let radiusFactor = isBellSleeve
+          let radiusFactor = (isBellSleeve
             ? 1.0 + 0.48 * Math.pow(Math.min(1, t), 1.35)
-            : 1.0 - 0.22 * Math.pow(Math.min(1, t), 1.25);
+            : 1.0 - 0.22 * Math.pow(Math.min(1, t), 1.25)) * userSleeveVolume;
           if (hasRibbedCuff && !isBellSleeve) {
             if (t > 0.78 && t <= 0.92) {
               // Soft fabric puff/blouson gather above ribbed wrist cuff
               radiusFactor += 0.09 * Math.sin(((t - 0.78) / 0.14) * Math.PI);
             } else if (t > 0.92) {
               // Snug elastic ribbed wrist cuff
-              radiusFactor *= 0.82;
+              radiusFactor *= 0.82 * userCuffSnugness;
             }
           }
 
           // Multi-harmonic cloth folds at the elbow (t ≈ 0.5) and forearm
           const elbowFold =
-            0.0055 *
+            0.0055 * userFoldIntensity *
             Math.sin(t * 19.0 + angleAroundArm * 2.0) *
             Math.sin(Math.min(1, t) * Math.PI);
           const sleeveLoft = isHoodie ? 1.12 : isSweater ? 1.08 : 1.0;
@@ -1712,6 +1885,16 @@ function buildMorphedClothFromGLB(
             : 1.0;
         x *= torsoScaleX * armholeLock;
         z *= torsoScaleZ;
+
+        // Custom Drop Shoulder adjustment
+        if (userShoulderDrop > 0 && absX > 0.12 && y > 1.35 && y < 1.62) {
+          x += signX * userShoulderDrop * ((absX - 0.12) / 0.09);
+        }
+
+        // Custom Garment Length adjustment (crop or longline hem)
+        if (isTorso && y < 1.35 && userLengthScale !== 1.0) {
+          y = 1.35 - (1.35 - y) * userLengthScale;
+        }
 
         // 1. Track Jacket / Windbreaker Stand-Up Athletic Collar & Gathered Elastic Hem
         if (isTrackJacket) {
@@ -3054,6 +3237,7 @@ export function buildGarment3DModel({
   zoneColors,
   gltfShirtModel,
   scratchConfig,
+  fitConfig,
 }: BuildOptions): THREE.Group {
   const garmentGroup = new THREE.Group();
   garmentGroup.name = `garment_${garmentId}`;
@@ -3086,9 +3270,27 @@ export function buildGarment3DModel({
   const isSilk = category === "Dresses" || id.includes("gown") || id.includes("slip");
   const isTechWoven =
     category === "Outerwear" || id.includes("jacket") || id.includes("windbreaker");
-  const baseRoughness = isJeans ? 0.70 : isSilk ? 0.32 : isTechWoven ? 0.52 : 0.62;
-  const activeClothBump = isJeans ? denimBump : wovenBump;
-  const activeBumpScale = isJeans ? 0.0022 : 0.0012;
+
+  const fabPreset = fitConfig?.fabricType ? FABRIC_3D_PRESETS[fitConfig.fabricType] : null;
+
+  const baseRoughness = fitConfig?.roughness !== undefined
+    ? fitConfig.roughness
+    : fabPreset
+    ? fabPreset.roughness
+    : isJeans ? 0.70 : isSilk ? 0.32 : isTechWoven ? 0.52 : 0.62;
+
+  const fabricSheen = fitConfig?.sheen !== undefined
+    ? fitConfig.sheen
+    : fabPreset
+    ? fabPreset.sheen
+    : isSilk ? 0.35 : 0.0;
+
+  const activeClothBump = (fitConfig?.fabricType === "denim" || isJeans) ? denimBump : wovenBump;
+  const activeBumpScale = fitConfig?.bumpScale !== undefined
+    ? fitConfig.bumpScale
+    : fabPreset
+    ? fabPreset.bumpScale
+    : isJeans ? 0.0022 : 0.0012;
 
   // Real-world physical cloth micro-fiber sheen properties
   // Pure cotton, twill, fleece, denim, and performance woven fabrics have ZERO sheen (0.0)
@@ -3096,7 +3298,6 @@ export function buildGarment3DModel({
   const makeSheenColor = (hex: string) =>
     new THREE.Color(hex).lerp(new THREE.Color(0xffffff), 0.15);
 
-  const fabricSheen = isSilk ? 0.35 : 0.0;
   const fabricSheenColor = makeSheenColor(primaryColor);
   const fabricSheenRoughness = isSilk ? 0.25 : 0.50;
 
@@ -3330,12 +3531,21 @@ export function buildGarment3DModel({
     side: THREE.DoubleSide,
   });
 
-  // Zipper Hardware & Welt Material (updates with zoneColors.zipper)
+  // Zipper Hardware & Welt Material (updates with fitConfig.zipperFinish or zoneColors.zipper)
+  const zipFinish = fitConfig?.zipperFinish || "silver";
+  const zipperColorVal = zipFinish === "brass"
+    ? 0xd97706
+    : zipFinish === "gunmetal"
+    ? 0x334155
+    : zipFinish === "matte"
+    ? new THREE.Color(zipperColor)
+    : 0xd1d5db;
+
   const zipperMat = new THREE.MeshStandardMaterial({
     name: "mat_zipper",
-    color: new THREE.Color(zipperColor),
-    metalness: 0.85,
-    roughness: 0.22,
+    color: zipperColorVal,
+    metalness: zipFinish === "matte" ? 0.12 : 0.88,
+    roughness: zipFinish === "matte" ? 0.65 : 0.22,
     side: THREE.DoubleSide,
   });
 
@@ -3390,7 +3600,8 @@ export function buildGarment3DModel({
         drawstringMat,
         zipperMat,
       },
-      scratchConfig
+      scratchConfig,
+      fitConfig
     );
   }
 
