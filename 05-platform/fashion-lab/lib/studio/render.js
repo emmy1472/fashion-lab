@@ -1002,7 +1002,7 @@ export function render3DTextureSVG(project, opts = {}) {
   const vb = isBottom ? '115 145 370 525' : '125 120 350 488';
 
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
-  viewBox="${vb}" width="1024" height="1024" preserveAspectRatio="none">
+  viewBox="${vb}" width="2048" height="2048" preserveAspectRatio="none">
 <defs>${defs}</defs>
 <rect x="0" y="0" width="600" height="750" fill="${baseFill}"/>
 <g>${accentPaths}</g>

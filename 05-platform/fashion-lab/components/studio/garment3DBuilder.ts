@@ -3034,13 +3034,16 @@ export function buildGarment3DModel({
   const isSilk = category === "Dresses" || id.includes("gown") || id.includes("slip");
   const isTechWoven =
     category === "Outerwear" || id.includes("jacket") || id.includes("windbreaker");
-  const baseRoughness = isJeans ? 0.78 : isSilk ? 0.38 : isTechWoven ? 0.56 : 0.74;
+  const baseRoughness = isJeans ? 0.70 : isSilk ? 0.32 : isTechWoven ? 0.52 : 0.62;
   const activeClothBump = isJeans ? denimBump : wovenBump;
-  const activeBumpScale = isJeans ? 0.0085 : 0.0055;
+  const activeBumpScale = isJeans ? 0.0035 : 0.0022;
 
-  // Real-world physical cloth micro-fiber sheen properties
-  const fabricSheen = isSilk ? 0.85 : isJeans ? 0.35 : 0.65;
-  const fabricSheenColor = new THREE.Color(0xffffff);
+  // Real-world physical cloth micro-fiber sheen properties (tinted with dye color to avoid milky fog)
+  const makeSheenColor = (hex: string) =>
+    new THREE.Color(hex).lerp(new THREE.Color(0xffffff), 0.22);
+
+  const fabricSheen = isSilk ? 0.75 : isJeans ? 0.28 : 0.40;
+  const fabricSheenColor = makeSheenColor(primaryColor);
   const fabricSheenRoughness = isSilk ? 0.25 : 0.45;
 
   // Front & Back Torso/Legs Cloth Materials with Woven/Denim Micro-Bump & 1:1 UV Projection
@@ -3078,11 +3081,11 @@ export function buildGarment3DModel({
     name: "mat_inside_lining",
     color: insideColor,
     bumpMap: wovenBump,
-    bumpScale: 0.004,
-    roughness: 0.82,
+    bumpScale: 0.003,
+    roughness: 0.78,
     metalness: 0.0,
-    sheen: 0.45,
-    sheenColor: fabricSheenColor,
+    sheen: 0.35,
+    sheenColor: makeSheenColor(primaryColor),
     sheenRoughness: 0.5,
     side: THREE.DoubleSide,
   });
@@ -3092,11 +3095,11 @@ export function buildGarment3DModel({
     name: "mat_collar",
     color: new THREE.Color(collarColor),
     bumpMap: ribbedBump,
-    bumpScale: 0.007,
-    roughness: 0.72,
+    bumpScale: 0.004,
+    roughness: 0.68,
     metalness: 0.0,
-    sheen: 0.55,
-    sheenColor: fabricSheenColor,
+    sheen: 0.45,
+    sheenColor: makeSheenColor(collarColor),
     sheenRoughness: 0.5,
     side: THREE.DoubleSide,
   });
@@ -3106,11 +3109,11 @@ export function buildGarment3DModel({
     name: "mat_hood",
     color: new THREE.Color(hoodColor),
     bumpMap: wovenBump,
-    bumpScale: 0.006,
+    bumpScale: 0.0035,
     roughness: baseRoughness,
     metalness: 0.0,
     sheen: fabricSheen,
-    sheenColor: fabricSheenColor,
+    sheenColor: makeSheenColor(hoodColor),
     sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
@@ -3120,11 +3123,11 @@ export function buildGarment3DModel({
     name: "mat_sleeve_l",
     color: new THREE.Color(sleeveLColor),
     bumpMap: wovenBump,
-    bumpScale: 0.0055,
+    bumpScale: 0.0035,
     roughness: baseRoughness,
     metalness: 0.0,
     sheen: fabricSheen,
-    sheenColor: fabricSheenColor,
+    sheenColor: makeSheenColor(sleeveLColor),
     sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
@@ -3133,11 +3136,11 @@ export function buildGarment3DModel({
     name: "mat_sleeve_r",
     color: new THREE.Color(sleeveRColor),
     bumpMap: wovenBump,
-    bumpScale: 0.0055,
+    bumpScale: 0.0035,
     roughness: baseRoughness,
     metalness: 0.0,
     sheen: fabricSheen,
-    sheenColor: fabricSheenColor,
+    sheenColor: makeSheenColor(sleeveRColor),
     sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
@@ -3147,11 +3150,11 @@ export function buildGarment3DModel({
     name: "mat_cuff_l",
     color: new THREE.Color(cuffLColor),
     bumpMap: ribbedBump,
-    bumpScale: 0.007,
-    roughness: 0.68,
+    bumpScale: 0.004,
+    roughness: 0.65,
     metalness: 0.0,
-    sheen: 0.55,
-    sheenColor: fabricSheenColor,
+    sheen: 0.45,
+    sheenColor: makeSheenColor(cuffLColor),
     sheenRoughness: 0.5,
     side: THREE.DoubleSide,
   });
@@ -3160,11 +3163,11 @@ export function buildGarment3DModel({
     name: "mat_cuff_r",
     color: new THREE.Color(cuffRColor),
     bumpMap: ribbedBump,
-    bumpScale: 0.007,
-    roughness: 0.68,
+    bumpScale: 0.004,
+    roughness: 0.65,
     metalness: 0.0,
-    sheen: 0.55,
-    sheenColor: fabricSheenColor,
+    sheen: 0.45,
+    sheenColor: makeSheenColor(cuffRColor),
     sheenRoughness: 0.5,
     side: THREE.DoubleSide,
   });
@@ -3174,11 +3177,11 @@ export function buildGarment3DModel({
     name: "mat_sleeve_stripe",
     color: new THREE.Color(sleeveStripeColor),
     bumpMap: wovenBump,
-    bumpScale: 0.005,
-    roughness: 0.55,
+    bumpScale: 0.003,
+    roughness: 0.52,
     metalness: 0.0,
-    sheen: 0.65,
-    sheenColor: fabricSheenColor,
+    sheen: 0.50,
+    sheenColor: makeSheenColor(sleeveStripeColor),
     sheenRoughness: 0.4,
     side: THREE.DoubleSide,
   });
@@ -3192,7 +3195,7 @@ export function buildGarment3DModel({
     roughness: baseRoughness,
     metalness: 0.0,
     sheen: fabricSheen,
-    sheenColor: fabricSheenColor,
+    sheenColor: makeSheenColor(pocketColor),
     sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
@@ -3202,11 +3205,11 @@ export function buildGarment3DModel({
     name: "mat_placket",
     color: new THREE.Color(placketColor),
     bumpMap: isJeans ? activeClothBump : ribbedBump,
-    bumpScale: isJeans ? activeBumpScale : 0.005,
+    bumpScale: isJeans ? activeBumpScale : 0.003,
     roughness: isJeans ? baseRoughness : 0.55,
     metalness: 0.05,
     sheen: fabricSheen,
-    sheenColor: fabricSheenColor,
+    sheenColor: makeSheenColor(placketColor),
     sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
@@ -3216,11 +3219,11 @@ export function buildGarment3DModel({
     name: "mat_drawstring",
     color: new THREE.Color(drawstringColor),
     bumpMap: ribbedBump,
-    bumpScale: 0.006,
+    bumpScale: 0.004,
     roughness: 0.6,
     metalness: 0.0,
-    sheen: 0.5,
-    sheenColor: fabricSheenColor,
+    sheen: 0.40,
+    sheenColor: makeSheenColor(drawstringColor),
     sheenRoughness: 0.45,
     side: THREE.DoubleSide,
   });
@@ -3230,11 +3233,11 @@ export function buildGarment3DModel({
     name: "mat_waistband",
     color: new THREE.Color(waistbandColor),
     bumpMap: isJeans ? activeClothBump : ribbedBump,
-    bumpScale: isJeans ? activeBumpScale : 0.007,
-    roughness: isJeans ? baseRoughness : 0.72,
+    bumpScale: isJeans ? activeBumpScale : 0.004,
+    roughness: isJeans ? baseRoughness : 0.68,
     metalness: 0.0,
     sheen: fabricSheen,
-    sheenColor: fabricSheenColor,
+    sheenColor: makeSheenColor(waistbandColor),
     sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
@@ -3248,7 +3251,7 @@ export function buildGarment3DModel({
     roughness: baseRoughness,
     metalness: 0.0,
     sheen: fabricSheen,
-    sheenColor: fabricSheenColor,
+    sheenColor: makeSheenColor(yokeColor),
     sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
@@ -3262,7 +3265,7 @@ export function buildGarment3DModel({
     roughness: baseRoughness,
     metalness: 0.0,
     sheen: fabricSheen,
-    sheenColor: fabricSheenColor,
+    sheenColor: makeSheenColor(cuffColor),
     sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });

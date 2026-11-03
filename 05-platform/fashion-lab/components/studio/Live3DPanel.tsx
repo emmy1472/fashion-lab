@@ -140,8 +140,9 @@ export function Live3DPanel({
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.15;
+    // LinearToneMapping ensures 100% color parity with 2D vector canvas (no ACES desaturation/highlight crushing)
+    renderer.toneMapping = THREE.LinearToneMapping;
+    renderer.toneMappingExposure = 1.0;
     rendererRef.current = renderer;
 
     // Studio Environment map (PMREM RoomEnvironment) for realistic PBR reflections & cloth sheen
@@ -166,15 +167,15 @@ export function Live3DPanel({
     controls.target.set(0, initCY, 0);
     controlsRef.current = controls;
 
-    // 3-Point Studio Lighting Rig + Hemisphere Cloth Grazing Light
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0xcbd5e1, 0.85);
+    // 3-Point Calibrated Studio Lighting Rig + Balanced Grazing Light (Preserves Deep Tones & Vivid Hues)
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0xcbd5e1, 0.42);
     hemiLight.position.set(0, 6, 0);
     scene.add(hemiLight);
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.38);
     scene.add(ambientLight);
 
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.45);
     keyLight.position.set(2.8, 4.5, 3.8);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.width = 2048;
@@ -183,11 +184,11 @@ export function Live3DPanel({
     keyLight.shadow.radius = 3.5;
     scene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight(0xf1f5f9, 1.35);
+    const fillLight = new THREE.DirectionalLight(0xf1f5f9, 0.75);
     fillLight.position.set(-3.8, 1.8, 2.2);
     scene.add(fillLight);
 
-    const rimLight = new THREE.DirectionalLight(0xffffff, 1.15);
+    const rimLight = new THREE.DirectionalLight(0xffffff, 0.85);
     rimLight.position.set(0, 3.5, -4.2);
     scene.add(rimLight);
 
@@ -208,22 +209,28 @@ export function Live3DPanel({
     scene.add(turntable);
     turntableGroupRef.current = turntable;
 
-    // Setup 1024x1024 Offscreen Canvases for dynamic UV texture projection
+    // Setup 2048x2048 Offscreen Canvases with 16x Anisotropy for Razor-Sharp Dynamic UV Texture Projection
     const frontCanvas = document.createElement("canvas");
-    frontCanvas.width = 1024;
-    frontCanvas.height = 1024;
+    frontCanvas.width = 2048;
+    frontCanvas.height = 2048;
     frontCanvasRef.current = frontCanvas;
 
     const backCanvas = document.createElement("canvas");
-    backCanvas.width = 1024;
-    backCanvas.height = 1024;
+    backCanvas.width = 2048;
+    backCanvas.height = 2048;
     backCanvasRef.current = backCanvas;
+
+    const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
 
     const frontTexture = new THREE.CanvasTexture(frontCanvas);
     frontTexture.flipY = false;
     frontTexture.colorSpace = THREE.SRGBColorSpace;
     frontTexture.wrapS = THREE.ClampToEdgeWrapping;
     frontTexture.wrapT = THREE.ClampToEdgeWrapping;
+    frontTexture.anisotropy = maxAnisotropy;
+    frontTexture.minFilter = THREE.LinearMipmapLinearFilter;
+    frontTexture.magFilter = THREE.LinearFilter;
+    frontTexture.generateMipmaps = true;
     frontTextureRef.current = frontTexture;
 
     const backTexture = new THREE.CanvasTexture(backCanvas);
@@ -231,6 +238,10 @@ export function Live3DPanel({
     backTexture.colorSpace = THREE.SRGBColorSpace;
     backTexture.wrapS = THREE.ClampToEdgeWrapping;
     backTexture.wrapT = THREE.ClampToEdgeWrapping;
+    backTexture.anisotropy = maxAnisotropy;
+    backTexture.minFilter = THREE.LinearMipmapLinearFilter;
+    backTexture.magFilter = THREE.LinearFilter;
+    backTexture.generateMipmaps = true;
     backTextureRef.current = backTexture;
 
     // Load T-Shirt GLB in background with state hook
@@ -379,11 +390,13 @@ export function Live3DPanel({
     frontImg.onload = () => {
       const ctx = frontCanvasRef.current?.getContext("2d");
       if (ctx && frontCanvasRef.current) {
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
         ctx.clearRect(0, 0, frontCanvasRef.current.width, frontCanvasRef.current.height);
         // Paint rich background matching primary zone
         ctx.fillStyle = primaryColor;
         ctx.fillRect(0, 0, frontCanvasRef.current.width, frontCanvasRef.current.height);
-        // Draw rasterized SVG
+        // Draw rasterized SVG at native 2048x2048 resolution
         ctx.drawImage(frontImg, 0, 0, frontCanvasRef.current.width, frontCanvasRef.current.height);
         if (frontTextureRef.current) {
           frontTextureRef.current.needsUpdate = true;
@@ -405,6 +418,8 @@ export function Live3DPanel({
     backImg.onload = () => {
       const ctx = backCanvasRef.current?.getContext("2d");
       if (ctx && backCanvasRef.current) {
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
         ctx.clearRect(0, 0, backCanvasRef.current.width, backCanvasRef.current.height);
         ctx.fillStyle = primaryColor;
         ctx.fillRect(0, 0, backCanvasRef.current.width, backCanvasRef.current.height);
@@ -448,36 +463,56 @@ export function Live3DPanel({
     const applyColorToMaterial = (mat: THREE.Material) => {
       if (!(mat instanceof THREE.MeshStandardMaterial)) return;
       const matName = mat.name;
+      let targetColorHex: string | null = null;
       if (matName === "mat_collar") {
-        mat.color.set(collarColor);
+        targetColorHex = collarColor;
       } else if (matName === "mat_hood") {
-        mat.color.set(hoodColor);
+        targetColorHex = hoodColor;
       } else if (matName === "mat_sleeve_l" || matName === "mat_sleeve") {
-        mat.color.set(sleeveLColor);
+        targetColorHex = sleeveLColor;
       } else if (matName === "mat_sleeve_r") {
-        mat.color.set(sleeveRColor);
+        targetColorHex = sleeveRColor;
       } else if (matName === "mat_cuff_l" || matName === "mat_trim") {
-        mat.color.set(cuffLColor);
+        targetColorHex = cuffLColor;
       } else if (matName === "mat_cuff_r") {
-        mat.color.set(cuffRColor);
+        targetColorHex = cuffRColor;
       } else if (matName === "mat_sleeve_stripe") {
-        mat.color.set(sleeveStripeColor);
+        targetColorHex = sleeveStripeColor;
       } else if (matName === "mat_pocket") {
-        mat.color.set(pocketColor);
+        targetColorHex = pocketColor;
       } else if (matName === "mat_placket") {
-        mat.color.set(placketColor);
+        targetColorHex = placketColor;
       } else if (matName === "mat_drawstring") {
-        mat.color.set(drawstringColor);
+        targetColorHex = drawstringColor;
       } else if (matName === "mat_waistband") {
-        mat.color.set(waistbandColor);
+        targetColorHex = waistbandColor;
       } else if (matName === "mat_yoke") {
-        mat.color.set(yokeColor);
+        targetColorHex = yokeColor;
       } else if (matName === "mat_cuff") {
-        mat.color.set(bottomCuffColor);
+        targetColorHex = bottomCuffColor;
       } else if (matName === "mat_zipper") {
-        mat.color.set(zipperColor);
+        targetColorHex = zipperColor;
       } else if (matName === "mat_inside_lining") {
         mat.color.set(primaryColor).multiplyScalar(0.62);
+        if ((mat as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial) {
+          const phys = mat as THREE.MeshPhysicalMaterial;
+          phys.sheenColor?.set(primaryColor).lerp(new THREE.Color(0xffffff), 0.18);
+        }
+      } else if (matName === "mat_front_body" || matName === "mat_back_body") {
+        if ((mat as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial) {
+          const phys = mat as THREE.MeshPhysicalMaterial;
+          phys.sheenColor?.set(primaryColor).lerp(new THREE.Color(0xffffff), 0.22);
+        }
+      }
+
+      if (targetColorHex) {
+        mat.color.set(targetColorHex);
+        if ((mat as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial) {
+          const phys = mat as THREE.MeshPhysicalMaterial;
+          if (phys.sheenColor) {
+            phys.sheenColor.set(targetColorHex).lerp(new THREE.Color(0xffffff), 0.22);
+          }
+        }
       }
       mat.needsUpdate = true;
     };
@@ -538,23 +573,29 @@ export function Live3DPanel({
     if (!ambient || !key || !fill || !rim) return;
 
     if (nextMode === "studio") {
-      ambient.intensity = 1.25;
+      ambient.intensity = 0.38;
       key.color.set(0xffffff);
-      key.intensity = 2.4;
-      fill.color.set(0xecfdf5);
-      rim.color.set(0x10b981);
+      key.intensity = 1.45;
+      fill.color.set(0xf1f5f9);
+      fill.intensity = 0.75;
+      rim.color.set(0xffffff);
+      rim.intensity = 0.85;
     } else if (nextMode === "dramatic") {
-      ambient.intensity = 0.5;
+      ambient.intensity = 0.20;
       key.color.set(0xffffff);
-      key.intensity = 3.6;
-      fill.color.set(0x062d24);
+      key.intensity = 2.2;
+      fill.color.set(0x94a3b8);
+      fill.intensity = 0.35;
       rim.color.set(0x38bdf8);
+      rim.intensity = 1.2;
     } else if (nextMode === "warm") {
-      ambient.intensity = 1.1;
+      ambient.intensity = 0.35;
       key.color.set(0xfef3c7);
-      key.intensity = 2.8;
-      fill.color.set(0xfbbf24);
-      rim.color.set(0xf59e0b);
+      key.intensity = 1.45;
+      fill.color.set(0xffedd5);
+      fill.intensity = 0.70;
+      rim.color.set(0xfde68a);
+      rim.intensity = 0.85;
     }
   };
 
