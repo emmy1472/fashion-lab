@@ -347,6 +347,7 @@ export function Live3DPanel({
     const newGarmentMesh = buildGarment3DModel({
       garmentId,
       category: garmentCategory,
+      gender: mannequinGender,
       frontTexture: frontTextureRef.current,
       backTexture: backTextureRef.current,
       zoneColors,
@@ -368,7 +369,7 @@ export function Live3DPanel({
 
     garmentMeshGroupRef.current = newGarmentMesh;
     turntableGroupRef.current?.add(newGarmentMesh);
-  }, [garmentId, garmentCategory, gltfShirtModel, scratchConfig]);
+  }, [garmentId, garmentCategory, mannequinGender, gltfShirtModel, scratchConfig]);
 
   // 4. Dynamic Real-time UV Texture Projection (rasterize SVG markups to canvases)
   useEffect(() => {
@@ -500,7 +501,11 @@ export function Live3DPanel({
       }
 
       if (targetColorHex) {
-        mat.color.set(targetColorHex);
+        if (mat.map) {
+          mat.color.set(0xffffff);
+        } else {
+          mat.color.set(targetColorHex);
+        }
         if ((mat as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial) {
           const phys = mat as THREE.MeshPhysicalMaterial;
           if (phys.sheenColor) {
