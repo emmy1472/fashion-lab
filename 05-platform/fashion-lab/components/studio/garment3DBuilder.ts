@@ -142,14 +142,15 @@ export interface MannequinOptions {
 }
 
 /**
- * Builds a modern boutique stylized featureless mannequin head (as in Zara / Mango retail mannequins).
- * Parametric sculpted geometry with anatomical jawline, chin, cheekbones, and cranial vault.
+ * Builds a seamless sculpted boutique mannequin head and neck.
+ * Single continuous parametric surface from cranial crown (y = 1.54) down to clavicles (y = 1.08),
+ * eliminating disjointed cylinder seams.
  */
-function createBoutiqueHead(isFemale: boolean, mat: THREE.Material): THREE.Mesh {
-  const uSegs = 32;
-  const vSegs = 24;
-  const yTop = 1.52;
-  const yBot = 1.22; // chin level
+function createSeamlessHeadAndNeck(isFemale: boolean, mat: THREE.Material): THREE.Mesh {
+  const uSegs = 36;
+  const vSegs = 32;
+  const yTop = 1.54; // cranial crown
+  const yBot = 1.08; // clavicular base
 
   const geom = new THREE.BufferGeometry();
   const positions: number[] = [];
@@ -161,35 +162,40 @@ function createBoutiqueHead(isFemale: boolean, mat: THREE.Material): THREE.Mesh 
     const y = yTop - v * (yTop - yBot);
 
     let rx = 0.082;
-    let rz = 0.100;
+    let rz = 0.098;
     let zCenter = 0.0;
 
-    if (v < 0.25) {
-      // Cranial crown vault
-      const t = v / 0.25;
+    if (y > 1.44) {
+      // 1. Cranium vault apex
+      const t = (1.54 - y) / 0.10;
       const arc = Math.sqrt(Math.max(0.001, 1 - Math.pow(1 - t, 2)));
-      rx = (isFemale ? 0.076 : 0.084) * arc;
-      rz = (isFemale ? 0.092 : 0.100) * arc;
+      rx = (isFemale ? 0.074 : 0.082) * arc;
+      rz = (isFemale ? 0.090 : 0.098) * arc;
       zCenter = -0.015 * (1 - t);
-    } else if (v < 0.60) {
-      // Temples, brow, and cheekbones (widest cranial span)
-      const t = (v - 0.25) / 0.35;
-      rx = (isFemale ? 0.078 : 0.086) - 0.006 * t;
-      rz = (isFemale ? 0.094 : 0.102) + 0.004 * Math.sin(t * Math.PI);
-      zCenter = 0.005 * t;
-    } else if (v < 0.85) {
-      // Cheek to jawline angle
-      const t = (v - 0.60) / 0.25;
-      rx = (isFemale ? 0.072 : 0.080) - (isFemale ? 0.026 : 0.022) * t;
-      rz = (isFemale ? 0.092 : 0.100) - (isFemale ? 0.024 : 0.020) * t;
-      zCenter = 0.014 * t;
+    } else if (y > 1.34) {
+      // 2. Forehead, temples, and brow
+      const t = (1.44 - y) / 0.10;
+      rx = (isFemale ? 0.076 : 0.085) - 0.002 * t;
+      rz = (isFemale ? 0.092 : 0.102) + 0.003 * Math.sin(t * Math.PI);
+      zCenter = 0.004 * t;
+    } else if (y > 1.25) {
+      // 3. Cheekbones and jaw angle
+      const t = (1.34 - y) / 0.09;
+      rx = (isFemale ? 0.074 : 0.083) - (isFemale ? 0.018 : 0.014) * t;
+      rz = (isFemale ? 0.090 : 0.098) - (isFemale ? 0.016 : 0.012) * t;
+      zCenter = 0.012 * t;
+    } else if (y > 1.20) {
+      // 4. Tapered chin & submental jawline
+      const t = (1.25 - y) / 0.05;
+      rx = (isFemale ? 0.056 : 0.069) - (isFemale ? 0.014 : 0.016) * t;
+      rz = (isFemale ? 0.074 : 0.086) - (isFemale ? 0.018 : 0.018) * t;
+      zCenter = 0.016 + 0.004 * (1 - t);
     } else {
-      // Tapered mannequin chin
-      const t = (v - 0.85) / 0.15;
-      const chinT = Math.max(0.001, 1 - t);
-      rx = (isFemale ? 0.046 : 0.058) * Math.sqrt(chinT);
-      rz = (isFemale ? 0.068 : 0.080) * Math.sqrt(chinT);
-      zCenter = 0.018 + 0.005 * (1 - t);
+      // 5. Throat and anatomical neck flowing down into clavicles (y = 1.20 down to 1.08)
+      const t = (1.20 - y) / 0.12;
+      rx = (isFemale ? 0.042 : 0.053) + (isFemale ? 0.014 : 0.018) * Math.pow(t, 1.4);
+      rz = (isFemale ? 0.052 : 0.064) + (isFemale ? 0.012 : 0.016) * Math.pow(t, 1.4);
+      zCenter = 0.008 * (1 - t);
     }
 
     for (let iu = 0; iu <= uSegs; iu++) {
@@ -198,14 +204,21 @@ function createBoutiqueHead(isFemale: boolean, mat: THREE.Material): THREE.Mesh 
       const sinT = Math.sin(theta);
       const cosT = Math.cos(theta);
 
-      // Subtle planar styling for modern boutique mannequin
+      // Subtle planar styling for modern boutique mannequin (Images 1 & 3)
       let facet = 1.0;
-      if (v > 0.45 && v < 0.85 && cosT > 0.2) {
-        facet = 0.96 + 0.04 * Math.pow(Math.abs(sinT), 1.2);
+      if (y >= 1.22 && y <= 1.40 && cosT > 0.25) {
+        // Front facial plane
+        facet = 0.965 + 0.035 * Math.pow(Math.abs(sinT), 1.2);
       }
 
-      const px = sinT * rx * facet;
-      const pz = cosT * rz + zCenter;
+      // Sternocleidomastoid subtle neck muscle ridges
+      let neckRidge = 0;
+      if (y >= 1.08 && y <= 1.20 && cosT > 0.2 && Math.abs(sinT) > 0.3) {
+        neckRidge = 0.0025 * Math.sin(((1.20 - y) / 0.12) * Math.PI);
+      }
+
+      const px = sinT * (rx + neckRidge) * facet;
+      const pz = cosT * (rz + neckRidge) + zCenter;
       const py = y;
 
       positions.push(px, py, pz);
@@ -228,71 +241,354 @@ function createBoutiqueHead(isFemale: boolean, mat: THREE.Material): THREE.Mesh 
   geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
   geom.computeVertexNormals();
 
-  const headMesh = new THREE.Mesh(geom, mat);
-  headMesh.castShadow = true;
-  headMesh.receiveShadow = true;
-  return headMesh;
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
 }
 
 /**
- * Builds realistic boutique mannequin hands with sculpted thumbs and relaxed fingers (Images 1 & 3).
+ * Builds a seamless, continuous, anatomically sculpted arm (shoulder -> bicep -> elbow -> forearm -> wrist).
+ * Modeled as a single continuous lofted surface with smooth vertex normals to eliminate disjointed sphere joints.
  */
-function createBoutiqueHand(
+function createSeamlessSculptedArm(
+  side: number,
+  isFemale: boolean,
+  mat: THREE.Material
+): THREE.Mesh {
+  const rings = 28;
+  const radSegs = 20;
+  const geom = new THREE.BufferGeometry();
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  const shoulderX = side * (isFemale ? 0.245 : 0.305);
+  const wristX = side * (isFemale ? 0.295 : 0.365);
+
+  const yTop = 1.05; // shoulder deltoid
+  const yBot = 0.44; // wrist
+
+  for (let iv = 0; iv <= rings; iv++) {
+    const v = iv / rings;
+    const y = yTop - v * (yTop - yBot);
+
+    // Lateral curve along arm length
+    const cx = shoulderX + (wristX - shoulderX) * Math.pow(v, 1.15);
+    // Natural slight forward carrying angle
+    const cz = 0.004 + 0.012 * Math.sin(v * Math.PI);
+
+    let rx = 0.038;
+    let rz = 0.040;
+
+    if (v < 0.20) {
+      // 1. Deltoid shoulder cap (broad, curved round)
+      const t = v / 0.20;
+      rx = (isFemale ? 0.044 : 0.052) - 0.006 * t;
+      rz = (isFemale ? 0.046 : 0.054) - 0.007 * t;
+    } else if (v < 0.50) {
+      // 2. Biceps & Triceps upper arm
+      const t = (v - 0.20) / 0.30;
+      rx = (isFemale ? 0.038 : 0.046) - 0.006 * t;
+      rz = (isFemale ? 0.039 : 0.047) - 0.006 * t;
+    } else if (v < 0.60) {
+      // 3. Elbow with olecranon definition
+      const t = (v - 0.50) / 0.10;
+      rx = (isFemale ? 0.032 : 0.038) + 0.002 * Math.sin(t * Math.PI);
+      rz = (isFemale ? 0.033 : 0.039) + 0.005 * Math.sin(t * Math.PI);
+    } else if (v < 0.82) {
+      // 4. Forearm (brachioradialis muscle belly)
+      const t = (v - 0.60) / 0.22;
+      rx = (isFemale ? 0.031 : 0.037) - 0.007 * t;
+      rz = (isFemale ? 0.030 : 0.035) - 0.008 * t;
+    } else {
+      // 5. Wrist taper
+      const t = (v - 0.82) / 0.18;
+      rx = (isFemale ? 0.024 : 0.029) - 0.004 * t;
+      rz = (isFemale ? 0.020 : 0.024) - 0.003 * t;
+    }
+
+    for (let iu = 0; iu <= radSegs; iu++) {
+      const u = iu / radSegs;
+      const theta = u * Math.PI * 2;
+      const sinT = Math.sin(theta);
+      const cosT = Math.cos(theta);
+
+      // Tricep posterior bulge & elbow tip
+      let muscle = 0;
+      if (v >= 0.20 && v <= 0.45 && cosT < -0.3) {
+        muscle = 0.004 * Math.pow(-cosT, 1.2) * Math.sin(((v - 0.20) / 0.25) * Math.PI);
+      }
+      if (v >= 0.48 && v <= 0.58 && cosT < -0.4) {
+        // Olecranon elbow bone tip
+        muscle += 0.006 * Math.pow(-cosT, 1.5) * Math.sin(((v - 0.48) / 0.10) * Math.PI);
+      }
+
+      const px = cx + sinT * rx;
+      const pz = cz + cosT * (rz + muscle);
+      const py = y;
+
+      positions.push(px, py, pz);
+      uvs.push(u, v);
+    }
+  }
+
+  for (let iv = 0; iv < rings; iv++) {
+    for (let iu = 0; iu < radSegs; iu++) {
+      const a = iv * (radSegs + 1) + iu;
+      const b = a + 1;
+      const c = a + (radSegs + 1);
+      const d = c + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+
+  geom.setIndex(indices);
+  geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geom.computeVertexNormals();
+
+  const armMesh = new THREE.Mesh(geom, mat);
+  armMesh.castShadow = true;
+  armMesh.receiveShadow = true;
+  return armMesh;
+}
+
+/**
+ * Builds realistic boutique sculpted mannequin hands with distinct fingers in a natural relaxed pose (Images 1 & 3).
+ */
+function createBoutiqueSculptedHand(
   side: number,
   isFemale: boolean,
   mat: THREE.Material
 ): THREE.Group {
   const handGroup = new THREE.Group();
-  const posX = side * (isFemale ? 0.315 : 0.385);
+  const wristX = side * (isFemale ? 0.295 : 0.365);
+  handGroup.position.set(wristX, 0.44, 0.016);
 
-  // 1. Palm / Metacarpal block (tapered fashion palm)
-  const palmWidth = isFemale ? 0.038 : 0.044;
-  const palmHeight = 0.085;
-  const palmDepth = isFemale ? 0.020 : 0.024;
-  const palmGeom = new THREE.BoxGeometry(palmWidth, palmHeight, palmDepth);
+  // 1. Sculpted Palm with natural fashion taper & thenar pad
+  const palmGeom = new THREE.BufferGeometry();
+  const pRows = 8;
+  const pCols = 8;
+  const pPos: number[] = [];
+  const pIdx: number[] = [];
+
+  for (let r = 0; r <= pRows; r++) {
+    const t = r / pRows;
+    const y = -t * 0.09; // wrist (0) down to knuckles (-0.09)
+    const palmWidth = (isFemale ? 0.034 : 0.040) + 0.006 * Math.sin(t * Math.PI);
+    const palmThick = (isFemale ? 0.018 : 0.022) * (1 - 0.2 * t);
+
+    for (let c = 0; c <= pCols; c++) {
+      const u = c / pCols;
+      const theta = u * Math.PI * 2;
+      const sinT = Math.sin(theta);
+      const cosT = Math.cos(theta);
+
+      // Thenar thumb eminence
+      let thenar = 0;
+      if (t > 0.15 && t < 0.65 && side * sinT < -0.2 && cosT > 0) {
+        thenar = 0.005 * Math.sin(((t - 0.15) / 0.50) * Math.PI);
+      }
+
+      const px = sinT * (palmWidth * 0.5) + (side * thenar);
+      const pz = cosT * (palmThick * 0.5) + (thenar * 0.5);
+      pPos.push(px, y, pz);
+    }
+  }
+
+  for (let r = 0; r < pRows; r++) {
+    for (let c = 0; c < pCols; c++) {
+      const a = r * (pCols + 1) + c;
+      const b = a + 1;
+      const c0 = a + (pCols + 1);
+      const d = c0 + 1;
+      pIdx.push(a, c0, b, b, c0, d);
+    }
+  }
+
+  palmGeom.setIndex(pIdx);
+  palmGeom.setAttribute("position", new THREE.Float32BufferAttribute(pPos, 3));
+  palmGeom.computeVertexNormals();
+
   const palmMesh = new THREE.Mesh(palmGeom, mat);
-  palmMesh.position.set(posX, 0.395, 0.015);
-  palmMesh.rotation.z = -side * 0.06;
   palmMesh.castShadow = true;
   handGroup.add(palmMesh);
 
-  // 2. Sculpted Thumb (angled slightly forward and inward)
+  // 2. Sculpted Articulated Thumb (projecting forward at natural 25 deg fashion angle)
+  const thumbGroup = new THREE.Group();
+  thumbGroup.position.set(-side * (isFemale ? 0.015 : 0.018), -0.032, 0.008);
+  thumbGroup.rotation.x = 0.42;
+  thumbGroup.rotation.z = side * 0.35;
+
   const thumbGeom = new THREE.CylinderGeometry(
-    isFemale ? 0.007 : 0.0085,
-    isFemale ? 0.008 : 0.0095,
-    0.045,
+    isFemale ? 0.0062 : 0.0076,
+    isFemale ? 0.0075 : 0.0090,
+    0.048,
     12
   );
   const thumbMesh = new THREE.Mesh(thumbGeom, mat);
-  thumbMesh.position.set(posX - side * 0.014, 0.39, 0.026);
-  thumbMesh.rotation.x = 0.32;
-  thumbMesh.rotation.z = side * 0.28;
+  thumbMesh.position.y = -0.024;
   thumbMesh.castShadow = true;
-  handGroup.add(thumbMesh);
+  thumbGroup.add(thumbMesh);
+  handGroup.add(thumbGroup);
 
-  // 3. Relaxed Finger Cluster (gracefully curved boutique fingers)
-  const fingerGeom = new THREE.CylinderGeometry(
-    isFemale ? 0.014 : 0.017,
-    isFemale ? 0.011 : 0.013,
-    0.095,
-    14
-  );
-  const fingerMesh = new THREE.Mesh(fingerGeom, mat);
-  fingerMesh.position.set(posX + side * 0.004, 0.305, 0.014);
-  fingerMesh.rotation.x = -0.08;
-  fingerMesh.rotation.z = -side * 0.04;
-  fingerMesh.scale.set(1.2, 1.0, 0.65);
-  fingerMesh.castShadow = true;
-  handGroup.add(fingerMesh);
+  // 3. Four Individual Sculpted Boutique Fingers (Index, Middle, Ring, Pinky)
+  // Each gracefully curved in natural boutique fashion pose
+  const fingerSpecs = [
+    { name: "index", offset: -0.012, len: 0.070, r: 0.0052, curl: -0.06 },
+    { name: "middle", offset: -0.004, len: 0.076, r: 0.0056, curl: -0.08 },
+    { name: "ring", offset: 0.004, len: 0.072, r: 0.0052, curl: -0.10 },
+    { name: "pinky", offset: 0.011, len: 0.060, r: 0.0045, curl: -0.12 },
+  ];
+
+  for (const f of fingerSpecs) {
+    const fGroup = new THREE.Group();
+    fGroup.position.set(side * f.offset, -0.09, 0);
+    fGroup.rotation.x = f.curl;
+    fGroup.rotation.z = -side * 0.03;
+
+    const fGeom = new THREE.CylinderGeometry(
+      f.r * (isFemale ? 0.90 : 1.05) * 0.85,
+      f.r * (isFemale ? 0.90 : 1.05),
+      f.len,
+      10
+    );
+    const fMesh = new THREE.Mesh(fGeom, mat);
+    fMesh.position.y = -f.len * 0.5;
+    fMesh.castShadow = true;
+    fGroup.add(fMesh);
+
+    // Knuckle cap
+    const knuckleGeom = new THREE.SphereGeometry(f.r * 1.1, 8, 8);
+    const knuckleMesh = new THREE.Mesh(knuckleGeom, mat);
+    fGroup.add(knuckleMesh);
+
+    handGroup.add(fGroup);
+  }
 
   return handGroup;
 }
 
 /**
- * Builds realistic boutique footwear / shoes (sneaker for male, fashion pump for female)
+ * Builds a seamless, continuous, anatomically sculpted leg (hip -> quad -> patella knee -> calf -> ankle).
+ * Modeled as a single continuous lofted 3D parametric surface with 36 rings and 28 radial segments,
+ * producing zero joint seams and natural human muscle curves.
+ */
+function createSeamlessSculptedLeg(
+  side: number,
+  isFemale: boolean,
+  mat: THREE.Material
+): THREE.Mesh {
+  const rings = 36;
+  const radSegs = 28;
+  const geom = new THREE.BufferGeometry();
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  const lPosX = side * (isFemale ? 0.115 : 0.125);
+  const yTop = 0.10;  // pelvic crotch root
+  const yBot = -1.15; // ankle level
+
+  for (let iv = 0; iv <= rings; iv++) {
+    const v = iv / rings;
+    const y = yTop - v * (yTop - yBot);
+
+    // Natural subtle fashion leg stance
+    const cx = lPosX;
+    const cz = 0.002;
+
+    let rx = 0.075;
+    let rz = 0.075;
+
+    if (v < 0.28) {
+      // 1. Upper Thigh & Quadriceps curve
+      const t = v / 0.28;
+      rx = (isFemale ? 0.086 : 0.098) - 0.014 * t;
+      rz = (isFemale ? 0.090 : 0.102) - 0.015 * t;
+    } else if (v < 0.44) {
+      // 2. Lower Thigh tapering into knee
+      const t = (v - 0.28) / 0.16;
+      rx = (isFemale ? 0.072 : 0.084) - 0.010 * t;
+      rz = (isFemale ? 0.075 : 0.087) - 0.011 * t;
+    } else if (v < 0.56) {
+      // 3. Patella Knee joint & patellar tendon
+      const t = (v - 0.44) / 0.12;
+      rx = (isFemale ? 0.060 : 0.070) + 0.002 * Math.sin(t * Math.PI);
+      rz = (isFemale ? 0.062 : 0.072) + 0.008 * Math.sin(t * Math.PI);
+    } else if (v < 0.80) {
+      // 4. Calf (Gastrocnemius & Soleus muscle curve)
+      const t = (v - 0.56) / 0.24;
+      rx = (isFemale ? 0.058 : 0.068) + 0.008 * Math.sin(t * Math.PI);
+      rz = (isFemale ? 0.060 : 0.070) + 0.016 * Math.sin(t * Math.PI);
+    } else {
+      // 5. Lower Leg & Ankle taper (Achilles tendon back)
+      const t = (v - 0.80) / 0.20;
+      rx = (isFemale ? 0.058 : 0.068) - (isFemale ? 0.024 : 0.028) * t;
+      rz = (isFemale ? 0.060 : 0.070) - (isFemale ? 0.023 : 0.027) * t;
+    }
+
+    for (let iu = 0; iu <= radSegs; iu++) {
+      const u = iu / radSegs;
+      const theta = u * Math.PI * 2;
+      const sinT = Math.sin(theta);
+      const cosT = Math.cos(theta);
+
+      let muscle = 0;
+
+      // Anterior Quadriceps rectus femoris bulge
+      if (v >= 0.06 && v <= 0.35 && cosT > 0.2) {
+        muscle = 0.006 * Math.pow(cosT, 1.4) * Math.sin(((v - 0.06) / 0.29) * Math.PI);
+      }
+      // Patella Knee Cap plate
+      if (v >= 0.45 && v <= 0.55 && cosT > 0.3) {
+        muscle += 0.010 * Math.pow(cosT, 1.6) * Math.sin(((v - 0.45) / 0.10) * Math.PI);
+      }
+      // Posterior Gastrocnemius Calf Belly
+      if (v >= 0.58 && v <= 0.80 && cosT < -0.2) {
+        muscle += 0.018 * Math.pow(-cosT, 1.3) * Math.sin(((v - 0.58) / 0.22) * Math.PI);
+      }
+      // Lateral & Medial Ankle Malleolus bones at the hem
+      if (v >= 0.94 && Math.abs(sinT) > 0.7) {
+        muscle += 0.005 * Math.pow(Math.abs(sinT), 1.5) * ((v - 0.94) / 0.06);
+      }
+
+      const px = cx + sinT * rx;
+      const pz = cz + cosT * (rz + muscle);
+      const py = y;
+
+      positions.push(px, py, pz);
+      uvs.push(u, v);
+    }
+  }
+
+  for (let iv = 0; iv < rings; iv++) {
+    for (let iu = 0; iu < radSegs; iu++) {
+      const a = iv * (radSegs + 1) + iu;
+      const b = a + 1;
+      const c = a + (radSegs + 1);
+      const d = c + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+
+  geom.setIndex(indices);
+  geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geom.computeVertexNormals();
+
+  const legMesh = new THREE.Mesh(geom, mat);
+  legMesh.castShadow = true;
+  legMesh.receiveShadow = true;
+  return legMesh;
+}
+
+/**
+ * Builds realistic modern boutique footwear (luxury sneaker for male, sleek fashion pump for female)
  * resting flat on the turntable plinth.
  */
-function createBoutiqueShoe(
+function createBoutiqueFootwear(
   posX: number,
   isFemale: boolean,
   mat: THREE.Material,
@@ -301,47 +597,57 @@ function createBoutiqueShoe(
   const shoeGroup = new THREE.Group();
 
   if (!isFemale) {
-    // Male: Modern Clean Boutique Sneaker / Low-Boot (Image 1 & 3)
-    const shoeUpperGeom = new THREE.BoxGeometry(0.078, 0.11, 0.21);
-    const shoeUpper = new THREE.Mesh(shoeUpperGeom, mat);
-    shoeUpper.position.set(posX, -1.215, 0.045);
-    shoeUpper.castShadow = true;
-    shoeGroup.add(shoeUpper);
+    // Male: Modern Minimalist Luxury Boutique Sneaker (Images 1 & 3)
+    // 1. Contoured Leather Upper
+    const upperGeom = new THREE.BoxGeometry(0.078, 0.11, 0.215);
+    const upperMesh = new THREE.Mesh(upperGeom, mat);
+    upperMesh.position.set(posX, -1.215, 0.045);
+    upperMesh.castShadow = true;
+    shoeGroup.add(upperMesh);
 
-    // Defined Rubber Cupsole resting on the turntable at y = -1.30
-    const soleGeom = new THREE.BoxGeometry(0.082, 0.035, 0.22);
+    // 2. Sculpted Rubber Cupsole resting on the turntable at y = -1.30
+    const soleGeom = new THREE.BoxGeometry(0.084, 0.032, 0.225);
     const soleMesh = new THREE.Mesh(soleGeom, soleMat);
-    soleMesh.position.set(posX, -1.282, 0.048);
+    soleMesh.position.set(posX, -1.284, 0.048);
     soleMesh.castShadow = true;
     shoeGroup.add(soleMesh);
 
-    // Toe Spring Cap
-    const toeGeom = new THREE.SphereGeometry(0.038, 16, 12);
+    // 3. Rounded Toe Spring Cap
+    const toeGeom = new THREE.SphereGeometry(0.039, 16, 12);
     const toeMesh = new THREE.Mesh(toeGeom, mat);
-    toeMesh.position.set(posX, -1.24, 0.135);
+    toeMesh.position.set(posX, -1.242, 0.138);
     toeMesh.scale.set(1.0, 0.65, 1.15);
     toeMesh.castShadow = true;
     shoeGroup.add(toeMesh);
+
+    // 4. Sneaker Tongue & Lacing Throat Ridge
+    const tongueGeom = new THREE.BoxGeometry(0.038, 0.045, 0.09);
+    const tongueMesh = new THREE.Mesh(tongueGeom, mat);
+    tongueMesh.position.set(posX, -1.18, 0.06);
+    tongueMesh.rotation.x = -0.35;
+    tongueMesh.castShadow = true;
+    shoeGroup.add(tongueMesh);
   } else {
     // Female: Sleek Fashion Boutique Pump / Low-Profile Wedge (Image 3)
-    const shoeUpperGeom = new THREE.BoxGeometry(0.066, 0.10, 0.19);
-    const shoeUpper = new THREE.Mesh(shoeUpperGeom, mat);
-    shoeUpper.position.set(posX, -1.22, 0.035);
-    shoeUpper.castShadow = true;
-    shoeGroup.add(shoeUpper);
+    // 1. Contoured Fashion Upper
+    const upperGeom = new THREE.BoxGeometry(0.066, 0.098, 0.195);
+    const upperMesh = new THREE.Mesh(upperGeom, mat);
+    upperMesh.position.set(posX, -1.22, 0.035);
+    upperMesh.castShadow = true;
+    shoeGroup.add(upperMesh);
 
-    // Sleek fashion sole
-    const soleGeom = new THREE.BoxGeometry(0.070, 0.030, 0.20);
+    // 2. Sleek fashion sole
+    const soleGeom = new THREE.BoxGeometry(0.070, 0.028, 0.205);
     const soleMesh = new THREE.Mesh(soleGeom, soleMat);
-    soleMesh.position.set(posX, -1.285, 0.038);
+    soleMesh.position.set(posX, -1.286, 0.038);
     soleMesh.castShadow = true;
     shoeGroup.add(soleMesh);
 
-    // Tapered fashion toe
-    const toeGeom = new THREE.ConeGeometry(0.034, 0.07, 16);
+    // 3. Tapered Almond Toe
+    const toeGeom = new THREE.ConeGeometry(0.033, 0.075, 16);
     const toeMesh = new THREE.Mesh(toeGeom, mat);
     toeMesh.rotation.x = Math.PI / 2;
-    toeMesh.position.set(posX, -1.248, 0.14);
+    toeMesh.position.set(posX, -1.250, 0.142);
     toeMesh.scale.set(0.95, 1.0, 0.55);
     toeMesh.castShadow = true;
     shoeGroup.add(toeMesh);
@@ -352,16 +658,13 @@ function createBoutiqueShoe(
 
 /**
  * Procedural Anatomical 3D Human Boutique Mannequin (Male & Female).
- * Mathematically calibrated to real human fashion proportions (8-head canon):
- * - Head top: y = 1.52, Chin: y = 1.22
- * - Neck & Clavicles: y = 1.08 .. 1.22
- * - Chest / Bust Apex: y = 0.85
- * - Waist (narrowest): y = 0.50
- * - Hips / Pelvis: y = 0.22
- * - Crotch Fork: y = 0.10
- * - Knees: y = -0.50
- * - Ankles: y = -1.15
- * - Shoes & Turntable Plinth: y = -1.15 .. -1.30
+ * True continuous organic surface modeling (Zero joint seams):
+ * - Seamless Head & Neck (y = 1.54 .. 1.08)
+ * - Sculpted Anatomical Torso (y = 1.08 .. 0.10)
+ * - Seamless Continuous Arms (y = 1.05 .. 0.44)
+ * - Sculpted Boutique Hands with distinct relaxed fingers
+ * - Seamless Continuous Legs (y = 0.10 .. -1.15)
+ * - Minimalist Boutique Footwear & Turntable Plinth (y = -1.15 .. -1.30)
  */
 export function createHumanMannequin(
   gender: MannequinGender = "female",
@@ -410,25 +713,25 @@ export function createHumanMannequin(
     return group;
   }
 
-  // --- Human Mannequin Materials (Directly from User Reference Images) ---
+  // --- Real-World Boutique Mannequin Materials (Images 1, 2, 3) ---
   const bodyColor =
     skinFinish === "white" || skinFinish === "alabaster"
-      ? 0xf8fafc // Matte White (Image 1 right)
+      ? 0xf9fafb // Matte White (Image 1 right)
       : skinFinish === "charcoal"
-      ? 0x212529 // Deep Satin Charcoal (Image 3 right)
+      ? 0x1f2937 // Deep Satin Charcoal (Image 3 right)
       : skinFinish === "linen"
-      ? 0xeae4d9 // Atelier Linen (Image 2)
-      : 0x475569; // Matte Boutique Slate Grey (Image 1 center, Image 3 pair)
+      ? 0xeae5dc // Atelier Linen (Image 2)
+      : 0x4b5563; // Matte Boutique Slate Grey (Image 1 center, Image 3 pair)
 
   const mannequinMat = new THREE.MeshStandardMaterial({
     name: "mat_mannequin_body",
     color: bodyColor,
     roughness:
       skinFinish === "linen"
-        ? 0.72
+        ? 0.70
         : skinFinish === "white" || skinFinish === "alabaster"
-        ? 0.45
-        : 0.52,
+        ? 0.42
+        : 0.48,
     metalness: 0.03,
     side: THREE.DoubleSide,
   });
@@ -436,29 +739,15 @@ export function createHumanMannequin(
   const soleMat = new THREE.MeshStandardMaterial({
     name: "mat_mannequin_sole",
     color: 0x1e293b,
-    roughness: 0.6,
-    metalness: 0.1,
+    roughness: 0.55,
+    metalness: 0.08,
   });
 
-  // 1. Boutique Stylized Head (Images 1 & 3)
-  const headMesh = createBoutiqueHead(isFemale, mannequinMat);
-  group.add(headMesh);
+  // 1. Seamless Head & Neck (y = 1.54 down to y = 1.08)
+  const headAndNeckMesh = createSeamlessHeadAndNeck(isFemale, mannequinMat);
+  group.add(headAndNeckMesh);
 
-  // 2. Sculpted Neck
-  const neckGeom = new THREE.CylinderGeometry(
-    isFemale ? 0.044 : 0.054,
-    isFemale ? 0.056 : 0.070,
-    0.15,
-    32
-  );
-  const neckMesh = new THREE.Mesh(neckGeom, mannequinMat);
-  neckMesh.position.set(0, 1.155, 0.008);
-  neckMesh.rotation.x = 0.04;
-  neckMesh.castShadow = true;
-  neckMesh.receiveShadow = true;
-  group.add(neckMesh);
-
-  // 3. Parametric Sculpted Anatomical Torso (y = 1.08 down to y = 0.10)
+  // 2. Parametric Sculpted Anatomical Torso (y = 1.08 down to y = 0.10)
   const segsU = 48;
   const segsV = 28;
   const yTop = 1.08; // clavicles
@@ -607,135 +896,27 @@ export function createHumanMannequin(
   torsoMesh.receiveShadow = true;
   group.add(torsoMesh);
 
-  // 4. Boutique Arms & Sculpted Hands (Images 1 & 3)
-  const shoulderX = isFemale ? 0.250 : 0.310;
+  // 3. Seamless Continuous Sculpted Arms & Hands (Images 1 & 3)
   for (const side of [-1, 1]) {
-    const armGroup = new THREE.Group();
+    const armMesh = createSeamlessSculptedArm(side, isFemale, mannequinMat);
+    group.add(armMesh);
 
-    // Deltoid shoulder cap
-    const deltoidGeom = new THREE.SphereGeometry(isFemale ? 0.044 : 0.052, 16, 12);
-    const deltoidMesh = new THREE.Mesh(deltoidGeom, mannequinMat);
-    deltoidMesh.position.set(side * shoulderX, 1.04, 0.005);
-    deltoidMesh.scale.set(1.0, 1.15, 0.85);
-    deltoidMesh.castShadow = true;
-    armGroup.add(deltoidMesh);
-
-    // Upper Arm
-    const upperArmGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.038 : 0.046,
-      isFemale ? 0.032 : 0.038,
-      0.30,
-      20
-    );
-    const upperArmMesh = new THREE.Mesh(upperArmGeom, mannequinMat);
-    upperArmMesh.position.set(side * (shoulderX + 0.026), 0.88, 0.005);
-    upperArmMesh.rotation.z = side * 0.06;
-    upperArmMesh.castShadow = true;
-    armGroup.add(upperArmMesh);
-
-    // Elbow Joint
-    const elbowGeom = new THREE.SphereGeometry(isFemale ? 0.030 : 0.036, 14, 12);
-    const elbowMesh = new THREE.Mesh(elbowGeom, mannequinMat);
-    elbowMesh.position.set(side * (shoulderX + 0.038), 0.74, -0.005);
-    armGroup.add(elbowMesh);
-
-    // Forearm
-    const foreArmGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.030 : 0.036,
-      isFemale ? 0.022 : 0.026,
-      0.28,
-      20
-    );
-    const foreArmMesh = new THREE.Mesh(foreArmGeom, mannequinMat);
-    foreArmMesh.position.set(side * (shoulderX + 0.042), 0.58, 0.010);
-    foreArmMesh.rotation.z = -side * 0.04;
-    foreArmMesh.castShadow = true;
-    armGroup.add(foreArmMesh);
-
-    // Sculpted Boutique Hand
-    const hand = createBoutiqueHand(side, isFemale, mannequinMat);
-    armGroup.add(hand);
-
-    group.add(armGroup);
+    const handGroup = createBoutiqueSculptedHand(side, isFemale, mannequinMat);
+    group.add(handGroup);
   }
 
-  // 5. Continuous Sculpted Legs & Boutique Footwear (Images 1 & 3)
+  // 4. Seamless Continuous Sculpted Legs & Boutique Footwear (Images 1 & 3)
   const legOffsetX = isFemale ? 0.115 : 0.125;
   for (const side of [-1, 1]) {
-    const legGroup = new THREE.Group();
     const lPosX = side * legOffsetX;
 
-    // Upper Thigh (from pelvic base y = 0.10 down to y = -0.20)
-    const upperThighGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.082 : 0.094,
-      isFemale ? 0.068 : 0.078,
-      0.30,
-      24
-    );
-    const upperThighMesh = new THREE.Mesh(upperThighGeom, mannequinMat);
-    upperThighMesh.position.set(lPosX, -0.05, 0);
-    upperThighMesh.castShadow = true;
-    upperThighMesh.receiveShadow = true;
-    legGroup.add(upperThighMesh);
+    // Seamless continuous leg from pelvic root down to ankle
+    const legMesh = createSeamlessSculptedLeg(side, isFemale, mannequinMat);
+    group.add(legMesh);
 
-    // Lower Thigh (from y = -0.20 down to knee y = -0.50)
-    const lowerThighGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.068 : 0.078,
-      isFemale ? 0.054 : 0.062,
-      0.30,
-      24
-    );
-    const lowerThighMesh = new THREE.Mesh(lowerThighGeom, mannequinMat);
-    lowerThighMesh.position.set(lPosX, -0.35, 0);
-    lowerThighMesh.castShadow = true;
-    lowerThighMesh.receiveShadow = true;
-    legGroup.add(lowerThighMesh);
-
-    // Knee Patella Joint
-    const kneeGeom = new THREE.SphereGeometry(isFemale ? 0.050 : 0.058, 20, 16);
-    const kneeMesh = new THREE.Mesh(kneeGeom, mannequinMat);
-    kneeMesh.position.set(lPosX, -0.50, 0.008);
-    kneeMesh.scale.set(1, 1.1, 0.85);
-    legGroup.add(kneeMesh);
-
-    // Calf (from knee y = -0.50 down to y = -0.86)
-    const calfGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.052 : 0.062,
-      isFemale ? 0.038 : 0.046,
-      0.36,
-      24
-    );
-    const calfMesh = new THREE.Mesh(calfGeom, mannequinMat);
-    calfMesh.position.set(lPosX, -0.68, -0.006);
-    calfMesh.castShadow = true;
-    calfMesh.receiveShadow = true;
-    legGroup.add(calfMesh);
-
-    // Lower Leg to Ankle (from y = -0.86 down to y = -1.15)
-    const ankleGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.038 : 0.046,
-      isFemale ? 0.032 : 0.038,
-      0.29,
-      20
-    );
-    const ankleMesh = new THREE.Mesh(ankleGeom, mannequinMat);
-    ankleMesh.position.set(lPosX, -1.005, 0);
-    ankleMesh.castShadow = true;
-    legGroup.add(ankleMesh);
-
-    // Malleolus Ankle Bone Contours
-    for (const mSide of [-1, 1]) {
-      const malleolusGeom = new THREE.SphereGeometry(0.008, 10, 8);
-      const malleolusMesh = new THREE.Mesh(malleolusGeom, mannequinMat);
-      malleolusMesh.position.set(lPosX + mSide * (isFemale ? 0.032 : 0.038), -1.15, 0);
-      legGroup.add(malleolusMesh);
-    }
-
-    // Boutique Shoe / Footwear resting on turntable plinth (Images 1 & 3)
-    const shoe = createBoutiqueShoe(lPosX, isFemale, mannequinMat, soleMat);
-    legGroup.add(shoe);
-
-    group.add(legGroup);
+    // Boutique shoe / footwear resting on the turntable plinth
+    const shoe = createBoutiqueFootwear(lPosX, isFemale, mannequinMat, soleMat);
+    group.add(shoe);
   }
 
   return group;
