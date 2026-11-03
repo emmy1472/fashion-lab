@@ -1598,6 +1598,7 @@ function buildMorphedClothFromGLB(
 
       const origX = x;
       const origY = y;
+      const origZ = z;
       const absX = Math.abs(x);
       const signX = x >= 0 ? 1 : -1;
 
