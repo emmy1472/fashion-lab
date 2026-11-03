@@ -4,7 +4,6 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import {
   RotateCcw,
   Sun,
@@ -281,8 +280,6 @@ export function Live3DPanel({
       cancelAnimationFrame(animId);
       window.removeEventListener("resize", handleResize);
       ro.disconnect();
-      pmremGenerator.dispose();
-      envTexture.dispose();
       renderer.dispose();
       controls.dispose();
     };
