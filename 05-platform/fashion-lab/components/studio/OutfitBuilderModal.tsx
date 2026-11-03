@@ -150,6 +150,7 @@ export function OutfitBuilderModal({
   const topGroupRef = useRef<THREE.Group | null>(null);
   const bottomGroupRef = useRef<THREE.Group | null>(null);
   const pedestalRef = useRef<THREE.Group | null>(null);
+  const turntableGroupRef = useRef<THREE.Group | null>(null);
   const isRotatingRef = useRef(true);
 
   // Offscreen canvases / textures (top garment)
@@ -203,7 +204,7 @@ export function OutfitBuilderModal({
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(38, w / h, 0.1, 100);
-    camera.position.set(0, 0, 3.4);
+    camera.position.set(0, 0.25, 3.10);
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
@@ -227,7 +228,7 @@ export function OutfitBuilderModal({
     controls.minDistance = 1.5;
     controls.maxDistance = 6.0;
     controls.maxPolarAngle = Math.PI / 1.6;
-    controls.target.set(0, -0.15, 0); // center between head and knees
+    controls.target.set(0, 0.10, 0); // center on torso
     controlsRef.current = controls;
 
     // Lighting
@@ -248,9 +249,15 @@ export function OutfitBuilderModal({
     // Floor
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), new THREE.ShadowMaterial({ opacity: 0.10 }));
     floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -1.56;
+    floor.position.y = -1.325;
     floor.receiveShadow = true;
     scene.add(floor);
+
+    // Studio turntable group for synchronized outfit rotation
+    const turntable = new THREE.Group();
+    turntable.name = "outfit_turntable";
+    scene.add(turntable);
+    turntableGroupRef.current = turntable;
 
     // Offscreen canvases — top garment
     const mkCanvas = () => {
@@ -288,10 +295,8 @@ export function OutfitBuilderModal({
     const animate = () => {
       animId = requestAnimationFrame(animate);
       controls.update();
-      if (isRotatingRef.current) {
-        if (topGroupRef.current) topGroupRef.current.rotation.y += 0.004;
-        if (bottomGroupRef.current) bottomGroupRef.current.rotation.y += 0.004;
-        if (pedestalRef.current) pedestalRef.current.rotation.y += 0.004;
+      if (isRotatingRef.current && turntableGroupRef.current) {
+        turntableGroupRef.current.rotation.y += 0.004;
       }
       renderer.render(scene, camera);
     };
@@ -323,8 +328,8 @@ export function OutfitBuilderModal({
   // ── Rebuild Top mesh whenever topId changes ────────────────────────────────
   const buildTopMesh = useCallback(() => {
     if (!sceneRef.current || !topFrontTextureRef.current) return;
-    if (topGroupRef.current) {
-      sceneRef.current.remove(topGroupRef.current);
+    if (topGroupRef.current && turntableGroupRef.current) {
+      turntableGroupRef.current.remove(topGroupRef.current);
       topGroupRef.current.traverse((c) => {
         if ((c as THREE.Mesh).isMesh) (c as THREE.Mesh).geometry.dispose();
       });
@@ -340,15 +345,15 @@ export function OutfitBuilderModal({
       scratchConfig: topId === currentGarmentId ? currentScratchConfig : undefined,
     });
     topGroupRef.current = group;
-    sceneRef.current.add(group);
+    turntableGroupRef.current?.add(group);
     applyZoneColorsToGroup(group, topColors);
   }, [topId, gltfShirtModel, topColors, currentGarmentId, currentScratchConfig]);
 
   // ── Rebuild Bottom mesh whenever bottomId changes ─────────────────────────
   const buildBottomMesh = useCallback(() => {
     if (!sceneRef.current || !botFrontTextureRef.current) return;
-    if (bottomGroupRef.current) {
-      sceneRef.current.remove(bottomGroupRef.current);
+    if (bottomGroupRef.current && turntableGroupRef.current) {
+      turntableGroupRef.current.remove(bottomGroupRef.current);
       bottomGroupRef.current.traverse((c) => {
         if ((c as THREE.Mesh).isMesh) (c as THREE.Mesh).geometry.dispose();
       });
@@ -364,7 +369,7 @@ export function OutfitBuilderModal({
       scratchConfig: bottomId === currentGarmentId ? currentScratchConfig : undefined,
     });
     bottomGroupRef.current = group;
-    sceneRef.current.add(group);
+    turntableGroupRef.current?.add(group);
     applyZoneColorsToGroup(group, bottomColors);
   }, [bottomId, gltfShirtModel, bottomColors, currentGarmentId, currentScratchConfig]);
 
@@ -378,9 +383,9 @@ export function OutfitBuilderModal({
 
   // ── Rebuild Mannequin when gender changes ──────────────────────────────────
   useEffect(() => {
-    if (!isOpen || !sceneRef.current) return;
+    if (!isOpen || !sceneRef.current || !turntableGroupRef.current) return;
     if (pedestalRef.current) {
-      sceneRef.current.remove(pedestalRef.current);
+      turntableGroupRef.current.remove(pedestalRef.current);
       pedestalRef.current.traverse((c) => {
         if ((c as THREE.Mesh).isMesh) {
           (c as THREE.Mesh).geometry?.dispose();
@@ -388,9 +393,9 @@ export function OutfitBuilderModal({
       });
       pedestalRef.current = null;
     }
-    const mannequin = createHumanMannequin(mannequinGender, "Tops", "linen");
+    const mannequin = createHumanMannequin(mannequinGender, "Tops", "slate");
     pedestalRef.current = mannequin;
-    sceneRef.current.add(mannequin);
+    turntableGroupRef.current.add(mannequin);
   }, [isOpen, mannequinGender]);
 
   // ── Sync top texture from current design's SVG (if current is top) ─────────
@@ -491,9 +496,12 @@ export function OutfitBuilderModal({
   // ── Reset camera ──────────────────────────────────────────────────────────
   const resetCamera = () => {
     if (!cameraRef.current || !controlsRef.current) return;
-    cameraRef.current.position.set(0, 0, 3.4);
-    controlsRef.current.target.set(0, -0.15, 0);
+    cameraRef.current.position.set(0, 0.25, 3.10);
+    controlsRef.current.target.set(0, 0.10, 0);
     controlsRef.current.update();
+    if (turntableGroupRef.current) {
+      turntableGroupRef.current.rotation.y = 0;
+    }
     setIsRotating(true);
   };
 

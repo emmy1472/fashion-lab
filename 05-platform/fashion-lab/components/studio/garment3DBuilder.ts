@@ -132,7 +132,7 @@ function getRibbedKnitBumpMap(): THREE.CanvasTexture | null {
 }
 
 export type MannequinGender = "female" | "male" | "none";
-export type MannequinFinish = "linen" | "alabaster" | "charcoal";
+export type MannequinFinish = "slate" | "white" | "charcoal" | "linen" | "alabaster";
 
 export interface MannequinOptions {
   gender?: MannequinGender;
@@ -142,15 +142,231 @@ export interface MannequinOptions {
 }
 
 /**
- * Procedural Anatomical 3D Human Mannequin (Male, Female, or Ghost).
- * Sculpted for authentic tailor dress form proportions with realistic bust/chest,
- * waistline taper, pelvic form, slender legs fitting inside trousers/jeans,
- * chrome neck finials, shoulder scye caps, and architectural plinth stand.
+ * Builds a modern boutique stylized featureless mannequin head (as in Zara / Mango retail mannequins).
+ * Parametric sculpted geometry with anatomical jawline, chin, cheekbones, and cranial vault.
+ */
+function createBoutiqueHead(isFemale: boolean, mat: THREE.Material): THREE.Mesh {
+  const uSegs = 32;
+  const vSegs = 24;
+  const yTop = 1.52;
+  const yBot = 1.22; // chin level
+
+  const geom = new THREE.BufferGeometry();
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  for (let iv = 0; iv <= vSegs; iv++) {
+    const v = iv / vSegs;
+    const y = yTop - v * (yTop - yBot);
+
+    let rx = 0.082;
+    let rz = 0.100;
+    let zCenter = 0.0;
+
+    if (v < 0.25) {
+      // Cranial crown vault
+      const t = v / 0.25;
+      const arc = Math.sqrt(Math.max(0.001, 1 - Math.pow(1 - t, 2)));
+      rx = (isFemale ? 0.076 : 0.084) * arc;
+      rz = (isFemale ? 0.092 : 0.100) * arc;
+      zCenter = -0.015 * (1 - t);
+    } else if (v < 0.60) {
+      // Temples, brow, and cheekbones (widest cranial span)
+      const t = (v - 0.25) / 0.35;
+      rx = (isFemale ? 0.078 : 0.086) - 0.006 * t;
+      rz = (isFemale ? 0.094 : 0.102) + 0.004 * Math.sin(t * Math.PI);
+      zCenter = 0.005 * t;
+    } else if (v < 0.85) {
+      // Cheek to jawline angle
+      const t = (v - 0.60) / 0.25;
+      rx = (isFemale ? 0.072 : 0.080) - (isFemale ? 0.026 : 0.022) * t;
+      rz = (isFemale ? 0.092 : 0.100) - (isFemale ? 0.024 : 0.020) * t;
+      zCenter = 0.014 * t;
+    } else {
+      // Tapered mannequin chin
+      const t = (v - 0.85) / 0.15;
+      const chinT = Math.max(0.001, 1 - t);
+      rx = (isFemale ? 0.046 : 0.058) * Math.sqrt(chinT);
+      rz = (isFemale ? 0.068 : 0.080) * Math.sqrt(chinT);
+      zCenter = 0.018 + 0.005 * (1 - t);
+    }
+
+    for (let iu = 0; iu <= uSegs; iu++) {
+      const u = iu / uSegs;
+      const theta = u * Math.PI * 2;
+      const sinT = Math.sin(theta);
+      const cosT = Math.cos(theta);
+
+      // Subtle planar styling for modern boutique mannequin
+      let facet = 1.0;
+      if (v > 0.45 && v < 0.85 && cosT > 0.2) {
+        facet = 0.96 + 0.04 * Math.pow(Math.abs(sinT), 1.2);
+      }
+
+      const px = sinT * rx * facet;
+      const pz = cosT * rz + zCenter;
+      const py = y;
+
+      positions.push(px, py, pz);
+      uvs.push(u, v);
+    }
+  }
+
+  for (let iv = 0; iv < vSegs; iv++) {
+    for (let iu = 0; iu < uSegs; iu++) {
+      const a = iv * (uSegs + 1) + iu;
+      const b = a + 1;
+      const c = a + (uSegs + 1);
+      const d = c + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+
+  geom.setIndex(indices);
+  geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geom.computeVertexNormals();
+
+  const headMesh = new THREE.Mesh(geom, mat);
+  headMesh.castShadow = true;
+  headMesh.receiveShadow = true;
+  return headMesh;
+}
+
+/**
+ * Builds realistic boutique mannequin hands with sculpted thumbs and relaxed fingers (Images 1 & 3).
+ */
+function createBoutiqueHand(
+  side: number,
+  isFemale: boolean,
+  mat: THREE.Material
+): THREE.Group {
+  const handGroup = new THREE.Group();
+  const posX = side * (isFemale ? 0.315 : 0.385);
+
+  // 1. Palm / Metacarpal block (tapered fashion palm)
+  const palmWidth = isFemale ? 0.038 : 0.044;
+  const palmHeight = 0.085;
+  const palmDepth = isFemale ? 0.020 : 0.024;
+  const palmGeom = new THREE.BoxGeometry(palmWidth, palmHeight, palmDepth);
+  const palmMesh = new THREE.Mesh(palmGeom, mat);
+  palmMesh.position.set(posX, 0.395, 0.015);
+  palmMesh.rotation.z = -side * 0.06;
+  palmMesh.castShadow = true;
+  handGroup.add(palmMesh);
+
+  // 2. Sculpted Thumb (angled slightly forward and inward)
+  const thumbGeom = new THREE.CylinderGeometry(
+    isFemale ? 0.007 : 0.0085,
+    isFemale ? 0.008 : 0.0095,
+    0.045,
+    12
+  );
+  const thumbMesh = new THREE.Mesh(thumbGeom, mat);
+  thumbMesh.position.set(posX - side * 0.014, 0.39, 0.026);
+  thumbMesh.rotation.x = 0.32;
+  thumbMesh.rotation.z = side * 0.28;
+  thumbMesh.castShadow = true;
+  handGroup.add(thumbMesh);
+
+  // 3. Relaxed Finger Cluster (gracefully curved boutique fingers)
+  const fingerGeom = new THREE.CylinderGeometry(
+    isFemale ? 0.014 : 0.017,
+    isFemale ? 0.011 : 0.013,
+    0.095,
+    14
+  );
+  const fingerMesh = new THREE.Mesh(fingerGeom, mat);
+  fingerMesh.position.set(posX + side * 0.004, 0.305, 0.014);
+  fingerMesh.rotation.x = -0.08;
+  fingerMesh.rotation.z = -side * 0.04;
+  fingerMesh.scale.set(1.2, 1.0, 0.65);
+  fingerMesh.castShadow = true;
+  handGroup.add(fingerMesh);
+
+  return handGroup;
+}
+
+/**
+ * Builds realistic boutique footwear / shoes (sneaker for male, fashion pump for female)
+ * resting flat on the turntable plinth.
+ */
+function createBoutiqueShoe(
+  posX: number,
+  isFemale: boolean,
+  mat: THREE.Material,
+  soleMat: THREE.Material
+): THREE.Group {
+  const shoeGroup = new THREE.Group();
+
+  if (!isFemale) {
+    // Male: Modern Clean Boutique Sneaker / Low-Boot (Image 1 & 3)
+    const shoeUpperGeom = new THREE.BoxGeometry(0.078, 0.11, 0.21);
+    const shoeUpper = new THREE.Mesh(shoeUpperGeom, mat);
+    shoeUpper.position.set(posX, -1.215, 0.045);
+    shoeUpper.castShadow = true;
+    shoeGroup.add(shoeUpper);
+
+    // Defined Rubber Cupsole resting on the turntable at y = -1.30
+    const soleGeom = new THREE.BoxGeometry(0.082, 0.035, 0.22);
+    const soleMesh = new THREE.Mesh(soleGeom, soleMat);
+    soleMesh.position.set(posX, -1.282, 0.048);
+    soleMesh.castShadow = true;
+    shoeGroup.add(soleMesh);
+
+    // Toe Spring Cap
+    const toeGeom = new THREE.SphereGeometry(0.038, 16, 12);
+    const toeMesh = new THREE.Mesh(toeGeom, mat);
+    toeMesh.position.set(posX, -1.24, 0.135);
+    toeMesh.scale.set(1.0, 0.65, 1.15);
+    toeMesh.castShadow = true;
+    shoeGroup.add(toeMesh);
+  } else {
+    // Female: Sleek Fashion Boutique Pump / Low-Profile Wedge (Image 3)
+    const shoeUpperGeom = new THREE.BoxGeometry(0.066, 0.10, 0.19);
+    const shoeUpper = new THREE.Mesh(shoeUpperGeom, mat);
+    shoeUpper.position.set(posX, -1.22, 0.035);
+    shoeUpper.castShadow = true;
+    shoeGroup.add(shoeUpper);
+
+    // Sleek fashion sole
+    const soleGeom = new THREE.BoxGeometry(0.070, 0.030, 0.20);
+    const soleMesh = new THREE.Mesh(soleGeom, soleMat);
+    soleMesh.position.set(posX, -1.285, 0.038);
+    soleMesh.castShadow = true;
+    shoeGroup.add(soleMesh);
+
+    // Tapered fashion toe
+    const toeGeom = new THREE.ConeGeometry(0.034, 0.07, 16);
+    const toeMesh = new THREE.Mesh(toeGeom, mat);
+    toeMesh.rotation.x = Math.PI / 2;
+    toeMesh.position.set(posX, -1.248, 0.14);
+    toeMesh.scale.set(0.95, 1.0, 0.55);
+    toeMesh.castShadow = true;
+    shoeGroup.add(toeMesh);
+  }
+
+  return shoeGroup;
+}
+
+/**
+ * Procedural Anatomical 3D Human Boutique Mannequin (Male & Female).
+ * Mathematically calibrated to real human fashion proportions (8-head canon):
+ * - Head top: y = 1.52, Chin: y = 1.22
+ * - Neck & Clavicles: y = 1.08 .. 1.22
+ * - Chest / Bust Apex: y = 0.85
+ * - Waist (narrowest): y = 0.50
+ * - Hips / Pelvis: y = 0.22
+ * - Crotch Fork: y = 0.10
+ * - Knees: y = -0.50
+ * - Ankles: y = -1.15
+ * - Shoes & Turntable Plinth: y = -1.15 .. -1.30
  */
 export function createHumanMannequin(
   gender: MannequinGender = "female",
   _category: string = "Tops",
-  skinFinish: MannequinFinish = "linen"
+  skinFinish: MannequinFinish = "slate"
 ): THREE.Group {
   const group = new THREE.Group();
   group.name = "human_mannequin";
@@ -163,119 +379,90 @@ export function createHumanMannequin(
     name: "mat_mannequin_base",
     color: 0xcbd5e1,
     roughness: 0.25,
-    metalness: 0.8,
+    metalness: 0.82,
   });
 
   const accentRingMat = new THREE.MeshStandardMaterial({
     name: "mat_mannequin_accent",
-    color: isFemale ? 0x10b981 : 0xd97706,
+    color: isFemale ? 0x10b981 : 0x0284c7,
     roughness: 0.3,
-    metalness: 0.4,
-    emissive: new THREE.Color(isFemale ? 0x064e3b : 0x78350f),
-    emissiveIntensity: 0.25,
+    metalness: 0.5,
+    emissive: new THREE.Color(isFemale ? 0x064e3b : 0x0369a1),
+    emissiveIntensity: 0.2,
   });
 
-  // Architectural turntable plinth disc far below the garment hem
-  const baseGeom = new THREE.CylinderGeometry(0.46, 0.50, 0.035, 48);
+  // Architectural turntable plinth disc sitting at floor level y = -1.30
+  const baseGeom = new THREE.CylinderGeometry(0.44, 0.46, 0.024, 48);
   const baseMesh = new THREE.Mesh(baseGeom, brushedMetal);
-  baseMesh.position.set(0, -1.52, 0);
+  baseMesh.position.set(0, -1.312, 0);
   baseMesh.receiveShadow = true;
   group.add(baseMesh);
 
-  // Studio accent ring around the plinth
-  const ringGeom = new THREE.TorusGeometry(0.465, 0.006, 12, 64);
+  // Accent ring around the plinth edge
+  const ringGeom = new THREE.TorusGeometry(0.442, 0.005, 12, 64);
   const ringMesh = new THREE.Mesh(ringGeom, accentRingMat);
   ringMesh.rotation.x = Math.PI / 2;
-  ringMesh.position.set(0, -1.502, 0);
+  ringMesh.position.set(0, -1.302, 0);
   group.add(ringMesh);
-
-  // Center chrome stand collar
-  const collarGeom = new THREE.CylinderGeometry(0.060, 0.070, 0.024, 32);
-  const collarMesh = new THREE.Mesh(collarGeom, brushedMetal);
-  collarMesh.position.set(0, -1.492, 0);
-  group.add(collarMesh);
 
   // If ghost mode selected, stop here (clean floating garment on plinth)
   if (isNone) {
     return group;
   }
 
-  // --- Human Mannequin Materials ---
+  // --- Human Mannequin Materials (Directly from User Reference Images) ---
   const bodyColor =
-    skinFinish === "alabaster"
-      ? 0xf8fafc
+    skinFinish === "white" || skinFinish === "alabaster"
+      ? 0xf8fafc // Matte White (Image 1 right)
       : skinFinish === "charcoal"
-      ? 0x242933
-      : 0xede8e1; // warm tailor canvas linen
+      ? 0x212529 // Deep Satin Charcoal (Image 3 right)
+      : skinFinish === "linen"
+      ? 0xeae4d9 // Atelier Linen (Image 2)
+      : 0x475569; // Matte Boutique Slate Grey (Image 1 center, Image 3 pair)
 
   const mannequinMat = new THREE.MeshStandardMaterial({
     name: "mat_mannequin_body",
     color: bodyColor,
-    roughness: skinFinish === "alabaster" ? 0.42 : 0.68,
-    metalness: skinFinish === "alabaster" ? 0.08 : 0.04,
+    roughness:
+      skinFinish === "linen"
+        ? 0.72
+        : skinFinish === "white" || skinFinish === "alabaster"
+        ? 0.45
+        : 0.52,
+    metalness: 0.03,
     side: THREE.DoubleSide,
   });
 
-  const chromeMat = new THREE.MeshStandardMaterial({
-    name: "mat_mannequin_chrome",
-    color: 0xdce3ea,
-    roughness: 0.18,
-    metalness: 0.9,
+  const soleMat = new THREE.MeshStandardMaterial({
+    name: "mat_mannequin_sole",
+    color: 0x1e293b,
+    roughness: 0.6,
+    metalness: 0.1,
   });
 
-  const tapeColor = isFemale ? 0x0e6e55 : 0xc9a877;
-  const tapeMat = new THREE.MeshStandardMaterial({
-    name: "mat_mannequin_tape",
-    color: tapeColor,
-    roughness: 0.45,
-    metalness: 0.12,
-  });
+  // 1. Boutique Stylized Head (Images 1 & 3)
+  const headMesh = createBoutiqueHead(isFemale, mannequinMat);
+  group.add(headMesh);
 
-  // 1. Center Upright Chrome Stand Rod (runs from plinth base up to pelvic base)
-  const standRodGeom = new THREE.CylinderGeometry(0.015, 0.015, 1.95, 24);
-  const standRodMesh = new THREE.Mesh(standRodGeom, chromeMat);
-  standRodMesh.position.set(0, -0.55, -0.04);
-  standRodMesh.castShadow = true;
-  group.add(standRodMesh);
-
-  // 2. Neck & Finial Hardware
-  // Finial Knob
-  const knobGeom = new THREE.SphereGeometry(0.018, 16, 16);
-  const knobMesh = new THREE.Mesh(knobGeom, chromeMat);
-  knobMesh.position.set(0, 1.66, 0.005);
-  knobMesh.castShadow = true;
-  group.add(knobMesh);
-
-  // Finial Cap Disc
-  const capDiscGeom = new THREE.CylinderGeometry(
-    isFemale ? 0.046 : 0.058,
-    isFemale ? 0.054 : 0.068,
-    0.03,
-    32
-  );
-  const capDiscMesh = new THREE.Mesh(capDiscGeom, chromeMat);
-  capDiscMesh.position.set(0, 1.625, 0.005);
-  capDiscMesh.castShadow = true;
-  group.add(capDiscMesh);
-
-  // Contoured Neck
+  // 2. Sculpted Neck
   const neckGeom = new THREE.CylinderGeometry(
-    isFemale ? 0.056 : 0.072,
-    isFemale ? 0.070 : 0.088,
-    0.16,
+    isFemale ? 0.044 : 0.054,
+    isFemale ? 0.056 : 0.070,
+    0.15,
     32
   );
   const neckMesh = new THREE.Mesh(neckGeom, mannequinMat);
-  neckMesh.position.set(0, 1.52, 0.005);
+  neckMesh.position.set(0, 1.155, 0.008);
+  neckMesh.rotation.x = 0.04;
   neckMesh.castShadow = true;
   neckMesh.receiveShadow = true;
   group.add(neckMesh);
 
-  // 3. Parametric Sculpted Anatomical Torso
+  // 3. Parametric Sculpted Anatomical Torso (y = 1.08 down to y = 0.10)
   const segsU = 48;
   const segsV = 28;
-  const yTop = 1.44;
-  const yBot = 0.36;
+  const yTop = 1.08; // clavicles
+  const yBot = 0.10; // crotch fork base
   const torsoGeom = new THREE.BufferGeometry();
   const tPos: number[] = [];
   const tUvs: number[] = [];
@@ -290,63 +477,63 @@ export function createHumanMannequin(
     let zCenter = 0;
 
     if (isFemale) {
-      if (y > 1.34) {
-        // Neck to shoulder slope
-        const t = (1.44 - y) / 0.10;
-        rx = 0.07 + 0.19 * t;
-        rz = 0.07 + 0.04 * t;
+      if (y > 0.98) {
+        // Clavicle to shoulder slope
+        const t = (1.08 - y) / 0.10;
+        rx = 0.065 + 0.185 * t;
+        rz = 0.065 + 0.035 * t;
         zCenter = 0.005;
-      } else if (y > 1.16) {
+      } else if (y > 0.82) {
         // Shoulder to bust apex
-        const t = (1.34 - y) / 0.18;
-        rx = 0.26 - 0.04 * t;
-        rz = 0.11 + 0.035 * t;
+        const t = (0.98 - y) / 0.16;
+        rx = 0.25 - 0.045 * t;
+        rz = 0.10 + 0.030 * t;
         zCenter = 0.008 * t;
-      } else if (y > 0.86) {
+      } else if (y > 0.50) {
         // Bust to natural waist (hourglass taper)
-        const t = (1.16 - y) / 0.30;
-        rx = 0.22 - 0.055 * Math.sin(t * Math.PI * 0.5);
-        rz = 0.145 - 0.030 * Math.sin(t * Math.PI * 0.5);
-        zCenter = 0.008 * (1 - t * 0.5);
-      } else if (y > 0.52) {
-        // Waist to high hip / pelvis flare
-        const t = (0.86 - y) / 0.34;
-        rx = 0.165 + 0.080 * Math.sin(t * Math.PI * 0.5);
-        rz = 0.115 + 0.050 * Math.sin(t * Math.PI * 0.5);
-        zCenter = 0.004 - 0.015 * t;
+        const t = (0.82 - y) / 0.32;
+        rx = 0.205 - 0.045 * Math.sin(t * Math.PI * 0.5);
+        rz = 0.130 - 0.015 * Math.sin(t * Math.PI * 0.5);
+        zCenter = 0.006 * (1 - t * 0.5);
+      } else if (y > 0.22) {
+        // Waist to full hip / pelvis flare
+        const t = (0.50 - y) / 0.28;
+        rx = 0.160 + 0.075 * Math.sin(t * Math.PI * 0.5);
+        rz = 0.115 + 0.055 * Math.sin(t * Math.PI * 0.5);
+        zCenter = 0.003 - 0.012 * t;
       } else {
         // Pelvis to crotch fork base
-        const t = (0.52 - y) / 0.16;
-        rx = 0.245 - 0.045 * t;
-        rz = 0.165 - 0.020 * t;
-        zCenter = -0.011;
+        const t = (0.22 - y) / 0.12;
+        rx = 0.235 - 0.045 * t;
+        rz = 0.170 - 0.020 * t;
+        zCenter = -0.009;
       }
     } else {
-      // Male proportions: broad shoulders, athletic chest plate, V-taper
-      if (y > 1.35) {
-        const t = (1.44 - y) / 0.09;
-        rx = 0.088 + 0.26 * t; // slopes out to 0.348 broad shoulders
-        rz = 0.088 + 0.045 * t;
+      // Male proportions: broad shoulders, athletic chest, V-taper
+      if (y > 0.98) {
+        const t = (1.08 - y) / 0.10;
+        rx = 0.080 + 0.230 * t; // slopes out to 0.310 broad shoulders
+        rz = 0.075 + 0.045 * t;
         zCenter = 0.005;
-      } else if (y > 1.18) {
-        const t = (1.35 - y) / 0.17;
-        rx = 0.348 - 0.085 * t;
-        rz = 0.133 + 0.022 * t;
+      } else if (y > 0.82) {
+        const t = (0.98 - y) / 0.16;
+        rx = 0.310 - 0.065 * t;
+        rz = 0.120 + 0.022 * t;
         zCenter = 0.012;
-      } else if (y > 0.88) {
-        const t = (1.18 - y) / 0.30;
-        rx = 0.263 - 0.058 * Math.sin(t * Math.PI * 0.5);
-        rz = 0.155 - 0.020 * Math.sin(t * Math.PI * 0.5);
+      } else if (y > 0.50) {
+        const t = (0.82 - y) / 0.32;
+        rx = 0.245 - 0.053 * Math.sin(t * Math.PI * 0.5);
+        rz = 0.142 - 0.008 * Math.sin(t * Math.PI * 0.5);
         zCenter = 0.008;
-      } else if (y > 0.52) {
-        const t = (0.88 - y) / 0.36;
-        rx = 0.205 + 0.020 * Math.sin(t * Math.PI * 0.5);
-        rz = 0.135 + 0.017 * Math.sin(t * Math.PI * 0.5);
+      } else if (y > 0.22) {
+        const t = (0.50 - y) / 0.28;
+        rx = 0.192 + 0.018 * Math.sin(t * Math.PI * 0.5);
+        rz = 0.134 + 0.021 * Math.sin(t * Math.PI * 0.5);
         zCenter = -0.005 * t;
       } else {
-        const t = (0.52 - y) / 0.16;
-        rx = 0.225 - 0.022 * t;
-        rz = 0.152 - 0.012 * t;
+        const t = (0.22 - y) / 0.12;
+        rx = 0.210 - 0.022 * t;
+        rz = 0.155 - 0.012 * t;
         zCenter = -0.008;
       }
     }
@@ -362,31 +549,31 @@ export function createHumanMannequin(
       let gluteBulge = 0;
 
       if (isFemale) {
-        // Feminine breast contours centered at apexes
-        if (y >= 1.06 && y <= 1.28) {
-          const bustV = Math.max(0, 1 - Math.pow((y - 1.18) / 0.09, 2));
-          const leftDist = Math.hypot(sinT - 0.42, cosT - 0.88);
-          const rightDist = Math.hypot(sinT + 0.42, cosT - 0.88);
+        // High shapely bust curves with natural apexes
+        if (y >= 0.74 && y <= 0.94) {
+          const bustV = Math.max(0, 1 - Math.pow((y - 0.85) / 0.08, 2));
+          const leftDist = Math.hypot(sinT - 0.40, cosT - 0.88);
+          const rightDist = Math.hypot(sinT + 0.40, cosT - 0.88);
           bustBulge =
             bustV *
-            (Math.exp(-Math.pow(leftDist / 0.38, 2)) +
-              Math.exp(-Math.pow(rightDist / 0.38, 2))) *
-            0.036;
+            (Math.exp(-Math.pow(leftDist / 0.36, 2)) +
+              Math.exp(-Math.pow(rightDist / 0.36, 2))) *
+            0.034;
         }
-        // Glute curvature in back
-        if (y >= 0.36 && y <= 0.62 && cosT < -0.2) {
-          const gluteV = Math.max(0, 1 - Math.pow((y - 0.48) / 0.12, 2));
+        // Glute curve in back
+        if (y >= 0.12 && y <= 0.36 && cosT < -0.2) {
+          const gluteV = Math.max(0, 1 - Math.pow((y - 0.24) / 0.11, 2));
           gluteBulge = gluteV * Math.pow(-cosT, 1.4) * 0.022;
         }
       } else {
-        // Male pectoral plates
-        if (y >= 1.12 && y <= 1.28 && cosT > 0.3) {
-          const pecV = Math.max(0, 1 - Math.pow((y - 1.21) / 0.075, 2));
-          pecBulge = pecV * Math.pow(cosT, 1.2) * 0.015;
+        // Male athletic pectoral chest plates
+        if (y >= 0.78 && y <= 0.95 && cosT > 0.3) {
+          const pecV = Math.max(0, 1 - Math.pow((y - 0.88) / 0.075, 2));
+          pecBulge = pecV * Math.pow(cosT, 1.2) * 0.016;
         }
-        // Athletic glute in back
-        if (y >= 0.36 && y <= 0.62 && cosT < -0.25) {
-          const gluteV = Math.max(0, 1 - Math.pow((y - 0.48) / 0.12, 2));
+        // Athletic glutes in back
+        if (y >= 0.12 && y <= 0.36 && cosT < -0.25) {
+          const gluteV = Math.max(0, 1 - Math.pow((y - 0.24) / 0.11, 2));
           gluteBulge = gluteV * Math.pow(-cosT, 1.3) * 0.016;
         }
       }
@@ -420,175 +607,136 @@ export function createHumanMannequin(
   torsoMesh.receiveShadow = true;
   group.add(torsoMesh);
 
-  // 4. Shoulder Scye Arm Caps (Chrome hardware discs at shoulder edges)
-  const shoulderX = isFemale ? 0.255 : 0.34;
+  // 4. Boutique Arms & Sculpted Hands (Images 1 & 3)
+  const shoulderX = isFemale ? 0.250 : 0.310;
   for (const side of [-1, 1]) {
-    const scyeGeom = new THREE.CylinderGeometry(0.046, 0.05, 0.018, 24);
-    const scyeMesh = new THREE.Mesh(scyeGeom, chromeMat);
-    scyeMesh.position.set(side * shoulderX, 1.32, 0.005);
-    scyeMesh.rotation.z = side * 0.38;
-    scyeMesh.castShadow = true;
-    group.add(scyeMesh);
-
-    // Natural resting tailor arms alongside torso
     const armGroup = new THREE.Group();
+
+    // Deltoid shoulder cap
+    const deltoidGeom = new THREE.SphereGeometry(isFemale ? 0.044 : 0.052, 16, 12);
+    const deltoidMesh = new THREE.Mesh(deltoidGeom, mannequinMat);
+    deltoidMesh.position.set(side * shoulderX, 1.04, 0.005);
+    deltoidMesh.scale.set(1.0, 1.15, 0.85);
+    deltoidMesh.castShadow = true;
+    armGroup.add(deltoidMesh);
+
     // Upper Arm
     const upperArmGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.042 : 0.05,
-      isFemale ? 0.038 : 0.044,
-      0.38,
+      isFemale ? 0.038 : 0.046,
+      isFemale ? 0.032 : 0.038,
+      0.30,
       20
     );
     const upperArmMesh = new THREE.Mesh(upperArmGeom, mannequinMat);
-    upperArmMesh.position.set(side * (shoulderX + 0.032), 1.11, 0.005);
-    upperArmMesh.rotation.z = side * 0.08;
+    upperArmMesh.position.set(side * (shoulderX + 0.026), 0.88, 0.005);
+    upperArmMesh.rotation.z = side * 0.06;
     upperArmMesh.castShadow = true;
     armGroup.add(upperArmMesh);
 
     // Elbow Joint
-    const elbowGeom = new THREE.SphereGeometry(isFemale ? 0.036 : 0.042, 16, 12);
+    const elbowGeom = new THREE.SphereGeometry(isFemale ? 0.030 : 0.036, 14, 12);
     const elbowMesh = new THREE.Mesh(elbowGeom, mannequinMat);
-    elbowMesh.position.set(side * (shoulderX + 0.046), 0.91, -0.005);
+    elbowMesh.position.set(side * (shoulderX + 0.038), 0.74, -0.005);
     armGroup.add(elbowMesh);
 
     // Forearm
     const foreArmGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.035 : 0.041,
-      isFemale ? 0.03 : 0.035,
-      0.34,
+      isFemale ? 0.030 : 0.036,
+      isFemale ? 0.022 : 0.026,
+      0.28,
       20
     );
     const foreArmMesh = new THREE.Mesh(foreArmGeom, mannequinMat);
-    foreArmMesh.position.set(side * (shoulderX + 0.048), 0.74, 0.012);
+    foreArmMesh.position.set(side * (shoulderX + 0.042), 0.58, 0.010);
     foreArmMesh.rotation.z = -side * 0.04;
     foreArmMesh.castShadow = true;
     armGroup.add(foreArmMesh);
 
-    // Wrist Chrome Cap
-    const wristGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.028 : 0.034,
-      isFemale ? 0.03 : 0.036,
-      0.014,
-      16
-    );
-    const wristMesh = new THREE.Mesh(wristGeom, chromeMat);
-    wristMesh.position.set(side * (shoulderX + 0.05), 0.565, 0.015);
-    armGroup.add(wristMesh);
+    // Sculpted Boutique Hand
+    const hand = createBoutiqueHand(side, isFemale, mannequinMat);
+    armGroup.add(hand);
 
     group.add(armGroup);
   }
 
-  // 5. Full Mannequin Legs (Both Left & Right, contoured to fit inside trousers & jeans)
-  const legOffsetX = isFemale ? 0.125 : 0.136;
+  // 5. Continuous Sculpted Legs & Boutique Footwear (Images 1 & 3)
+  const legOffsetX = isFemale ? 0.115 : 0.125;
   for (const side of [-1, 1]) {
     const legGroup = new THREE.Group();
     const lPosX = side * legOffsetX;
 
-    // Upper Thigh (from crotch base y=0.36 down to y=0.04)
+    // Upper Thigh (from pelvic base y = 0.10 down to y = -0.20)
     const upperThighGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.092 : 0.105,
-      isFemale ? 0.076 : 0.086,
-      0.32,
+      isFemale ? 0.082 : 0.094,
+      isFemale ? 0.068 : 0.078,
+      0.30,
       24
     );
     const upperThighMesh = new THREE.Mesh(upperThighGeom, mannequinMat);
-    upperThighMesh.position.set(lPosX, 0.2, 0);
+    upperThighMesh.position.set(lPosX, -0.05, 0);
     upperThighMesh.castShadow = true;
     upperThighMesh.receiveShadow = true;
     legGroup.add(upperThighMesh);
 
-    // Lower Thigh (from y=0.04 down to knee y=-0.26)
+    // Lower Thigh (from y = -0.20 down to knee y = -0.50)
     const lowerThighGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.076 : 0.086,
-      isFemale ? 0.064 : 0.072,
-      0.3,
+      isFemale ? 0.068 : 0.078,
+      isFemale ? 0.054 : 0.062,
+      0.30,
       24
     );
     const lowerThighMesh = new THREE.Mesh(lowerThighGeom, mannequinMat);
-    lowerThighMesh.position.set(lPosX, -0.11, 0);
+    lowerThighMesh.position.set(lPosX, -0.35, 0);
     lowerThighMesh.castShadow = true;
     lowerThighMesh.receiveShadow = true;
     legGroup.add(lowerThighMesh);
 
-    // Knee Cap / Patella Joint
-    const kneeGeom = new THREE.SphereGeometry(isFemale ? 0.056 : 0.064, 20, 16);
+    // Knee Patella Joint
+    const kneeGeom = new THREE.SphereGeometry(isFemale ? 0.050 : 0.058, 20, 16);
     const kneeMesh = new THREE.Mesh(kneeGeom, mannequinMat);
-    kneeMesh.position.set(lPosX, -0.27, 0.008);
+    kneeMesh.position.set(lPosX, -0.50, 0.008);
     kneeMesh.scale.set(1, 1.1, 0.85);
     legGroup.add(kneeMesh);
 
-    // Calf (from knee y=-0.28 down to ankle y=-0.68)
+    // Calf (from knee y = -0.50 down to y = -0.86)
     const calfGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.064 : 0.072,
-      isFemale ? 0.048 : 0.054,
-      0.4,
+      isFemale ? 0.052 : 0.062,
+      isFemale ? 0.038 : 0.046,
+      0.36,
       24
     );
     const calfMesh = new THREE.Mesh(calfGeom, mannequinMat);
-    calfMesh.position.set(lPosX, -0.48, -0.005);
+    calfMesh.position.set(lPosX, -0.68, -0.006);
     calfMesh.castShadow = true;
     calfMesh.receiveShadow = true;
     legGroup.add(calfMesh);
 
-    // Lower Leg to Ankle (from y=-0.68 down to y=-0.94)
+    // Lower Leg to Ankle (from y = -0.86 down to y = -1.15)
     const ankleGeom = new THREE.CylinderGeometry(
-      isFemale ? 0.048 : 0.054,
-      isFemale ? 0.04 : 0.046,
-      0.26,
+      isFemale ? 0.038 : 0.046,
+      isFemale ? 0.032 : 0.038,
+      0.29,
       20
     );
     const ankleMesh = new THREE.Mesh(ankleGeom, mannequinMat);
-    ankleMesh.position.set(lPosX, -0.81, 0);
+    ankleMesh.position.set(lPosX, -1.005, 0);
     ankleMesh.castShadow = true;
     legGroup.add(ankleMesh);
 
-    // Minimalist Tailor Foot / Shoe Stand Form (peeks cleanly through trousers & jeans cuff)
-    const footGroup = new THREE.Group();
-    const footGeom = new THREE.BoxGeometry(
-      isFemale ? 0.068 : 0.076,
-      0.065,
-      isFemale ? 0.17 : 0.19
-    );
-    const footMesh = new THREE.Mesh(footGeom, mannequinMat);
-    footMesh.position.set(lPosX, -0.97, 0.035);
-    footMesh.castShadow = true;
-    footGroup.add(footMesh);
+    // Malleolus Ankle Bone Contours
+    for (const mSide of [-1, 1]) {
+      const malleolusGeom = new THREE.SphereGeometry(0.008, 10, 8);
+      const malleolusMesh = new THREE.Mesh(malleolusGeom, mannequinMat);
+      malleolusMesh.position.set(lPosX + mSide * (isFemale ? 0.032 : 0.038), -1.15, 0);
+      legGroup.add(malleolusMesh);
+    }
 
-    // Chrome Ankle Cuff Ring
-    const cuffGeom = new THREE.TorusGeometry(isFemale ? 0.042 : 0.048, 0.004, 8, 24);
-    const cuffMesh = new THREE.Mesh(cuffGeom, chromeMat);
-    cuffMesh.rotation.x = Math.PI / 2;
-    cuffMesh.position.set(lPosX, -0.938, 0);
-    footGroup.add(cuffMesh);
+    // Boutique Shoe / Footwear resting on turntable plinth (Images 1 & 3)
+    const shoe = createBoutiqueShoe(lPosX, isFemale, mannequinMat, soleMat);
+    legGroup.add(shoe);
 
-    // Vertical Stand Rod connection extending down to plinth
-    const pegGeom = new THREE.CylinderGeometry(0.01, 0.01, 0.5, 16);
-    const pegMesh = new THREE.Mesh(pegGeom, chromeMat);
-    pegMesh.position.set(lPosX, -1.24, 0);
-    footGroup.add(pegMesh);
-
-    legGroup.add(footGroup);
     group.add(legGroup);
   }
-
-  // 6. Tailor Measurement Style Line Tapes (Ribbon rings hugging the form)
-  const bustTapeGeom = new THREE.TorusGeometry(isFemale ? 0.224 : 0.265, 0.0035, 8, 48);
-  const bustTapeMesh = new THREE.Mesh(bustTapeGeom, tapeMat);
-  bustTapeMesh.rotation.x = Math.PI / 2;
-  bustTapeMesh.position.set(0, 1.18, 0.008);
-  group.add(bustTapeMesh);
-
-  const waistTapeGeom = new THREE.TorusGeometry(isFemale ? 0.168 : 0.208, 0.0035, 8, 48);
-  const waistTapeMesh = new THREE.Mesh(waistTapeGeom, tapeMat);
-  waistTapeMesh.rotation.x = Math.PI / 2;
-  waistTapeMesh.position.set(0, isFemale ? 0.86 : 0.88, 0.004);
-  group.add(waistTapeMesh);
-
-  const hipTapeGeom = new THREE.TorusGeometry(isFemale ? 0.248 : 0.228, 0.0035, 8, 48);
-  const hipTapeMesh = new THREE.Mesh(hipTapeGeom, tapeMat);
-  hipTapeMesh.rotation.x = Math.PI / 2;
-  hipTapeMesh.position.set(0, 0.52, -0.005);
-  group.add(hipTapeMesh);
 
   return group;
 }
@@ -1577,12 +1725,14 @@ function buildMorphedClothFromGLB(
     morphedWrapper.add(skirtGroup);
   }
 
-  // Center and scale `Cloth_1` (raw Y bounds: 0.936..1.638, center Y = 1.287)
-  // so it fills the 3D studio viewport with commanding presence
-  const scale = isGown ? 1.85 : isBlazer ? 2.15 : 2.32;
-  const centerY = isGown ? 1.05 : isBlazer ? 1.22 : 1.285;
+  // Center and scale `Cloth_1` (raw Y bounds: 0.936..1.629, center Y = 1.2825)
+  // so it fits the human mannequin precisely
+  const scale = isGown ? 0.94 : isBlazer ? 1.04 : 0.97;
+  const targetCenterY = isGown ? 0.78 : isBlazer ? 0.76 : 0.77;
+  const rawCenterY = 1.2825;
+  const yOffset = targetCenterY - rawCenterY * scale;
   morphedWrapper.scale.set(scale, scale, scale);
-  morphedWrapper.position.set(0, -centerY * scale + 0.05, 0);
+  morphedWrapper.position.set(0, yOffset, 0.075);
 
   rootGroup.add(morphedWrapper);
   return rootGroup;
@@ -1638,10 +1788,10 @@ function buildDrapedBottomsMesh(
   const isJoggers = id.includes("joggers");
   const hasDrawstring = id.includes("drawstring");
 
-  const yWaistTop = 0.72;
-  const yWaistBot = 0.58;
-  // Modern baggy jeans run full-length and stack over the shoe
-  const yAnkle = isShorts ? -0.18 : isJeans ? -1.04 : -0.92;
+  const yWaistTop = 0.48;
+  const yWaistBot = 0.38;
+  // Modern baggy jeans & tailored trousers run full-length and drape cleanly over shoes
+  const yAnkle = isShorts ? -0.22 : isJeans ? -1.18 : -1.15;
 
   // Modern tonal tan denim topstitching & antique hardware materials for Jeans
   const goldStitchMat = new THREE.MeshStandardMaterial({
@@ -1675,10 +1825,10 @@ function buildDrapedBottomsMesh(
   // Helper to evaluate waist ellipse radius at angle theta and normalized waist vertical v in [0, 1]
   const evalWaistRadius = (theta: number, v: number) => {
     const gather = isJeans
-      ? 0.0008 * Math.sin(theta * 8) // Crisp tailored flat-felled denim waistband
-      : 0.0045 * Math.sin(theta * 24) * Math.sin(v * Math.PI); // Elastic gathered jogger waistband
-    const rx = (isJeans ? 0.352 : 0.36) + 0.014 * v + gather;
-    const rz = (isJeans ? 0.244 : 0.25) + 0.012 * v + gather;
+      ? 0.0006 * Math.sin(theta * 8)
+      : 0.0035 * Math.sin(theta * 24) * Math.sin(v * Math.PI);
+    const rx = (isJeans ? 0.208 : 0.212) + 0.008 * v + gather;
+    const rz = (isJeans ? 0.148 : 0.152) + 0.008 * v + gather;
     return { rx, rz };
   };
 
@@ -1758,45 +1908,40 @@ function buildDrapedBottomsMesh(
   ) => {
     const y = yWaistBot - v * (yWaistBot - yAnkle);
     const legSplit = Math.pow(Math.min(1, v / 0.24), 0.75);
-    // Wide-leg jeans splay slightly outward so the straight legs hang apart like the reference fits
-    const centerX = side * (0.092 + 0.094 * legSplit + (isJeans ? 0.03 : 0.022) * v);
+    const centerX = side * (0.075 + 0.050 * legSplit);
     const centerZ =
       !isShorts && v > 0.35 && v < 0.75
-        ? (isJeans ? 0.01 : 0.018) * Math.sin(((v - 0.35) / 0.4) * Math.PI)
+        ? (isJeans ? 0.008 : 0.012) * Math.sin(((v - 0.35) / 0.4) * Math.PI)
         : 0;
 
-    // Baggy wide-leg: almost no taper from thigh to hem (vs. tapered joggers)
     let rx = isJeans
-      ? 0.184 * (1 - 0.07 * Math.pow(v, 0.9))
-      : 0.185 * (1 - 0.32 * Math.pow(v, 0.9));
+      ? 0.118 * (1 - 0.04 * Math.pow(v, 0.9))
+      : 0.114 * (1 - 0.06 * Math.pow(v, 0.9));
     let rz = isJeans
-      ? 0.214 * (1 - 0.14 * Math.pow(v, 0.9))
-      : 0.215 * (1 - 0.36 * Math.pow(v, 0.9));
+      ? 0.120 * (1 - 0.06 * Math.pow(v, 0.9))
+      : 0.116 * (1 - 0.08 * Math.pow(v, 0.9));
 
     if (isShorts) {
-      rx = 0.195 + 0.015 * v;
-      rz = 0.215 + 0.01 * v;
+      rx = 0.125 + 0.010 * v;
+      rz = 0.128 + 0.008 * v;
     } else if (isJoggers && v > 0.82) {
       if (v < 0.93) {
-        const puff = 0.018 * Math.sin(((v - 0.82) / 0.11) * Math.PI);
+        const puff = 0.014 * Math.sin(((v - 0.82) / 0.11) * Math.PI);
         rx += puff;
         rz += puff;
       } else {
-        rx *= 0.78;
-        rz *= 0.78;
+        rx = 0.054;
+        rz = 0.056;
       }
     } else if (isJeans && v > 0.88) {
-      // Hem flares a touch where the extra length pools on the shoe
-      const flare = 0.012 * Math.pow((v - 0.88) / 0.12, 1.4);
+      const flare = 0.008 * Math.pow((v - 0.88) / 0.12, 1.4);
       rx += flare;
       rz += flare * 0.6;
     }
 
-    // Seat/hip fill: blend the upper legs out to the waistband ellipse so there is no ledge
-    // under the waistband (relaxed seat → hips → straight legs).
     const hipBlend = Math.pow(Math.max(0, 1 - v / 0.27), 1.6);
-    const hipRxTarget = (isJeans ? 0.366 : 0.372) - 0.092;
-    const hipRzTarget = isJeans ? 0.262 : 0.266;
+    const hipRxTarget = (isJeans ? 0.218 : 0.222) - 0.075;
+    const hipRzTarget = isJeans ? 0.158 : 0.162;
     rx += Math.max(0, hipRxTarget - rx) * hipBlend;
     rz += Math.max(0, hipRzTarget - rz) * hipBlend;
 
@@ -1879,7 +2024,7 @@ function buildDrapedBottomsMesh(
           // pockets, fly, yoke, crotch and hem land exactly where they are drawn in 2D.
           // On the back view (`isBack`), mirror X so left/right back pockets & brand patch align properly.
           const planarX = isBack ? -pt.x : pt.x;
-          const svgX = 300 + (planarX / 0.365) * 145;
+          const svgX = 300 + (planarX / 0.22) * 145;
           const svgY = isJeans
             ? v < 0.24
               ? 182 + (v / 0.24) * 162
@@ -2025,7 +2170,7 @@ function buildDrapedBottomsMesh(
     // 3C. Center-Front Antique Brass Shank Tack Button (`theta = 0.05`, `y = 0.65`)
     {
       const { rx, rz } = evalWaistRadius(0.04, 0.5);
-      const btnPos = new THREE.Vector3(Math.sin(0.04) * rx, 0.65, Math.cos(0.04) * rz);
+      const btnPos = new THREE.Vector3(Math.sin(0.04) * rx, 0.43, Math.cos(0.04) * rz);
 
       const shank = new THREE.Mesh(
         new THREE.CylinderGeometry(0.006, 0.006, 0.012, 12),
@@ -2495,8 +2640,9 @@ function buildDrapedBottomsMesh(
     }
   }
 
-  group.scale.set(1.18, 1.18, 1.18);
-  group.position.set(0, 0.12, 0);
+  // 1:1 scale for precise fit on the mannequin
+  group.scale.set(1.0, 1.0, 1.0);
+  group.position.set(0, 0, 0);
   return group;
 }
 
@@ -2521,9 +2667,9 @@ function buildProceduralDrapedTopFallback(
 
     for (let iv = 0; iv <= vSegs; iv++) {
       const v = iv / vSegs;
-      const y = 0.68 - v * 1.36;
-      const rx = 0.43 - 0.04 * Math.sin(v * Math.PI);
-      const rz = 0.25 - 0.02 * v;
+      const y = 1.10 - v * 0.66;
+      const rx = 0.23 - 0.03 * v;
+      const rz = 0.14 - 0.02 * v;
 
       for (let iu = 0; iu <= uSegs; iu++) {
         const u = iu / uSegs;
@@ -2558,11 +2704,11 @@ function buildProceduralDrapedTopFallback(
   }
 
   const collar = new THREE.Mesh(
-    new THREE.TorusGeometry(0.18, 0.028, 16, 48),
+    new THREE.TorusGeometry(0.09, 0.016, 16, 48),
     collarMat
   );
   collar.rotation.x = Math.PI / 2;
-  collar.position.set(0, 0.68, 0);
+  collar.position.set(0, 1.10, 0.008);
   group.add(collar);
 
   return group;
@@ -2801,14 +2947,18 @@ export function buildGarment3DModel({
   });
 
   // 1. Bottoms (Original 5-Pocket Denim Jeans, Joggers, Basketball Shorts, Leggings)
-  if (
+  const isBottom =
     category === "Bottoms" ||
     id.includes("joggers") ||
     id.includes("jeans") ||
     id.includes("denim") ||
     id.includes("shorts") ||
-    id.includes("leggings")
-  ) {
+    id.includes("leggings") ||
+    id.includes("trouser") ||
+    id.includes("pants") ||
+    id.includes("slacks");
+
+  if (isBottom) {
     return buildDrapedBottomsMesh(garmentId, {
       frontMat,
       backMat,

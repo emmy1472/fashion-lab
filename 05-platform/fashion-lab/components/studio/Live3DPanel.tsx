@@ -58,7 +58,7 @@ export function Live3DPanel({
   const [lightingMode, setLightingMode] = useState<"studio" | "dramatic" | "warm">("studio");
   const [renderPreset, setRenderPreset] = useState<"softbox" | "runway" | "cyber">("softbox");
   const [mannequinGender, setMannequinGender] = useState<MannequinGender>("female");
-  const [mannequinFinish, setMannequinFinish] = useState<MannequinFinish>("linen");
+  const [mannequinFinish, setMannequinFinish] = useState<MannequinFinish>("slate");
   const [isCapturing, setIsCapturing] = useState(false);
   const [gltfShirtModel, setGltfShirtModel] = useState<THREE.Group | null>(null);
   const isRotatingRef = useRef(isRotating);
@@ -73,6 +73,7 @@ export function Live3DPanel({
   const controlsRef = useRef<OrbitControls | null>(null);
   const garmentMeshGroupRef = useRef<THREE.Group | null>(null);
   const pedestalRef = useRef<THREE.Group | null>(null);
+  const turntableGroupRef = useRef<THREE.Group | null>(null);
 
   const frontTextureRef = useRef<THREE.CanvasTexture | null>(null);
   const backTextureRef = useRef<THREE.CanvasTexture | null>(null);
@@ -101,7 +102,7 @@ export function Live3DPanel({
 
     // Camera
     const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 100);
-    camera.position.set(0, 0.2, 2.9);
+    camera.position.set(0, 0.25, 2.85);
     cameraRef.current = camera;
 
     // WebGL Renderer with High Precision & Tone Mapping
@@ -131,7 +132,7 @@ export function Live3DPanel({
     controls.minDistance = 1.2;
     controls.maxDistance = 5.0;
     controls.maxPolarAngle = Math.PI / 1.75;
-    controls.target.set(0, 0, 0);
+    controls.target.set(0, 0.10, 0);
     controlsRef.current = controls;
 
     // 3-Point Studio Lighting Rig + Hemisphere Cloth Grazing Light
@@ -164,9 +165,15 @@ export function Live3DPanel({
     const floorMat = new THREE.ShadowMaterial({ opacity: 0.12 });
     const floorMesh = new THREE.Mesh(floorGeom, floorMat);
     floorMesh.rotation.x = -Math.PI / 2;
-    floorMesh.position.y = -1.56;
+    floorMesh.position.y = -1.325;
     floorMesh.receiveShadow = true;
     scene.add(floorMesh);
+
+    // Studio turntable group for synchronized mannequin + garment rotation
+    const turntable = new THREE.Group();
+    turntable.name = "turntable_assembly";
+    scene.add(turntable);
+    turntableGroupRef.current = turntable;
 
     // Setup 1024x1024 Offscreen Canvases for dynamic UV texture projection
     const frontCanvas = document.createElement("canvas");
@@ -209,8 +216,8 @@ export function Live3DPanel({
     const animate = () => {
       animId = requestAnimationFrame(animate);
       if (controlsRef.current) controlsRef.current.update();
-      if (isRotatingRef.current && garmentMeshGroupRef.current) {
-        garmentMeshGroupRef.current.rotation.y += 0.0045;
+      if (isRotatingRef.current && turntableGroupRef.current) {
+        turntableGroupRef.current.rotation.y += 0.0045;
       }
       renderer.render(scene, camera);
     };
@@ -240,10 +247,10 @@ export function Live3DPanel({
 
   // 2. Manage 3D Human Mannequin (Male / Female / Ghost) per Category & Finish
   useEffect(() => {
-    if (!sceneRef.current) return;
+    if (!sceneRef.current || !turntableGroupRef.current) return;
 
     if (pedestalRef.current) {
-      sceneRef.current.remove(pedestalRef.current);
+      turntableGroupRef.current.remove(pedestalRef.current);
       pedestalRef.current.traverse((child) => {
         if ((child as THREE.Mesh).isMesh) {
           (child as THREE.Mesh).geometry.dispose();
@@ -254,7 +261,7 @@ export function Live3DPanel({
 
     const newPedestal = createHumanMannequin(mannequinGender, garmentCategory, mannequinFinish);
     pedestalRef.current = newPedestal;
-    sceneRef.current.add(newPedestal);
+    turntableGroupRef.current.add(newPedestal);
   }, [mannequinGender, garmentCategory, mannequinFinish]);
 
   // 3. Re-build 3D Garment Mesh whenever garmentId, category, or gltfShirtModel changes
@@ -262,8 +269,8 @@ export function Live3DPanel({
     if (!sceneRef.current) return;
 
     // Remove existing garment model
-    if (garmentMeshGroupRef.current) {
-      sceneRef.current.remove(garmentMeshGroupRef.current);
+    if (garmentMeshGroupRef.current && turntableGroupRef.current) {
+      turntableGroupRef.current.remove(garmentMeshGroupRef.current);
       garmentMeshGroupRef.current.traverse((child) => {
         if ((child as THREE.Mesh).isMesh) {
           const mesh = child as THREE.Mesh;
@@ -297,7 +304,7 @@ export function Live3DPanel({
     });
 
     garmentMeshGroupRef.current = newGarmentMesh;
-    sceneRef.current.add(newGarmentMesh);
+    turntableGroupRef.current?.add(newGarmentMesh);
   }, [garmentId, garmentCategory, gltfShirtModel, scratchConfig]);
 
   // 4. Dynamic Real-time UV Texture Projection (rasterize SVG markups to canvases)
@@ -493,9 +500,12 @@ export function Live3DPanel({
   // 9. Reset Camera View
   const handleResetView = () => {
     if (!cameraRef.current || !controlsRef.current) return;
-    cameraRef.current.position.set(0, 0.2, 2.9);
-    controlsRef.current.target.set(0, 0, 0);
+    cameraRef.current.position.set(0, 0.25, 2.85);
+    controlsRef.current.target.set(0, 0.10, 0);
     controlsRef.current.update();
+    if (turntableGroupRef.current) {
+      turntableGroupRef.current.rotation.y = 0;
+    }
     setIsRotating(true);
   };
 
@@ -748,9 +758,10 @@ export function Live3DPanel({
               <span className="text-[11px] font-bold text-gray-700">Mannequin Form</span>
               <div className="grid grid-cols-3 gap-2">
                 {[
-                  { id: "linen", name: "Tailor Canvas", sub: "Warm Ecru Linen" },
-                  { id: "alabaster", name: "Alabaster", sub: "Gloss Fiberglass" },
-                  { id: "charcoal", name: "Obsidian", sub: "Slate Matte" },
+                  { id: "slate", name: "Matte Slate", sub: "Boutique Grey" },
+                  { id: "alabaster", name: "Matte White", sub: "Clean Gallery" },
+                  { id: "charcoal", name: "Obsidian", sub: "Satin Charcoal" },
+                  { id: "linen", name: "Tailor Linen", sub: "Atelier Canvas" },
                 ].map((f) => (
                   <button
                     key={f.id}
