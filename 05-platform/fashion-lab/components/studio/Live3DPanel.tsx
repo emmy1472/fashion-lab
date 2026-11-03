@@ -25,6 +25,7 @@ import {
   MannequinGender,
   MannequinFinish,
   buildGarment3DModel,
+  buildComplementaryStudioGarment,
   ScratchConfig3D,
 } from "./garment3DBuilder";
 
@@ -72,6 +73,7 @@ export function Live3DPanel({
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const garmentMeshGroupRef = useRef<THREE.Group | null>(null);
+  const complementaryMeshGroupRef = useRef<THREE.Group | null>(null);
   const pedestalRef = useRef<THREE.Group | null>(null);
   const turntableGroupRef = useRef<THREE.Group | null>(null);
 
@@ -263,6 +265,29 @@ export function Live3DPanel({
     pedestalRef.current = newPedestal;
     turntableGroupRef.current.add(newPedestal);
   }, [mannequinGender, garmentCategory, mannequinFinish]);
+
+  // 2b. Manage Complementary Neutral Studio Apparel (so mannequin is fully dressed like in boutique showrooms)
+  useEffect(() => {
+    if (!sceneRef.current || !turntableGroupRef.current) return;
+
+    if (complementaryMeshGroupRef.current) {
+      turntableGroupRef.current.remove(complementaryMeshGroupRef.current);
+      complementaryMeshGroupRef.current.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          (child as THREE.Mesh).geometry.dispose();
+        }
+      });
+      complementaryMeshGroupRef.current = null;
+    }
+
+    if (mannequinGender !== "none") {
+      const comp = buildComplementaryStudioGarment(garmentCategory, gltfShirtModel);
+      if (comp) {
+        complementaryMeshGroupRef.current = comp;
+        turntableGroupRef.current.add(comp);
+      }
+    }
+  }, [mannequinGender, garmentCategory, gltfShirtModel]);
 
   // 3. Re-build 3D Garment Mesh whenever garmentId, category, or gltfShirtModel changes
   useEffect(() => {
