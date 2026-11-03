@@ -30,7 +30,6 @@ export interface ScratchConfig3D {
 interface BuildOptions {
   garmentId: string;
   category: string;
-  gender?: MannequinGender;
   frontTexture: THREE.CanvasTexture | null;
   backTexture: THREE.CanvasTexture | null;
   zoneColors: Record<string, string>;
@@ -264,25 +263,49 @@ function createSeamlessSculptedArm(
   const uvs: number[] = [];
   const indices: number[] = [];
 
-  // Slender mannequin armature core: stays strictly inside cloth sleeves with generous positive ease
-  // so the mannequin arm NEVER pokes through or shows outside the cloth!
-  const shoulderX = side * (isFemale ? 0.170 : 0.192);
-  const wristX = side * (isFemale ? 0.205 : 0.225);
+  const shoulderX = side * (isFemale ? 0.178 : 0.205);
+  const wristX = side * (isFemale ? 0.205 : 0.235);
 
-  const yTop = 1.04; // Deltoid root inside the shoulder cap
-  const yBot = 0.46; // Wrist level inside sleeve cuff
+  const yTop = 1.02; // shoulder deltoid
+  const yBot = 0.44; // wrist
 
   for (let iv = 0; iv <= rings; iv++) {
     const v = iv / rings;
     const y = yTop - v * (yTop - yBot);
 
-    // Natural centerline passing straight through the sleeve cavity
-    const cx = shoulderX + (wristX - shoulderX) * Math.pow(v, 1.05);
-    const cz = -0.010 + 0.015 * Math.sin(v * Math.PI);
+    // Lateral curve along arm length
+    const cx = shoulderX + (wristX - shoulderX) * Math.pow(v, 1.15);
+    // Natural slight forward carrying angle and relaxed elbow flexion (Images 1 & 3)
+    const cz = 0.005 + 0.022 * Math.sin(v * Math.PI);
 
-    // Slender radius: 1.6cm - 1.9cm, guaranteed to be comfortably inside cloth sleeve radius (4.5cm - 5.5cm)
-    const rx = (isFemale ? 0.016 : 0.019) - 0.003 * v;
-    const rz = (isFemale ? 0.016 : 0.019) - 0.003 * v;
+    let rx = 0.034;
+    let rz = 0.035;
+
+    if (v < 0.20) {
+      // 1. Deltoid shoulder cap (broad, curved round)
+      const t = v / 0.20;
+      rx = (isFemale ? 0.033 : 0.038) - 0.004 * t;
+      rz = (isFemale ? 0.034 : 0.040) - 0.005 * t;
+    } else if (v < 0.50) {
+      // 2. Biceps & Triceps upper arm
+      const t = (v - 0.20) / 0.30;
+      rx = (isFemale ? 0.029 : 0.034) - 0.004 * t;
+      rz = (isFemale ? 0.030 : 0.035) - 0.005 * t;
+    } else if (v < 0.60) {
+      // 3. Elbow with olecranon definition
+      rx = isFemale ? 0.025 : 0.029;
+      rz = isFemale ? 0.026 : 0.030;
+    } else if (v < 0.82) {
+      // 4. Forearm (brachioradialis muscle belly)
+      const t = (v - 0.60) / 0.22;
+      rx = (isFemale ? 0.024 : 0.027) - 0.004 * t;
+      rz = (isFemale ? 0.024 : 0.027) - 0.005 * t;
+    } else {
+      // 5. Wrist taper
+      const t = (v - 0.82) / 0.18;
+      rx = (isFemale ? 0.020 : 0.023) - 0.003 * t;
+      rz = (isFemale ? 0.016 : 0.019) - 0.003 * t;
+    }
 
     for (let iu = 0; iu <= radSegs; iu++) {
       const u = iu / radSegs;
@@ -290,9 +313,19 @@ function createSeamlessSculptedArm(
       const sinT = Math.sin(theta);
       const cosT = Math.cos(theta);
 
+      // Tricep posterior bulge & elbow tip
+      let muscle = 0;
+      if (v >= 0.20 && v <= 0.45 && cosT < -0.3) {
+        muscle = 0.003 * Math.pow(-cosT, 1.2) * Math.sin(((v - 0.20) / 0.25) * Math.PI);
+      }
+      if (v >= 0.48 && v <= 0.58 && cosT < -0.4) {
+        // Olecranon elbow bone tip
+        muscle += 0.004 * Math.pow(-cosT, 1.5) * Math.sin(((v - 0.48) / 0.10) * Math.PI);
+      }
+
       const px = cx + sinT * rx;
+      const pz = cz + cosT * (rz + muscle);
       const py = y;
-      const pz = cz + cosT * rz;
 
       positions.push(px, py, pz);
       uvs.push(u, v);
@@ -391,8 +424,8 @@ function createBoutiqueSculptedHand(
   mat: THREE.Material
 ): THREE.Group {
   const handGroup = new THREE.Group();
-  const wristX = side * (isFemale ? 0.205 : 0.225);
-  handGroup.position.set(wristX, 0.46, 0.005);
+  const wristX = side * (isFemale ? 0.205 : 0.235);
+  handGroup.position.set(wristX, 0.44, 0.008);
 
   // 1. Sculpted Palm with natural fashion taper & thenar pad
   const palmGeom = new THREE.BufferGeometry();
@@ -1418,8 +1451,7 @@ function buildMorphedClothFromGLB(
     drawstringMat: THREE.MeshStandardMaterial;
     zipperMat: THREE.MeshStandardMaterial;
   },
-  scratchConfig?: ScratchConfig3D,
-  isFemale: boolean = true
+  scratchConfig?: ScratchConfig3D
 ): THREE.Group {
   const rootGroup = new THREE.Group();
 
@@ -1465,6 +1497,20 @@ function buildMorphedClothFromGLB(
         id.includes("gown") ||
         id.includes("dress") ||
         id === "skirt";
+  const isLongSleeve =
+    isScratch
+      ? scratchConfig?.sleeveType === "long" ||
+        scratchConfig?.sleeveType === "three-quarter" ||
+        scratchConfig?.sleeveType === "bell"
+      : isTrackJacket ||
+        isHoodie ||
+        isSweater ||
+        isBlazer ||
+        id === "tee-long" ||
+        id === "hockey-jersey" ||
+        id === "rugby-jersey" ||
+        id === "quarter-zip" ||
+        id === "dress-shirt";
   const isSleeveless =
     isScratch
       ? scratchConfig?.sleeveType === "sleeveless" || scratchConfig?.baseMode === "croquis"
@@ -1472,7 +1518,6 @@ function buildMorphedClothFromGLB(
         id === "basketball-jersey" ||
         id === "slip-dress" ||
         id === "evening-gown";
-  const isLongSleeve = !isSleeveless;
   const isVNeck =
     isScratch
       ? scratchConfig?.neckType === "v" || scratchConfig?.neckType === "deepv"
@@ -1546,20 +1591,6 @@ function buildMorphedClothFromGLB(
     ? 0.96
     : 1.04;
 
-  // Center and scale `Cloth_1` (raw Y bounds: 0.936..1.629)
-  // so it drapes over the boutique mannequin with generous volume that dominates the silhouette
-  const scale = isGown ? 1.02 : isBlazer ? 1.07 : isHoodie ? 1.06 : isTrackJacket ? 1.05 : 1.04;
-  const targetTopY = isTrackJacket ? 1.115 : isGown ? 1.095 : isBlazer ? 1.108 : 1.100;
-  const rawTopY = 1.629;
-  const yOffset = targetTopY - rawTopY * scale;
-
-  // Exact target wrist coordinates in local morphedWrapper coordinates
-  // Aligned with the mannequin arm core & hand anchor at World Y = 0.460
-  const worldWristX = isFemale ? 0.205 : 0.225;
-  const localWristX = worldWristX / scale;
-  const localWristY = (0.460 - yOffset) / scale;
-  const localWristZ = 0.0;
-
   const morphedWrapper = new THREE.Group();
 
   clothSource.traverse((child) => {
@@ -1598,7 +1629,6 @@ function buildMorphedClothFromGLB(
 
       const origX = x;
       const origY = y;
-      const origZ = z;
       const absX = Math.abs(x);
       const signX = x >= 0 ? 1 : -1;
 
@@ -1656,27 +1686,19 @@ function buildMorphedClothFromGLB(
             Math.sin(Math.min(1, t) * Math.PI);
           const sleeveLoft = isHoodie ? 1.12 : isSweater ? 1.08 : 1.0;
 
-          // Central axis extending naturally down along the sculpted arm to wrist level
-          const sleeveCenterX =
+          // New central axis extending naturally down along the sculpted arm to wrist level
+          const newAbsX =
             seamX * torsoScaleX +
-            (localWristX - seamX * torsoScaleX) * Math.pow(Math.min(1, t), 0.95);
-          const sleeveCenterY =
-            origCenterY +
-            (localWristY - origCenterY) * Math.pow(Math.min(1, t), 1.02);
-          const sleeveCenterZ =
-            origCenterZ +
-            (localWristZ - origCenterZ) * Math.min(1, t) +
-            0.012 * Math.sin(Math.min(1, t) * Math.PI);
+            distFromSeam * 0.25 +
+            0.045 * sleeveExtensionRatio * Math.pow(t, 0.92) +
+            Math.max(0, dyLocal) * 0.15 * Math.min(1, t);
+          const newCenterY = origCenterY - 0.545 * sleeveExtensionRatio * Math.pow(t, 1.05);
+          const newCenterZ =
+            origCenterZ + 0.022 * sleeveExtensionRatio * Math.sin(Math.min(1, t) * Math.PI * 0.88);
 
-          // Smooth transition from shoulder armhole seam into draped sleeve
-          const blend = Math.min(1.0, t / 0.12);
-          const targetX = signX * (sleeveCenterX + dyLocal * radiusFactor * 0.65 * blend);
-          const targetY = sleeveCenterY + elbowFold;
-          const targetZ = sleeveCenterZ + dzLocal * radiusFactor * sleeveLoft + elbowFold * 0.7;
-
-          x = origX * torsoScaleX * (1 - blend) + targetX * blend;
-          y = origY * (1 - blend) + targetY * blend;
-          z = origZ * torsoScaleZ * (1 - blend) + targetZ * blend;
+          x = signX * newAbsX;
+          y = newCenterY + dyLocal * radiusFactor * sleeveLoft + elbowFold;
+          z = newCenterZ + dzLocal * radiusFactor * sleeveLoft + elbowFold * 0.7;
         } else {
           x *= torsoScaleX;
           z *= torsoScaleZ;
@@ -1981,6 +2003,12 @@ function buildMorphedClothFromGLB(
     morphedWrapper.add(skirtGroup);
   }
 
+  // Center and scale `Cloth_1` (raw Y bounds: 0.936..1.629)
+  // so it drapes over the boutique mannequin with generous volume that dominates the silhouette
+  const scale = isGown ? 1.02 : isBlazer ? 1.07 : isHoodie ? 1.06 : isTrackJacket ? 1.05 : 1.04;
+  const targetTopY = isTrackJacket ? 1.115 : isGown ? 1.095 : isBlazer ? 1.108 : 1.100;
+  const rawTopY = 1.629;
+  const yOffset = targetTopY - rawTopY * scale;
   morphedWrapper.scale.set(scale, scale, scale);
   morphedWrapper.position.set(0, yOffset, 0.005);
 
@@ -2964,11 +2992,11 @@ function buildProceduralDrapedTopFallback(
 
     for (let iv = 0; iv <= sRings; iv++) {
       const v = iv / sRings;
-      const y = 1.05 - v * 0.59;
-      const cx = side * (0.185 + v * 0.025);
-      const cz = 0.005 + v * 0.008;
-      const rx = 0.046 - v * 0.012;
-      const rz = 0.048 - v * 0.014;
+      const y = 1.05 - v * 0.22;
+      const cx = side * (0.205 + v * 0.085);
+      const cz = 0.005 + v * 0.012;
+      const rx = 0.046 - v * 0.006;
+      const rz = 0.048 - v * 0.006;
 
       for (let iu = 0; iu <= sRadSegs; iu++) {
         const u = iu / sRadSegs;
@@ -3021,7 +3049,6 @@ function buildProceduralDrapedTopFallback(
 export function buildGarment3DModel({
   garmentId,
   category,
-  gender = "female",
   frontTexture,
   backTexture,
   zoneColors,
@@ -3343,7 +3370,6 @@ export function buildGarment3DModel({
   // 2. All Tops, Outerwear, Hoodies, Sweaters, Blazers, Jerseys, and Evening Gowns
   // built from the 123,500-vertex simulated cloth mesh (`Cloth_1`) + real-time vertex morphing!
   if (gltfShirtModel) {
-    const isFemale = gender !== "male";
     return buildMorphedClothFromGLB(
       gltfShirtModel,
       garmentId,
@@ -3364,8 +3390,7 @@ export function buildGarment3DModel({
         drawstringMat,
         zipperMat,
       },
-      scratchConfig,
-      isFemale
+      scratchConfig
     );
   }
 
