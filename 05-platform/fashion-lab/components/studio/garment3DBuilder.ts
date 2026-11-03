@@ -275,8 +275,8 @@ function createSeamlessSculptedArm(
 
     // Lateral curve along arm length
     const cx = shoulderX + (wristX - shoulderX) * Math.pow(v, 1.15);
-    // Natural slight forward carrying angle
-    const cz = 0.004 + 0.012 * Math.sin(v * Math.PI);
+    // Natural slight forward carrying angle and relaxed elbow flexion (Images 1 & 3)
+    const cz = 0.005 + 0.022 * Math.sin(v * Math.PI);
 
     let rx = 0.034;
     let rz = 0.035;
@@ -354,6 +354,68 @@ function createSeamlessSculptedArm(
 }
 
 /**
+ * Builds a continuous lofted boutique finger with smooth rounded fingertip dome
+ * and natural curvature, eliminating robotic sphere knuckles (Images 1 & 3).
+ */
+function createSculptedFinger(
+  baseR: number,
+  tipR: number,
+  length: number,
+  curlX: number,
+  curlZ: number,
+  mat: THREE.Material
+): THREE.Mesh {
+  const rings = 12;
+  const radSegs = 12;
+  const geom = new THREE.BufferGeometry();
+  const pos: number[] = [];
+  const uvs: number[] = [];
+  const idx: number[] = [];
+
+  for (let iv = 0; iv <= rings; iv++) {
+    const v = iv / rings; // 0 (base) to 1 (tip)
+    const y = -v * length;
+    const zOffset = Math.sin(v * Math.PI * 0.5) * Math.sin(curlX) * length * 0.55;
+    const xOffset = Math.sin(v * Math.PI * 0.5) * Math.sin(curlZ) * length * 0.35;
+
+    let r = baseR - (baseR - tipR) * v;
+    if (v > 0.82) {
+      // Smoothly rounded anatomical fingertip dome
+      const dt = (v - 0.82) / 0.18;
+      r *= Math.sqrt(Math.max(0.01, 1 - dt * dt));
+    }
+
+    for (let iu = 0; iu <= radSegs; iu++) {
+      const u = iu / radSegs;
+      const theta = u * Math.PI * 2;
+      const px = xOffset + Math.sin(theta) * r;
+      const pz = zOffset + Math.cos(theta) * r;
+      pos.push(px, y, pz);
+      uvs.push(u, v);
+    }
+  }
+
+  for (let iv = 0; iv < rings; iv++) {
+    for (let iu = 0; iu < radSegs; iu++) {
+      const a = iv * (radSegs + 1) + iu;
+      const b = a + 1;
+      const c = a + (radSegs + 1);
+      const d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+  }
+
+  geom.setIndex(idx);
+  geom.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geom.computeVertexNormals();
+
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.castShadow = true;
+  return mesh;
+}
+
+/**
  * Builds realistic boutique sculpted mannequin hands with distinct fingers in a natural relaxed pose (Images 1 & 3).
  */
 function createBoutiqueSculptedHand(
@@ -368,15 +430,15 @@ function createBoutiqueSculptedHand(
   // 1. Sculpted Palm with natural fashion taper & thenar pad
   const palmGeom = new THREE.BufferGeometry();
   const pRows = 8;
-  const pCols = 8;
+  const pCols = 12;
   const pPos: number[] = [];
   const pIdx: number[] = [];
 
   for (let r = 0; r <= pRows; r++) {
     const t = r / pRows;
-    const y = -t * 0.08; // wrist (0) down to knuckles (-0.08)
+    const y = -t * 0.076; // wrist (0) down to knuckles (-0.076)
     const palmWidth = (isFemale ? 0.028 : 0.034) + 0.004 * Math.sin(t * Math.PI);
-    const palmThick = (isFemale ? 0.014 : 0.018) * (1 - 0.2 * t);
+    const palmThick = (isFemale ? 0.014 : 0.018) * (1 - 0.22 * t);
 
     for (let c = 0; c <= pCols; c++) {
       const u = c / pCols;
@@ -414,55 +476,35 @@ function createBoutiqueSculptedHand(
   palmMesh.castShadow = true;
   handGroup.add(palmMesh);
 
-  // 2. Sculpted Articulated Thumb (projecting forward at natural 25 deg fashion angle)
-  const thumbGroup = new THREE.Group();
-  thumbGroup.position.set(-side * (isFemale ? 0.012 : 0.015), -0.028, 0.007);
-  thumbGroup.rotation.x = 0.38;
-  thumbGroup.rotation.z = side * 0.30;
+  // 2. Sculpted Natural Thumb (curved loft from thenar pad, angling forward/lateral)
+  const thumbBaseR = isFemale ? 0.0055 : 0.0068;
+  const thumbTipR = isFemale ? 0.0042 : 0.0050;
+  const thumbMesh = createSculptedFinger(thumbBaseR, thumbTipR, 0.044, 0.35, side * 0.25, mat);
+  thumbMesh.position.set(-side * (isFemale ? 0.012 : 0.015), -0.026, 0.006);
+  thumbMesh.rotation.x = 0.25;
+  thumbMesh.rotation.z = side * 0.28;
+  handGroup.add(thumbMesh);
 
-  const thumbGeom = new THREE.CylinderGeometry(
-    isFemale ? 0.0052 : 0.0064,
-    isFemale ? 0.0065 : 0.0078,
-    0.042,
-    12
-  );
-  const thumbMesh = new THREE.Mesh(thumbGeom, mat);
-  thumbMesh.position.y = -0.021;
-  thumbMesh.castShadow = true;
-  thumbGroup.add(thumbMesh);
-  handGroup.add(thumbGroup);
-
-  // 3. Four Individual Sculpted Boutique Fingers (Index, Middle, Ring, Pinky)
+  // 3. Four Sculpted Boutique Relaxed Fingers (Index, Middle, Ring, Pinky)
   const fingerSpecs = [
-    { name: "index", offset: -0.010, len: 0.062, r: 0.0045, curl: -0.06 },
-    { name: "middle", offset: -0.003, len: 0.068, r: 0.0048, curl: -0.08 },
-    { name: "ring", offset: 0.004, len: 0.064, r: 0.0045, curl: -0.10 },
-    { name: "pinky", offset: 0.010, len: 0.052, r: 0.0038, curl: -0.12 },
+    { offset: -0.010, len: 0.060, baseR: 0.0045, tipR: 0.0033, curlX: -0.08, curlZ: -0.02 },
+    { offset: -0.003, len: 0.066, baseR: 0.0048, tipR: 0.0035, curlX: -0.11, curlZ: 0.0 },
+    { offset: 0.004, len: 0.062, baseR: 0.0045, tipR: 0.0033, curlX: -0.13, curlZ: 0.02 },
+    { offset: 0.010, len: 0.050, baseR: 0.0038, tipR: 0.0028, curlX: -0.16, curlZ: 0.04 },
   ];
 
   for (const f of fingerSpecs) {
-    const fGroup = new THREE.Group();
-    fGroup.position.set(side * f.offset, -0.08, 0);
-    fGroup.rotation.x = f.curl;
-    fGroup.rotation.z = -side * 0.03;
-
-    const fGeom = new THREE.CylinderGeometry(
-      f.r * (isFemale ? 0.88 : 1.0) * 0.85,
-      f.r * (isFemale ? 0.88 : 1.0),
-      f.len,
-      10
+    const scale = isFemale ? 0.88 : 1.0;
+    const fMesh = createSculptedFinger(
+      f.baseR * scale,
+      f.tipR * scale,
+      f.len * scale,
+      f.curlX,
+      side * f.curlZ,
+      mat
     );
-    const fMesh = new THREE.Mesh(fGeom, mat);
-    fMesh.position.y = -f.len * 0.5;
-    fMesh.castShadow = true;
-    fGroup.add(fMesh);
-
-    // Knuckle cap
-    const knuckleGeom = new THREE.SphereGeometry(f.r * 1.05, 8, 8);
-    const knuckleMesh = new THREE.Mesh(knuckleGeom, mat);
-    fGroup.add(knuckleMesh);
-
-    handGroup.add(fGroup);
+    fMesh.position.set(side * f.offset, -0.076, 0);
+    handGroup.add(fMesh);
   }
 
   return handGroup;
@@ -706,6 +748,48 @@ export function createHumanMannequin(
   ringMesh.position.set(0, -1.302, 0);
   group.add(ringMesh);
 
+  // Boutique showroom polished chrome calf fitting rod (Images 1 & 3)
+  const chromeRodMat = new THREE.MeshStandardMaterial({
+    name: "mat_fitting_rod",
+    color: 0xe2e8f0,
+    roughness: 0.12,
+    metalness: 0.95,
+  });
+
+  const rodGeom = new THREE.CylinderGeometry(0.007, 0.007, 0.58, 16);
+  const rodMesh = new THREE.Mesh(rodGeom, chromeRodMat);
+  rodMesh.position.set(isFemale ? 0.088 : 0.095, -1.01, -0.075);
+  rodMesh.castShadow = true;
+  group.add(rodMesh);
+
+  const flangeGeom = new THREE.CylinderGeometry(0.022, 0.026, 0.012, 24);
+  const flangeMesh = new THREE.Mesh(flangeGeom, chromeRodMat);
+  flangeMesh.position.set(isFemale ? 0.088 : 0.095, -1.294, -0.075);
+  group.add(flangeMesh);
+
+  const pinGeom = new THREE.CylinderGeometry(0.0055, 0.0055, 0.05, 12);
+  const pinMesh = new THREE.Mesh(pinGeom, chromeRodMat);
+  pinMesh.rotation.x = Math.PI / 2;
+  pinMesh.position.set(isFemale ? 0.088 : 0.095, -0.72, -0.05);
+  group.add(pinMesh);
+
+  // Grounded contact shadow discs under shoe soles
+  const contactShadowMat = new THREE.MeshBasicMaterial({
+    color: 0x0f172a,
+    transparent: true,
+    opacity: 0.35,
+    depthWrite: false,
+  });
+  for (const side of [-1, 1]) {
+    const lPosX = side * (isFemale ? 0.088 : 0.095);
+    const shadowGeom = new THREE.CircleGeometry(0.062, 24);
+    const shadowMesh = new THREE.Mesh(shadowGeom, contactShadowMat);
+    shadowMesh.rotation.x = -Math.PI / 2;
+    shadowMesh.scale.set(0.65, 1.45, 1.0);
+    shadowMesh.position.set(lPosX, -1.298, 0.038);
+    group.add(shadowMesh);
+  }
+
   // If ghost mode selected, stop here (clean floating garment on plinth)
   if (isNone) {
     return group;
@@ -714,23 +798,26 @@ export function createHumanMannequin(
   // --- Real-World Boutique Mannequin Materials (Images 1, 2, 3) ---
   const bodyColor =
     skinFinish === "white" || skinFinish === "alabaster"
-      ? 0xf9fafb // Matte White (Image 1 right)
+      ? 0xf8fafc // Matte White (Image 1 right)
       : skinFinish === "charcoal"
-      ? 0x1f2937 // Deep Satin Charcoal (Image 3 right)
+      ? 0x1f242d // Deep Satin Charcoal (Image 3 right)
       : skinFinish === "linen"
       ? 0xeae5dc // Atelier Linen (Image 2)
-      : 0x4b5563; // Matte Boutique Slate Grey (Image 1 center, Image 3 pair)
+      : 0x475569; // Matte Boutique Slate Grey (Image 1 center, Image 3 pair)
 
-  const mannequinMat = new THREE.MeshStandardMaterial({
+  const mannequinMat = new THREE.MeshPhysicalMaterial({
     name: "mat_mannequin_body",
     color: bodyColor,
     roughness:
       skinFinish === "linen"
-        ? 0.70
+        ? 0.72
         : skinFinish === "white" || skinFinish === "alabaster"
-        ? 0.42
-        : 0.48,
-    metalness: 0.03,
+        ? 0.38
+        : 0.44,
+    metalness: 0.02,
+    clearcoat: skinFinish === "linen" ? 0.0 : 0.18,
+    clearcoatRoughness: 0.28,
+    reflectivity: 0.5,
     side: THREE.DoubleSide,
   });
 
@@ -868,6 +955,16 @@ export function createHumanMannequin(
 
       tPos.push(px, py, pz);
       tUvs.push(u, v);
+    }
+  }
+
+  for (let iv = 0; iv < segsV; iv++) {
+    for (let iu = 0; iu < segsU; iu++) {
+      const a = iv * (segsU + 1) + iu;
+      const b = a + 1;
+      const c = a + (segsU + 1);
+      const d = c + 1;
+      tIdx.push(a, c, b, b, c, d);
     }
   }
 
@@ -2927,8 +3024,13 @@ export function buildGarment3DModel({
   const activeClothBump = isJeans ? denimBump : wovenBump;
   const activeBumpScale = isJeans ? 0.0085 : 0.0055;
 
+  // Real-world physical cloth micro-fiber sheen properties
+  const fabricSheen = isSilk ? 0.85 : isJeans ? 0.35 : 0.65;
+  const fabricSheenColor = new THREE.Color(0xffffff);
+  const fabricSheenRoughness = isSilk ? 0.25 : 0.45;
+
   // Front & Back Torso/Legs Cloth Materials with Woven/Denim Micro-Bump & 1:1 UV Projection
-  const frontMat = new THREE.MeshStandardMaterial({
+  const frontMat = new THREE.MeshPhysicalMaterial({
     name: "mat_front_body",
     map: frontTexture || null,
     color: frontTexture ? 0xffffff : new THREE.Color(primaryColor),
@@ -2936,10 +3038,13 @@ export function buildGarment3DModel({
     bumpScale: activeBumpScale,
     roughness: baseRoughness,
     metalness: 0.0,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
-  const backMat = new THREE.MeshStandardMaterial({
+  const backMat = new THREE.MeshPhysicalMaterial({
     name: "mat_back_body",
     map: backTexture || null,
     color: backTexture ? 0xffffff : new THREE.Color(primaryColor),
@@ -2947,159 +3052,204 @@ export function buildGarment3DModel({
     bumpScale: activeBumpScale,
     roughness: baseRoughness,
     metalness: 0.0,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
   // Interior Cloth Lining Material (slightly darker shade of body color for realistic depth inside neck/hem)
   const insideColor = new THREE.Color(primaryColor).multiplyScalar(0.62);
-  const insideMat = new THREE.MeshStandardMaterial({
+  const insideMat = new THREE.MeshPhysicalMaterial({
     name: "mat_inside_lining",
     color: insideColor,
     bumpMap: wovenBump,
     bumpScale: 0.004,
     roughness: 0.82,
     metalness: 0.0,
+    sheen: 0.45,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: 0.5,
     side: THREE.DoubleSide,
   });
 
   // Collar Rib Material
-  const collarMat = new THREE.MeshStandardMaterial({
+  const collarMat = new THREE.MeshPhysicalMaterial({
     name: "mat_collar",
     color: new THREE.Color(collarColor),
     bumpMap: ribbedBump,
     bumpScale: 0.007,
     roughness: 0.72,
     metalness: 0.0,
+    sheen: 0.55,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: 0.5,
     side: THREE.DoubleSide,
   });
 
   // Hood Cloth Material
-  const hoodMat = new THREE.MeshStandardMaterial({
+  const hoodMat = new THREE.MeshPhysicalMaterial({
     name: "mat_hood",
     color: new THREE.Color(hoodColor),
     bumpMap: wovenBump,
     bumpScale: 0.006,
     roughness: baseRoughness,
     metalness: 0.0,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
   // Independent Left & Right Sleeve Materials
-  const sleeveLMat = new THREE.MeshStandardMaterial({
+  const sleeveLMat = new THREE.MeshPhysicalMaterial({
     name: "mat_sleeve_l",
     color: new THREE.Color(sleeveLColor),
     bumpMap: wovenBump,
     bumpScale: 0.0055,
     roughness: baseRoughness,
     metalness: 0.0,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
-  const sleeveRMat = new THREE.MeshStandardMaterial({
+  const sleeveRMat = new THREE.MeshPhysicalMaterial({
     name: "mat_sleeve_r",
     color: new THREE.Color(sleeveRColor),
     bumpMap: wovenBump,
     bumpScale: 0.0055,
     roughness: baseRoughness,
     metalness: 0.0,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
   // Independent Left & Right Wrist Cuff Materials
-  const cuffLMat = new THREE.MeshStandardMaterial({
+  const cuffLMat = new THREE.MeshPhysicalMaterial({
     name: "mat_cuff_l",
     color: new THREE.Color(cuffLColor),
     bumpMap: ribbedBump,
     bumpScale: 0.007,
     roughness: 0.68,
     metalness: 0.0,
+    sheen: 0.55,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: 0.5,
     side: THREE.DoubleSide,
   });
 
-  const cuffRMat = new THREE.MeshStandardMaterial({
+  const cuffRMat = new THREE.MeshPhysicalMaterial({
     name: "mat_cuff_r",
     color: new THREE.Color(cuffRColor),
     bumpMap: ribbedBump,
     bumpScale: 0.007,
     roughness: 0.68,
     metalness: 0.0,
+    sheen: 0.55,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: 0.5,
     side: THREE.DoubleSide,
   });
 
   // Sleeve Stripes Material
-  const sleeveStripeMat = new THREE.MeshStandardMaterial({
+  const sleeveStripeMat = new THREE.MeshPhysicalMaterial({
     name: "mat_sleeve_stripe",
     color: new THREE.Color(sleeveStripeColor),
     bumpMap: wovenBump,
     bumpScale: 0.005,
     roughness: 0.55,
     metalness: 0.0,
+    sheen: 0.65,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: 0.4,
     side: THREE.DoubleSide,
   });
 
   // Kangaroo / Scoop / Spade Pocket Material
-  const pocketMat = new THREE.MeshStandardMaterial({
+  const pocketMat = new THREE.MeshPhysicalMaterial({
     name: "mat_pocket",
     color: new THREE.Color(pocketColor),
     bumpMap: activeClothBump,
     bumpScale: activeBumpScale,
     roughness: baseRoughness,
     metalness: 0.0,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
   // Placket / J-Fly Material
-  const placketMat = new THREE.MeshStandardMaterial({
+  const placketMat = new THREE.MeshPhysicalMaterial({
     name: "mat_placket",
     color: new THREE.Color(placketColor),
     bumpMap: isJeans ? activeClothBump : ribbedBump,
     bumpScale: isJeans ? activeBumpScale : 0.005,
     roughness: isJeans ? baseRoughness : 0.55,
     metalness: 0.05,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
   // Drawstring / Laces Material
-  const drawstringMat = new THREE.MeshStandardMaterial({
+  const drawstringMat = new THREE.MeshPhysicalMaterial({
     name: "mat_drawstring",
     color: new THREE.Color(drawstringColor),
     bumpMap: ribbedBump,
     bumpScale: 0.006,
     roughness: 0.6,
     metalness: 0.0,
+    sheen: 0.5,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: 0.45,
     side: THREE.DoubleSide,
   });
 
   // Waistband Material for Bottoms
-  const waistbandMat = new THREE.MeshStandardMaterial({
+  const waistbandMat = new THREE.MeshPhysicalMaterial({
     name: "mat_waistband",
     color: new THREE.Color(waistbandColor),
     bumpMap: isJeans ? activeClothBump : ribbedBump,
     bumpScale: isJeans ? activeBumpScale : 0.007,
     roughness: isJeans ? baseRoughness : 0.72,
     metalness: 0.0,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
   // Yoke Material (Western Back V-Yoke on Jeans)
-  const yokeMat = new THREE.MeshStandardMaterial({
+  const yokeMat = new THREE.MeshPhysicalMaterial({
     name: "mat_yoke",
     color: new THREE.Color(yokeColor),
     bumpMap: activeClothBump,
     bumpScale: activeBumpScale,
     roughness: baseRoughness,
     metalness: 0.0,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
   //Selvedge Turn-Up Cuff Material for Bottoms
-  const cuffMat = new THREE.MeshStandardMaterial({
+  const cuffMat = new THREE.MeshPhysicalMaterial({
     name: "mat_cuff",
     color: new THREE.Color(cuffColor),
     bumpMap: activeClothBump,
     bumpScale: activeBumpScale,
     roughness: baseRoughness,
     metalness: 0.0,
+    sheen: fabricSheen,
+    sheenColor: fabricSheenColor,
+    sheenRoughness: fabricSheenRoughness,
     side: THREE.DoubleSide,
   });
 
@@ -3107,8 +3257,8 @@ export function buildGarment3DModel({
   const zipperMat = new THREE.MeshStandardMaterial({
     name: "mat_zipper",
     color: new THREE.Color(zipperColor),
-    metalness: 0.65,
-    roughness: 0.28,
+    metalness: 0.85,
+    roughness: 0.22,
     side: THREE.DoubleSide,
   });
 

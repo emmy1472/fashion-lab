@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import {
   RotateCcw,
   Sun,
@@ -117,10 +118,17 @@ export function Live3DPanel({
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.15;
     rendererRef.current = renderer;
+
+    // Studio Environment map (PMREM RoomEnvironment) for realistic PBR reflections & cloth sheen
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    pmremGenerator.compileEquirectangularShader();
+    const roomEnv = new RoomEnvironment();
+    const envTexture = pmremGenerator.fromScene(roomEnv, 0.04).texture;
+    scene.environment = envTexture;
 
     while (containerRef.current.firstChild) {
       containerRef.current.removeChild(containerRef.current.firstChild);
@@ -148,8 +156,10 @@ export function Live3DPanel({
     const keyLight = new THREE.DirectionalLight(0xffffff, 2.5);
     keyLight.position.set(2.8, 4.5, 3.8);
     keyLight.castShadow = true;
-    keyLight.shadow.mapSize.width = 1024;
-    keyLight.shadow.mapSize.height = 1024;
+    keyLight.shadow.mapSize.width = 2048;
+    keyLight.shadow.mapSize.height = 2048;
+    keyLight.shadow.bias = -0.00012;
+    keyLight.shadow.radius = 3.5;
     scene.add(keyLight);
 
     const fillLight = new THREE.DirectionalLight(0xf1f5f9, 1.35);
@@ -164,7 +174,7 @@ export function Live3DPanel({
 
     // Soft Shadow-Catcher Floor
     const floorGeom = new THREE.PlaneGeometry(10, 10);
-    const floorMat = new THREE.ShadowMaterial({ opacity: 0.12 });
+    const floorMat = new THREE.ShadowMaterial({ opacity: 0.18 });
     const floorMesh = new THREE.Mesh(floorGeom, floorMat);
     floorMesh.rotation.x = -Math.PI / 2;
     floorMesh.position.y = -1.325;
@@ -242,6 +252,8 @@ export function Live3DPanel({
       cancelAnimationFrame(animId);
       window.removeEventListener("resize", handleResize);
       ro.disconnect();
+      pmremGenerator.dispose();
+      envTexture.dispose();
       renderer.dispose();
       controls.dispose();
     };
