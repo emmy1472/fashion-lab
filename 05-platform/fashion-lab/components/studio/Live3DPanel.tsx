@@ -76,9 +76,9 @@ export function Live3DPanel({
   const [isWireframe, setIsWireframe] = useState(false);
   const [lightingMode, setLightingMode] = useState<"studio" | "dramatic" | "warm">("studio");
   const [renderPreset, setRenderPreset] = useState<"softbox" | "runway" | "cyber">("softbox");
-  const [mannequinGender, setMannequinGender] = useState<MannequinGender>("female");
+  const [mannequinGender, setMannequinGender] = useState<MannequinGender>("none");
   const [mannequinFinish, setMannequinFinish] = useState<MannequinFinish>("slate");
-  const [showComplementaryOutfit, setShowComplementaryOutfit] = useState(true);
+  const [showComplementaryOutfit, setShowComplementaryOutfit] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [gltfShirtModel, setGltfShirtModel] = useState<THREE.Group | null>(null);
   const isRotatingRef = useRef(isRotating);
@@ -665,8 +665,20 @@ export function Live3DPanel({
           </button>
         </div>
 
-        {/* 3D Human Mannequin Switcher: Female / Male / Ghost */}
+        {/* 3D Display Mode: No Mannequin / Female / Male */}
         <div className="flex items-center gap-0.5 bg-gray-100/90 p-0.5 rounded-lg border border-gray-200">
+          <button
+            type="button"
+            onClick={() => setMannequinGender("none")}
+            className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
+              mannequinGender === "none"
+                ? "bg-[#0E6E55] text-white shadow-2xs"
+                : "text-gray-500 hover:text-gray-900"
+            }`}
+            title="Clean 3D Garment Mesh (No Mannequin)"
+          >
+            No Mannequin
+          </button>
           <button
             type="button"
             onClick={() => setMannequinGender("female")}
@@ -675,7 +687,7 @@ export function Live3DPanel({
                 ? "bg-[#0E6E55] text-white shadow-2xs"
                 : "text-gray-500 hover:text-gray-900"
             }`}
-            title="Female Mannequin (Tailor Dress Form with Bust & Hourglass Curve)"
+            title="Female Form"
           >
             <span>♀</span>
             <span>Fem</span>
@@ -688,22 +700,10 @@ export function Live3DPanel({
                 ? "bg-[#0E6E55] text-white shadow-2xs"
                 : "text-gray-500 hover:text-gray-900"
             }`}
-            title="Male Mannequin (Athletic Dress Form with Broad Shoulders)"
+            title="Male Form"
           >
             <span>♂</span>
             <span>Male</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setMannequinGender("none")}
-            className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition ${
-              mannequinGender === "none"
-                ? "bg-gray-800 text-white shadow-2xs"
-                : "text-gray-400 hover:text-gray-700"
-            }`}
-            title="Ghost Mannequin Mode (Plinth Stand Only)"
-          >
-            Ghost
           </button>
         </div>
       </div>

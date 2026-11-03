@@ -714,8 +714,12 @@ export function createHumanMannequin(
   const group = new THREE.Group();
   group.name = "human_mannequin";
 
+  // Pure garment mesh display: zero mannequin, zero rods, zero collision/interference
+  if (gender === "none") {
+    return group;
+  }
+
   const isFemale = gender === "female";
-  const isNone = gender === "none";
 
   // Base materials
   const brushedMetal = new THREE.MeshStandardMaterial({
@@ -790,10 +794,6 @@ export function createHumanMannequin(
     group.add(shadowMesh);
   }
 
-  // If ghost mode selected, stop here (clean floating garment on plinth)
-  if (isNone) {
-    return group;
-  }
 
   // --- Real-World Boutique Mannequin Materials (Images 1, 2, 3) ---
   const bodyColor =
