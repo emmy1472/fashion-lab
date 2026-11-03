@@ -1632,13 +1632,14 @@ function buildMorphedClothFromGLB(
       const absX = Math.abs(x);
       const signX = x >= 0 ? 1 : -1;
 
-      // Project exact 1:1 planar UV coordinates onto Front & Back Torso meshes
-      // so every 2D zone color, cut panel, pocket, waistband, placket, and artwork layer maps accurately
-      if (isTorso && !isInside && uvAttr) {
-        const uCoord = isBackTorso
-          ? Math.max(0.005, Math.min(0.995, 0.5 - origX / 0.416))
-          : Math.max(0.005, Math.min(0.995, 0.5 + origX / 0.416));
-        const vCoord = Math.max(0.005, Math.min(0.995, (1.629 - origY) / 0.693));
+      // Project exact 1:1 planar UV coordinates onto Front & Back Torso AND Sleeves
+      // so the entire 2D mesh design (torso, arms, cuffs, sleeve stripes, artwork) maps continuously across the 3D model
+      if (!isInside && uvAttr) {
+        const isBack = isBackTorso || (isSleeve && z < -0.035);
+        const uCoord = isBack
+          ? Math.max(0.005, Math.min(0.995, 0.5 - origX / 0.70))
+          : Math.max(0.005, Math.min(0.995, 0.5 + origX / 0.70));
+        const vCoord = Math.max(0.005, Math.min(0.995, (1.635 - origY) / 0.70));
         uvAttr.setXY(i, uCoord, vCoord);
       }
 
@@ -2980,6 +2981,57 @@ function buildProceduralDrapedTopFallback(
     group.add(new THREE.Mesh(geom, isBack ? backMat : frontMat));
   }
 
+  // 3D Draped Sleeves for Procedural Fallback so arms are immediately displayed
+  for (const side of [-1, 1]) {
+    const sleeveGeom = new THREE.BufferGeometry();
+    const sPositions: number[] = [];
+    const sUvs: number[] = [];
+    const sIndices: number[] = [];
+    const sRings = 16;
+    const sRadSegs = 20;
+
+    for (let iv = 0; iv <= sRings; iv++) {
+      const v = iv / sRings;
+      const y = 1.05 - v * 0.22;
+      const cx = side * (0.205 + v * 0.085);
+      const cz = 0.005 + v * 0.012;
+      const rx = 0.046 - v * 0.006;
+      const rz = 0.048 - v * 0.006;
+
+      for (let iu = 0; iu <= sRadSegs; iu++) {
+        const u = iu / sRadSegs;
+        const theta = u * Math.PI * 2;
+        const px = cx + Math.sin(theta) * rx;
+        const py = y;
+        const pz = cz + Math.cos(theta) * rz;
+        sPositions.push(px, py, pz);
+
+        const isBack = Math.cos(theta) < -0.2;
+        const uCoord = isBack
+          ? Math.max(0.005, Math.min(0.995, 0.5 - px / 0.70))
+          : Math.max(0.005, Math.min(0.995, 0.5 + px / 0.70));
+        const vCoord = Math.max(0.005, Math.min(0.995, (1.635 - py) / 0.70));
+        sUvs.push(uCoord, vCoord);
+      }
+    }
+
+    for (let iv = 0; iv < sRings; iv++) {
+      for (let iu = 0; iu < sRadSegs; iu++) {
+        const a = iv * (sRadSegs + 1) + iu;
+        const b = a + 1;
+        const c = a + (sRadSegs + 1);
+        const d = c + 1;
+        sIndices.push(a, c, b, b, c, d);
+      }
+    }
+
+    sleeveGeom.setIndex(sIndices);
+    sleeveGeom.setAttribute("position", new THREE.Float32BufferAttribute(sPositions, 3));
+    sleeveGeom.setAttribute("uv", new THREE.Float32BufferAttribute(sUvs, 2));
+    sleeveGeom.computeVertexNormals();
+    group.add(new THREE.Mesh(sleeveGeom, frontMat));
+  }
+
   const collar = new THREE.Mesh(
     new THREE.TorusGeometry(0.082, 0.014, 16, 48),
     collarMat
@@ -3036,15 +3088,17 @@ export function buildGarment3DModel({
     category === "Outerwear" || id.includes("jacket") || id.includes("windbreaker");
   const baseRoughness = isJeans ? 0.70 : isSilk ? 0.32 : isTechWoven ? 0.52 : 0.62;
   const activeClothBump = isJeans ? denimBump : wovenBump;
-  const activeBumpScale = isJeans ? 0.0035 : 0.0022;
+  const activeBumpScale = isJeans ? 0.0022 : 0.0012;
 
-  // Real-world physical cloth micro-fiber sheen properties (tinted with dye color to avoid milky fog)
+  // Real-world physical cloth micro-fiber sheen properties
+  // Pure cotton, twill, fleece, denim, and performance woven fabrics have ZERO sheen (0.0)
+  // so the pure pigment color is not washed out by specular glare or milky fog!
   const makeSheenColor = (hex: string) =>
-    new THREE.Color(hex).lerp(new THREE.Color(0xffffff), 0.22);
+    new THREE.Color(hex).lerp(new THREE.Color(0xffffff), 0.15);
 
-  const fabricSheen = isSilk ? 0.75 : isJeans ? 0.28 : 0.40;
+  const fabricSheen = isSilk ? 0.35 : 0.0;
   const fabricSheenColor = makeSheenColor(primaryColor);
-  const fabricSheenRoughness = isSilk ? 0.25 : 0.45;
+  const fabricSheenRoughness = isSilk ? 0.25 : 0.50;
 
   // Front & Back Torso/Legs Cloth Materials with Woven/Denim Micro-Bump & 1:1 UV Projection
   const frontMat = new THREE.MeshPhysicalMaterial({
@@ -3081,10 +3135,10 @@ export function buildGarment3DModel({
     name: "mat_inside_lining",
     color: insideColor,
     bumpMap: wovenBump,
-    bumpScale: 0.003,
-    roughness: 0.78,
+    bumpScale: 0.002,
+    roughness: 0.82,
     metalness: 0.0,
-    sheen: 0.35,
+    sheen: 0.0,
     sheenColor: makeSheenColor(primaryColor),
     sheenRoughness: 0.5,
     side: THREE.DoubleSide,
@@ -3093,12 +3147,13 @@ export function buildGarment3DModel({
   // Collar Rib Material
   const collarMat = new THREE.MeshPhysicalMaterial({
     name: "mat_collar",
-    color: new THREE.Color(collarColor),
+    map: frontTexture || null,
+    color: frontTexture ? 0xffffff : new THREE.Color(collarColor),
     bumpMap: ribbedBump,
-    bumpScale: 0.004,
-    roughness: 0.68,
+    bumpScale: 0.003,
+    roughness: 0.75,
     metalness: 0.0,
-    sheen: 0.45,
+    sheen: 0.0,
     sheenColor: makeSheenColor(collarColor),
     sheenRoughness: 0.5,
     side: THREE.DoubleSide,
@@ -3109,7 +3164,7 @@ export function buildGarment3DModel({
     name: "mat_hood",
     color: new THREE.Color(hoodColor),
     bumpMap: wovenBump,
-    bumpScale: 0.0035,
+    bumpScale: 0.002,
     roughness: baseRoughness,
     metalness: 0.0,
     sheen: fabricSheen,
@@ -3118,12 +3173,13 @@ export function buildGarment3DModel({
     side: THREE.DoubleSide,
   });
 
-  // Independent Left & Right Sleeve Materials
+  // Independent Left & Right Sleeve Materials (mapped with 2D texture so arms display full artwork, patterns & colors)
   const sleeveLMat = new THREE.MeshPhysicalMaterial({
     name: "mat_sleeve_l",
-    color: new THREE.Color(sleeveLColor),
+    map: frontTexture || null,
+    color: frontTexture ? 0xffffff : new THREE.Color(sleeveLColor),
     bumpMap: wovenBump,
-    bumpScale: 0.0035,
+    bumpScale: 0.002,
     roughness: baseRoughness,
     metalness: 0.0,
     sheen: fabricSheen,
@@ -3134,9 +3190,10 @@ export function buildGarment3DModel({
 
   const sleeveRMat = new THREE.MeshPhysicalMaterial({
     name: "mat_sleeve_r",
-    color: new THREE.Color(sleeveRColor),
+    map: frontTexture || null,
+    color: frontTexture ? 0xffffff : new THREE.Color(sleeveRColor),
     bumpMap: wovenBump,
-    bumpScale: 0.0035,
+    bumpScale: 0.002,
     roughness: baseRoughness,
     metalness: 0.0,
     sheen: fabricSheen,
@@ -3148,12 +3205,13 @@ export function buildGarment3DModel({
   // Independent Left & Right Wrist Cuff Materials
   const cuffLMat = new THREE.MeshPhysicalMaterial({
     name: "mat_cuff_l",
-    color: new THREE.Color(cuffLColor),
+    map: frontTexture || null,
+    color: frontTexture ? 0xffffff : new THREE.Color(cuffLColor),
     bumpMap: ribbedBump,
-    bumpScale: 0.004,
-    roughness: 0.65,
+    bumpScale: 0.003,
+    roughness: 0.72,
     metalness: 0.0,
-    sheen: 0.45,
+    sheen: 0.0,
     sheenColor: makeSheenColor(cuffLColor),
     sheenRoughness: 0.5,
     side: THREE.DoubleSide,
@@ -3161,12 +3219,13 @@ export function buildGarment3DModel({
 
   const cuffRMat = new THREE.MeshPhysicalMaterial({
     name: "mat_cuff_r",
-    color: new THREE.Color(cuffRColor),
+    map: frontTexture || null,
+    color: frontTexture ? 0xffffff : new THREE.Color(cuffRColor),
     bumpMap: ribbedBump,
-    bumpScale: 0.004,
-    roughness: 0.65,
+    bumpScale: 0.003,
+    roughness: 0.72,
     metalness: 0.0,
-    sheen: 0.45,
+    sheen: 0.0,
     sheenColor: makeSheenColor(cuffRColor),
     sheenRoughness: 0.5,
     side: THREE.DoubleSide,
@@ -3175,12 +3234,13 @@ export function buildGarment3DModel({
   // Sleeve Stripes Material
   const sleeveStripeMat = new THREE.MeshPhysicalMaterial({
     name: "mat_sleeve_stripe",
-    color: new THREE.Color(sleeveStripeColor),
+    map: frontTexture || null,
+    color: frontTexture ? 0xffffff : new THREE.Color(sleeveStripeColor),
     bumpMap: wovenBump,
-    bumpScale: 0.003,
-    roughness: 0.52,
+    bumpScale: 0.002,
+    roughness: 0.65,
     metalness: 0.0,
-    sheen: 0.50,
+    sheen: 0.0,
     sheenColor: makeSheenColor(sleeveStripeColor),
     sheenRoughness: 0.4,
     side: THREE.DoubleSide,

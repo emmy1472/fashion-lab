@@ -912,17 +912,9 @@ export function render3DTextureSVG(project, opts = {}) {
   const bodyZonePaint = project.zones?.body || { style: 'solid', colors: ['#062D24'] };
   const baseFill = defs.paint(bodyZonePaint);
 
-  // External 3D sleeve/hood meshes have their own dedicated 3D PBR materials (`mat_sleeve_l`, `mat_sleeve_r`, `mat_cuff_l`, `mat_cuff_r`, `mat_hood`).
-  // Every other 2D zone belongs on the torso/legs texture so 100% of 2D color changes appear on the 3D model.
-  const externalMeshZoneIds = new Set([
-    'body',
-    'sleeveL',
-    'sleeveR',
-    'cuffL',
-    'cuffR',
-    'sleeveStripe',
-    'hood',
-  ]);
+  // In 3D: bake ALL garment zones (including arms/sleeves, cuffs, stripes, pockets, placket, zippers)
+  // directly onto the 2K UV texture so 100% of the 2D mesh design is visible on the 3D model.
+  const externalMeshZoneIds = new Set(['body', 'hood']);
   // Bottoms render their drawcord as real 3D tube geometry (`mat_drawstring`)
   if (g.kind === 'bottom') externalMeshZoneIds.add('drawstring');
 
@@ -999,7 +991,8 @@ export function render3DTextureSVG(project, opts = {}) {
 
   const layers = (project.layers?.[view] || []).map((l) => layerSVG(l, defs, project, {})).join('');
   const isBottom = g.kind === 'bottom';
-  const vb = isBottom ? '115 145 370 525' : '125 120 350 488';
+  // Tops: full 600-width canvas so both sleeves, cuffs, and sleeve graphics are 100% included in the 3D texture
+  const vb = isBottom ? '115 145 370 525' : '0 100 600 540';
 
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
   viewBox="${vb}" width="2048" height="2048" preserveAspectRatio="none">
