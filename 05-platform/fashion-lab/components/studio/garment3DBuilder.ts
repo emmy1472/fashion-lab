@@ -798,26 +798,26 @@ export function createHumanMannequin(
   // --- Real-World Boutique Mannequin Materials (Images 1, 2, 3) ---
   const bodyColor =
     skinFinish === "white" || skinFinish === "alabaster"
-      ? 0xf8fafc // Matte White (Image 1 right)
+      ? 0xf1f5f9 // Clean Matte Gallery Alabaster
       : skinFinish === "charcoal"
-      ? 0x1f242d // Deep Satin Charcoal (Image 3 right)
+      ? 0x181c24 // Deep Satin Obsidian/Charcoal (Image 3 right)
       : skinFinish === "linen"
-      ? 0xeae5dc // Atelier Linen (Image 2)
-      : 0x475569; // Matte Boutique Slate Grey (Image 1 center, Image 3 pair)
+      ? 0xe2ddd5 // Atelier Linen Form (Image 2)
+      : 0x2b3340; // Understated Studio Charcoal/Slate - allows clothing to dominate
 
   const mannequinMat = new THREE.MeshPhysicalMaterial({
     name: "mat_mannequin_body",
     color: bodyColor,
     roughness:
       skinFinish === "linen"
-        ? 0.72
+        ? 0.76
         : skinFinish === "white" || skinFinish === "alabaster"
-        ? 0.38
-        : 0.44,
-    metalness: 0.02,
-    clearcoat: skinFinish === "linen" ? 0.0 : 0.18,
-    clearcoatRoughness: 0.28,
-    reflectivity: 0.5,
+        ? 0.48
+        : 0.54,
+    metalness: 0.01,
+    clearcoat: skinFinish === "linen" ? 0.0 : 0.08,
+    clearcoatRoughness: 0.38,
+    reflectivity: 0.3,
     side: THREE.DoubleSide,
   });
 
@@ -1565,17 +1565,31 @@ function buildMorphedClothFromGLB(
     : 1.0;
   const isBellSleeve = isScratch && scratchConfig?.sleeveType === "bell";
 
-  // Anatomical fit multipliers per garment silhouette
+  // Anatomical fit multipliers per garment silhouette - generous ease so clothes dominate
   const torsoScaleX = isScratch
     ? (scratchConfig?.chestWidth || 148) / 148
     : isHoodie
-    ? 1.06
+    ? 1.08
     : isSweater
-    ? 1.04
+    ? 1.06
+    : isTrackJacket
+    ? 1.05
+    : isBlazer
+    ? 1.07
     : isGown
-    ? 0.92
-    : 1.0;
-  const torsoScaleZ = isHoodie ? 1.08 : isSweater ? 1.05 : isGown ? 0.94 : 1.02;
+    ? 0.96
+    : 1.03;
+  const torsoScaleZ = isHoodie
+    ? 1.12
+    : isSweater
+    ? 1.08
+    : isTrackJacket
+    ? 1.06
+    : isBlazer
+    ? 1.08
+    : isGown
+    ? 0.96
+    : 1.04;
 
   const morphedWrapper = new THREE.Group();
 
@@ -1989,9 +2003,9 @@ function buildMorphedClothFromGLB(
   }
 
   // Center and scale `Cloth_1` (raw Y bounds: 0.936..1.629)
-  // so it drapes over the boutique mannequin with natural fit
-  const scale = isGown ? 0.98 : isBlazer ? 1.02 : isHoodie ? 1.01 : 0.98;
-  const targetTopY = isTrackJacket ? 1.11 : isGown ? 1.09 : isBlazer ? 1.10 : 1.095;
+  // so it drapes over the boutique mannequin with generous volume that dominates the silhouette
+  const scale = isGown ? 1.02 : isBlazer ? 1.07 : isHoodie ? 1.06 : isTrackJacket ? 1.05 : 1.04;
+  const targetTopY = isTrackJacket ? 1.115 : isGown ? 1.095 : isBlazer ? 1.108 : 1.100;
   const rawTopY = 1.629;
   const yOffset = targetTopY - rawTopY * scale;
   morphedWrapper.scale.set(scale, scale, scale);
@@ -2090,8 +2104,8 @@ function buildDrapedBottomsMesh(
     const gather = isJeans
       ? 0.0006 * Math.sin(theta * 8)
       : 0.0035 * Math.sin(theta * 24) * Math.sin(v * Math.PI);
-    const rx = (isJeans ? 0.150 : 0.154) + 0.006 * v + gather;
-    const rz = (isJeans ? 0.110 : 0.114) + 0.006 * v + gather;
+    const rx = (isJeans ? 0.158 : 0.162) + 0.007 * v + gather;
+    const rz = (isJeans ? 0.118 : 0.122) + 0.007 * v + gather;
     return { rx, rz };
   };
 
@@ -2178,11 +2192,11 @@ function buildDrapedBottomsMesh(
         : 0;
 
     let rx = isJeans
-      ? 0.088 * (1 - 0.03 * Math.pow(v, 0.9))
-      : 0.085 * (1 - 0.04 * Math.pow(v, 0.9));
+      ? 0.093 * (1 - 0.03 * Math.pow(v, 0.9))
+      : 0.089 * (1 - 0.04 * Math.pow(v, 0.9));
     let rz = isJeans
-      ? 0.090 * (1 - 0.04 * Math.pow(v, 0.9))
-      : 0.087 * (1 - 0.05 * Math.pow(v, 0.9));
+      ? 0.095 * (1 - 0.04 * Math.pow(v, 0.9))
+      : 0.091 * (1 - 0.05 * Math.pow(v, 0.9));
 
     if (isShorts) {
       rx = 0.098 + 0.008 * v;
@@ -2203,8 +2217,8 @@ function buildDrapedBottomsMesh(
     }
 
     const hipBlend = Math.pow(Math.max(0, 1 - v / 0.20), 1.6);
-    const hipRxTarget = (isJeans ? 0.178 : 0.182) - 0.040;
-    const hipRzTarget = isJeans ? 0.144 : 0.148;
+    const hipRxTarget = (isJeans ? 0.186 : 0.190) - 0.036;
+    const hipRzTarget = isJeans ? 0.149 : 0.153;
     rx += Math.max(0, hipRxTarget - rx) * hipBlend;
     rz += Math.max(0, hipRzTarget - rz) * hipBlend;
 
@@ -2930,9 +2944,9 @@ function buildProceduralDrapedTopFallback(
 
     for (let iv = 0; iv <= vSegs; iv++) {
       const v = iv / vSegs;
-      const y = 1.095 - v * 0.67;
-      const rx = 0.205 - 0.035 * v;
-      const rz = 0.145 - 0.025 * v;
+      const y = 1.100 - v * 0.69;
+      const rx = 0.224 - 0.036 * v;
+      const rz = 0.158 - 0.024 * v;
 
       for (let iu = 0; iu <= uSegs; iu++) {
         const u = iu / uSegs;

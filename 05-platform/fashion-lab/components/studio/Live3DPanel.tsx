@@ -42,6 +42,24 @@ interface Props {
   onExitExpanded?: () => void;
 }
 
+/**
+ * Returns the vertical center coordinate of the active garment so the camera
+ * focuses directly on the clothes and ensures the garment dominates the viewport.
+ */
+function getGarmentCenterY(category: string = "Tops"): number {
+  const cat = category.toLowerCase();
+  if (cat === "bottoms") return -0.38;
+  if (cat === "dresses") return 0.22;
+  return 0.72; // Tops, Outerwear, Hoodies, Sweaters, Formalwear
+}
+
+function getGarmentCameraDist(category: string = "Tops"): number {
+  const cat = category.toLowerCase();
+  if (cat === "bottoms") return 2.15;
+  if (cat === "dresses") return 2.45;
+  return 2.05; // Closer framing so clothing fills the viewport
+}
+
 export function Live3DPanel({
   garmentId = "track-jacket",
   garmentCategory = "Outerwear",
@@ -61,6 +79,7 @@ export function Live3DPanel({
   const [renderPreset, setRenderPreset] = useState<"softbox" | "runway" | "cyber">("softbox");
   const [mannequinGender, setMannequinGender] = useState<MannequinGender>("female");
   const [mannequinFinish, setMannequinFinish] = useState<MannequinFinish>("slate");
+  const [showComplementaryOutfit, setShowComplementaryOutfit] = useState(true);
   const [isCapturing, setIsCapturing] = useState(false);
   const [gltfShirtModel, setGltfShirtModel] = useState<THREE.Group | null>(null);
   const isRotatingRef = useRef(isRotating);
@@ -103,9 +122,11 @@ export function Live3DPanel({
     scene.background = new THREE.Color("#F8F9FA");
     sceneRef.current = scene;
 
-    // Camera
+    // Camera focused directly on the garment so the clothes dominate the view
+    const initCY = getGarmentCenterY(garmentCategory);
+    const initDist = getGarmentCameraDist(garmentCategory);
     const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 100);
-    camera.position.set(0, 0.25, 2.85);
+    camera.position.set(0, initCY + 0.04, initDist);
     cameraRef.current = camera;
 
     // WebGL Renderer with High Precision & Tone Mapping
@@ -139,10 +160,10 @@ export function Live3DPanel({
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
-    controls.minDistance = 1.2;
+    controls.minDistance = 1.0;
     controls.maxDistance = 5.0;
     controls.maxPolarAngle = Math.PI / 1.75;
-    controls.target.set(0, 0.10, 0);
+    controls.target.set(0, initCY, 0);
     controlsRef.current = controls;
 
     // 3-Point Studio Lighting Rig + Hemisphere Cloth Grazing Light
@@ -292,14 +313,14 @@ export function Live3DPanel({
       complementaryMeshGroupRef.current = null;
     }
 
-    if (mannequinGender !== "none") {
+    if (mannequinGender !== "none" && showComplementaryOutfit) {
       const comp = buildComplementaryStudioGarment(garmentCategory, gltfShirtModel);
       if (comp) {
         complementaryMeshGroupRef.current = comp;
         turntableGroupRef.current.add(comp);
       }
     }
-  }, [mannequinGender, garmentCategory, gltfShirtModel]);
+  }, [mannequinGender, garmentCategory, gltfShirtModel, showComplementaryOutfit]);
 
   // 3. Re-build 3D Garment Mesh whenever garmentId, category, or gltfShirtModel changes
   useEffect(() => {
@@ -473,22 +494,41 @@ export function Live3DPanel({
     });
   }, [zoneColors]);
 
-  // 6. Camera Presets
-  const setCameraAngle = (angle: "front" | "perspective" | "back" | "detail") => {
+  // 6. Camera Presets tailored to frame the clothes so the garment dominates
+  const setCameraAngle = (angle: "front" | "perspective" | "back" | "detail" | "full") => {
     if (!cameraRef.current || !controlsRef.current) return;
     setIsRotating(false);
+    const cy = getGarmentCenterY(garmentCategory);
+    const dist = getGarmentCameraDist(garmentCategory);
+
     if (angle === "front") {
-      cameraRef.current.position.set(0, 0.1, 2.8);
+      cameraRef.current.position.set(0, cy + 0.03, dist);
+      controlsRef.current.target.set(0, cy, 0);
     } else if (angle === "perspective") {
-      cameraRef.current.position.set(1.8, 0.4, 2.2);
+      cameraRef.current.position.set(dist * 0.65, cy + 0.12, dist * 0.72);
+      controlsRef.current.target.set(0, cy, 0);
     } else if (angle === "back") {
-      cameraRef.current.position.set(0, 0.1, -2.8);
+      cameraRef.current.position.set(0, cy + 0.03, -dist);
+      controlsRef.current.target.set(0, cy, 0);
     } else if (angle === "detail") {
-      cameraRef.current.position.set(0, 0.35, 1.4);
+      cameraRef.current.position.set(0, cy + 0.04, 1.25);
+      controlsRef.current.target.set(0, cy, 0);
+    } else if (angle === "full") {
+      cameraRef.current.position.set(0, 0.20, 2.75);
+      controlsRef.current.target.set(0, 0.08, 0);
     }
-    controlsRef.current.target.set(0, 0, 0);
     controlsRef.current.update();
   };
+
+  // Automatically re-center camera on the active garment when category changes
+  useEffect(() => {
+    if (!cameraRef.current || !controlsRef.current) return;
+    const cy = getGarmentCenterY(garmentCategory);
+    const dist = getGarmentCameraDist(garmentCategory);
+    cameraRef.current.position.set(0, cy + 0.03, dist);
+    controlsRef.current.target.set(0, cy, 0);
+    controlsRef.current.update();
+  }, [garmentCategory]);
 
   // 7. Lighting Mode Toggle
   const toggleLighting = () => {
@@ -534,11 +574,13 @@ export function Live3DPanel({
     }, 200);
   };
 
-  // 9. Reset Camera View
+  // 9. Reset Camera View to garment focus
   const handleResetView = () => {
     if (!cameraRef.current || !controlsRef.current) return;
-    cameraRef.current.position.set(0, 0.25, 2.85);
-    controlsRef.current.target.set(0, 0.10, 0);
+    const cy = getGarmentCenterY(garmentCategory);
+    const dist = getGarmentCameraDist(garmentCategory);
+    cameraRef.current.position.set(0, cy + 0.03, dist);
+    controlsRef.current.target.set(0, cy, 0);
     controlsRef.current.update();
     if (turntableGroupRef.current) {
       turntableGroupRef.current.rotation.y = 0;
@@ -641,10 +683,22 @@ export function Live3DPanel({
           <button
             type="button"
             onClick={handleResetView}
-            title="Fit 3D View"
+            title="Fit View on Garment"
             className="w-7 h-7 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 flex items-center justify-center transition"
           >
             <Maximize2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowComplementaryOutfit(!showComplementaryOutfit)}
+            title={showComplementaryOutfit ? "Isolate Single Garment (Hide Complementary Pants/Top)" : "Show Full Boutique Outfit"}
+            className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${
+              !showComplementaryOutfit
+                ? "bg-[#ECFDF5] text-[#0E6E55]"
+                : "text-gray-500 hover:text-gray-900 hover:bg-gray-100"
+            }`}
+          >
+            <Eye className="w-3.5 h-3.5" />
           </button>
           <button
             type="button"
@@ -701,36 +755,52 @@ export function Live3DPanel({
           <Box className="w-4 h-4" />
         </button>
 
-        {/* Centered Bottom 5-Icon Dock matching mockup */}
-        <div className="absolute inset-x-3 bottom-3 bg-white/95 backdrop-blur-xs border border-gray-200/80 rounded-xl px-2.5 py-1.5 flex items-center justify-between shadow-2xs z-10">
+        {/* Centered Bottom Multi-Angle & Garment Focus Dock */}
+        <div className="absolute inset-x-3 bottom-3 bg-white/95 backdrop-blur-xs border border-gray-200/80 rounded-xl px-2 py-1.5 flex items-center justify-between shadow-2xs z-10">
           <button
             type="button"
             onClick={() => setCameraAngle("front")}
-            title="Front Camera"
-            className="p-1.5 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+            title="Front Garment Focus"
+            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
           >
             1P
           </button>
           <button
             type="button"
             onClick={() => setCameraAngle("perspective")}
-            title="¾ Studio Angle"
-            className="p-1.5 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+            title="¾ Garment Angle"
+            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
           >
             ¾
           </button>
           <button
             type="button"
             onClick={() => setCameraAngle("back")}
-            title="Back Camera"
-            className="p-1.5 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+            title="Back Garment Focus"
+            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
           >
             BK
           </button>
           <button
             type="button"
+            onClick={() => setCameraAngle("detail")}
+            title="Macro Detail Focus (Fabrics & Stitching)"
+            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+          >
+            DT
+          </button>
+          <button
+            type="button"
+            onClick={() => setCameraAngle("full")}
+            title="Full Body Mannequin"
+            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+          >
+            ALL
+          </button>
+          <button
+            type="button"
             onClick={handleResetView}
-            title="Reset Turntable"
+            title="Re-Center On Garment"
             className="p-1.5 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition"
           >
             <RotateCcw className="w-3.5 h-3.5" />
