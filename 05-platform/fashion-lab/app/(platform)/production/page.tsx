@@ -1,15 +1,19 @@
-import { ModulePlaceholder } from "@/components/layout/ModulePlaceholder";
+import { RedirectToActiveProject } from "@/components/project/ProjectRedirects";
+import type { StageSlug } from "@/lib/production/stages";
 
-export const metadata = {
-  title: "Production Tasks & Manufacturing — Fashion-Lab",
+const TAB_TO_STAGE: Record<string, StageSlug> = {
+  cutting: "cutting",
+  components: "trims",
+  assembly: "assembly",
+  finishing: "finishing",
 };
 
-export default function Page() {
-  return (
-    <ModulePlaceholder
-      moduleName="Production Tasks & Manufacturing"
-      milestone="Coming in Module 6"
-      description="End-to-end garment production pipeline (Cut -> Sew -> Press -> Finish -> QA -> Ship) and automated factory technical specification sheets."
-    />
-  );
+// Production stages now live inside each project: /projects/[id]/cutting etc.
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string }>;
+}) {
+  const { tab } = await searchParams;
+  return <RedirectToActiveProject stage={TAB_TO_STAGE[tab ?? ""] ?? "cutting"} />;
 }

@@ -1,64 +1,90 @@
 @import "tailwindcss";
 
-:root {
-  --sidebar-bg: #062D24;
-  --sidebar-hover: #0A3A2F;
-  --sidebar-active: #0E4B3D;
-  --brand-primary: #0E6E55;
-  --brand-primary-hover: #09503E;
-  --brand-accent: #10B981;
-  --brand-light: #ECFDF5;
-  --surface-bg: #F8F9FA;
-  --card-bg: #FFFFFF;
-  --border-subtle: #E5E7EB;
-  --text-primary: #111827;
-  --text-secondary: #4B5563;
-  --text-muted: #9CA3AF;
-  
-  --background: #F8F9FA;
-  --foreground: #111827;
+/*
+ * Fashion-Lab design tokens.
+ *
+ * Use the semantic utilities these generate (bg-surface, text-ink, border-line, bg-brand, …)
+ * instead of hex values. Hex in class names is what let two palettes drift apart before.
+ *
+ *   ink         primary text            ink-2   secondary text      muted   tertiary text / icons
+ *   surface     page background         surface-2  subtle fill       card    raised surfaces
+ *   line        hairline borders        line-strong  input borders / dividers on fills
+ *   brand       primary actions, active state, links
+ *   accent      brass highlight (sparingly: logo, sidebar icons)
+ *   success / warning / danger / info   status only, never decoration
+ */
+@theme {
+  --color-ink: #18251f;
+  --color-ink-2: #4a5851;
+  --color-muted: #83928b;
+
+  --color-surface: #f7f5f0;
+  --color-surface-2: #f2efe9;
+  --color-card: #ffffff;
+
+  --color-line: #e9e5dc;
+  --color-line-strong: #d8d2c5;
+
+  --color-brand: #245c46;
+  --color-brand-hover: #1b4736;
+  --color-brand-strong: #143b2f;
+  --color-brand-soft: #ebf3ef;
+  --color-brand-soft-hover: #dbeee4;
+
+  --color-accent: #b99b70;
+  --color-accent-soft: #f7f3ec;
+  --color-accent-soft-hover: #efe9de;
+
+  --color-sidebar: #18251f;
+  --color-sidebar-raised: #1c2c24;
+  --color-sidebar-line: #23342b;
+
+  --color-success: #2e8b62;
+  --color-success-soft: #e6f4ec;
+  --color-warning: #b45309;
+  --color-warning-soft: #fef3c7;
+  --color-danger: #b42318;
+  --color-danger-soft: #fdecea;
+  --color-info: #0369a1;
+  --color-info-soft: #e0f2fe;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-heading: "Manrope", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-
-@theme inline {
-  --color-sidebar: var(--sidebar-bg);
-  --color-sidebar-hover: var(--sidebar-hover);
-  --color-sidebar-active: var(--sidebar-active);
-  --color-brand-primary: var(--brand-primary);
-  --color-brand-accent: var(--brand-accent);
-  --color-brand-light: var(--brand-light);
-  --color-surface: var(--surface-bg);
-  --color-card: var(--card-bg);
-  --color-border-subtle: var(--border-subtle);
-  --color-text-primary: var(--text-primary);
-  --color-text-secondary: var(--text-secondary);
-  --color-text-muted: var(--text-muted);
-}
-
-/* Custom utility colors */
-.bg-sidebar { background-color: var(--sidebar-bg); }
-.bg-sidebar-hover { background-color: var(--sidebar-hover); }
-.bg-sidebar-active { background-color: var(--sidebar-active); }
-.bg-brand-primary { background-color: var(--brand-primary); }
-.bg-brand-primary-hover { background-color: var(--brand-primary-hover); }
-.bg-brand-accent { background-color: var(--brand-accent); }
-.bg-brand-light { background-color: var(--brand-light); }
-.bg-surface { background-color: var(--surface-bg); }
-
-.text-brand-primary { color: var(--brand-primary); }
-.text-brand-accent { color: var(--brand-accent); }
-.text-sidebar { color: var(--sidebar-bg); }
-
-.border-brand-primary { border-color: var(--brand-primary); }
-.border-subtle { border-color: var(--border-subtle); }
 
 body {
-  background-color: var(--surface-bg);
-  color: var(--text-primary);
+  background-color: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   -webkit-font-smoothing: antialiased;
 }
 
-/* Custom Scrollbar for sidebar and studio panels */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-heading);
+  letter-spacing: -0.01em;
+}
+
+/* Measurements and numeric specs read best in tabular mono. */
+.font-mono,
+[data-measurement],
+.measurement-val {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Visible keyboard focus everywhere, without changing mouse interaction. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -67,9 +93,9 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(14, 110, 85, 0.2);
+  background: color-mix(in srgb, var(--color-brand) 25%, transparent);
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(14, 110, 85, 0.4);
+  background: color-mix(in srgb, var(--color-brand) 45%, transparent);
 }

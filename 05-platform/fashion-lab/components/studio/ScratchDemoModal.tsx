@@ -571,19 +571,19 @@ export function ScratchDemoModal({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 select-none animate-in fade-in">
-      <div className="bg-[#0B1411] text-white rounded-2xl border border-emerald-500/25 shadow-2xl w-full max-w-5xl overflow-hidden flex flex-col max-h-[92vh]">
+      <div className="bg-[#0B1411] text-white rounded-2xl border border-brand/25 shadow-2xl w-full max-w-5xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Top Masterclass Header */}
         <div className="px-6 py-3.5 border-b border-white/10 flex items-center justify-between bg-[#0E1B17]">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#10B981] to-[#0E6E55] text-[#062D24] flex items-center justify-center shadow-md">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-success to-brand text-brand-strong flex items-center justify-center shadow-md">
               <Award className="w-4 h-4 stroke-[2.5]" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-sm font-extrabold tracking-tight text-white">
+                <h3 className="text-sm font-semibold tracking-tight text-white">
                   FASHION-LAB Studio Masterclass
                 </h3>
-                <span className="text-[9px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full bg-[#10B981]/20 text-[#34D399] border border-[#10B981]/30">
+                <span className="text-[9px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-success/20 text-[#34D399] border border-success/30">
                   6 Expert Modules · 48s
                 </span>
               </div>
@@ -596,7 +596,7 @@ export function ScratchDemoModal({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
+            className="p-1.5 rounded-lg text-muted hover:text-white hover:bg-white/10 transition cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -614,17 +614,17 @@ export function ScratchDemoModal({
                 onClick={() => jumpToChapter(chap.id)}
                 className={`pb-2 px-2 pt-1 rounded-t-lg text-left border-b-2 transition cursor-pointer ${
                   isCurrent
-                    ? "border-[#10B981] bg-white/5 text-white"
+                    ? "border-success bg-white/5 text-white"
                     : isDone
-                    ? "border-emerald-500/40 text-emerald-300/80 hover:text-white"
-                    : "border-transparent text-gray-400 hover:text-gray-200"
+                    ? "border-brand/40 text-emerald-300/80 hover:text-white"
+                    : "border-transparent text-muted hover:text-gray-200"
                 }`}
               >
                 <div className="flex items-center justify-between mb-0.5">
-                  <span className="text-[9px] font-extrabold uppercase tracking-wider text-[#10B981]">
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-success">
                     Module {chap.code}
                   </span>
-                  {isDone && <CheckCircle2 className="w-3 h-3 text-[#10B981]" />}
+                  {isDone && <CheckCircle2 className="w-3 h-3 text-success" />}
                 </div>
                 <span className="text-[10.5px] font-bold block truncate">
                   {chap.title}
@@ -644,8 +644,8 @@ export function ScratchDemoModal({
             {/* Top HUD Overlay Bar inside Video */}
             <div className="relative z-10 flex items-center justify-between">
               <div className="flex items-center gap-2 bg-black/55 backdrop-blur-md border border-white/10 rounded-xl px-3 py-1.5">
-                <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
-                <span className="text-[10px] font-extrabold tracking-wider text-emerald-300 uppercase">
+                <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
+                <span className="text-[10px] font-semibold tracking-wider text-emerald-300 uppercase">
                   {activeChapter.toolBadge}
                 </span>
               </div>
@@ -667,8 +667,8 @@ export function ScratchDemoModal({
                       key={item.id}
                       className={`flex items-center gap-1 px-2 py-0.5 rounded-lg transition ${
                         active
-                          ? "bg-[#10B981] text-[#062D24] font-extrabold shadow-xs"
-                          : "text-gray-400"
+                          ? "bg-success text-brand-strong font-semibold shadow-xs"
+                          : "text-muted"
                       }`}
                     >
                       <Icon className="w-3 h-3" />
@@ -682,8 +682,8 @@ export function ScratchDemoModal({
             {/* Center Dual Viewport: Real 2D Production CAD + Synchronized 3D / Back Turnaround */}
             <div className="relative z-10 flex-1 flex items-center justify-center gap-6 my-1 overflow-hidden">
               {/* Primary 2D CAD Blueprint Stage (Powered by Real renderSVG) */}
-              <div className="relative w-[245px] h-[285px] bg-white/95 rounded-2xl border border-emerald-400/40 shadow-2xl flex items-center justify-center p-2 overflow-hidden">
-                <div className="absolute top-2 left-2.5 text-[9px] font-extrabold uppercase tracking-wider text-[#0E6E55] bg-[#ECFDF5] px-2 py-0.5 rounded-md border border-emerald-200">
+              <div className="relative w-[245px] h-[285px] bg-white/95 rounded-2xl border border-brand/40 shadow-2xl flex items-center justify-center p-2 overflow-hidden">
+                <div className="absolute top-2 left-2.5 text-[9px] font-semibold uppercase tracking-wider text-brand bg-brand-soft px-2 py-0.5 rounded-md border border-brand/20">
                   {demoRenderState.sc.explodeAmount > 10
                     ? `Exploded Cut Sloper (${demoRenderState.sc.explodeAmount}%)`
                     : "2D Pattern & Croquis"}
@@ -730,14 +730,14 @@ export function ScratchDemoModal({
 
                 {/* Symmetry Axis Overlay during Module 4 */}
                 {activeChapter.id === 3 && (
-                  <div className="absolute inset-y-3 left-1/2 -translate-x-1/2 border-l-2 border-dashed border-[#10B981] pointer-events-none" />
+                  <div className="absolute inset-y-3 left-1/2 -translate-x-1/2 border-l-2 border-dashed border-success pointer-events-none" />
                 )}
               </div>
 
               {/* Secondary Live 3D Drape & Back Turnaround Preview Card */}
-              <div className="relative w-[195px] h-[285px] bg-[#0F221C] rounded-2xl border border-emerald-500/30 shadow-xl flex flex-col items-center justify-between p-3 overflow-hidden">
+              <div className="relative w-[195px] h-[285px] bg-[#0F221C] rounded-2xl border border-brand/30 shadow-xl flex flex-col items-center justify-between p-3 overflow-hidden">
                 <div className="w-full flex items-center justify-between">
-                  <span className="text-[9px] font-extrabold uppercase tracking-wider text-emerald-300">
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-emerald-300">
                     3D Cloth & Back Spec
                   </span>
                   <span className="text-[8.5px] font-bold text-white/70 bg-white/10 px-1.5 py-0.5 rounded">
@@ -762,8 +762,8 @@ export function ScratchDemoModal({
                 />
 
                 <div className="w-full bg-black/40 rounded-lg px-2.5 py-1.5 border border-white/10 flex items-center justify-between text-[9px]">
-                  <span className="text-gray-300 font-medium">Mesh Density</span>
-                  <span className="text-[#34D399] font-extrabold">
+                  <span className="text-line-strong font-medium">Mesh Density</span>
+                  <span className="text-[#34D399] font-semibold">
                     123.5K Vertices
                   </span>
                 </div>
@@ -775,7 +775,7 @@ export function ScratchDemoModal({
               <p className="text-xs font-medium text-emerald-50 leading-relaxed">
                 {activeChapter.caption}
               </p>
-              <span className="text-[10px] font-extrabold text-[#34D399] shrink-0 bg-[#10B981]/15 px-2.5 py-1 rounded-lg border border-[#10B981]/30">
+              <span className="text-[10px] font-semibold text-[#34D399] shrink-0 bg-success/15 px-2.5 py-1 rounded-lg border border-success/30">
                 Module {activeChapter.code} / 06
               </span>
             </div>
@@ -785,13 +785,13 @@ export function ScratchDemoModal({
           <div className="w-full lg:w-[325px] bg-[#0F1D18] border-l border-white/10 p-4 flex flex-col justify-between shrink-0">
             <div className="space-y-3">
               <div>
-                <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#10B981]">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-success">
                   Module {activeChapter.code} · Expert Playbook
                 </span>
-                <h4 className="text-sm font-extrabold text-white mt-0.5">
+                <h4 className="text-sm font-semibold text-white mt-0.5">
                   {activeChapter.title}
                 </h4>
-                <p className="text-[11px] text-gray-400">
+                <p className="text-[11px] text-muted">
                   {activeChapter.subtitle}
                 </p>
               </div>
@@ -804,14 +804,14 @@ export function ScratchDemoModal({
                     className="p-2.5 rounded-xl bg-white/5 border border-white/10 space-y-0.5"
                   >
                     <div className="flex items-center gap-1.5">
-                      <span className="w-4 h-4 rounded-full bg-[#10B981]/20 text-[#34D399] text-[9.5px] font-extrabold flex items-center justify-center shrink-0">
+                      <span className="w-4 h-4 rounded-full bg-success/20 text-[#34D399] text-[9.5px] font-semibold flex items-center justify-center shrink-0">
                         {idx + 1}
                       </span>
                       <span className="text-[11px] font-bold text-white">
                         {item.label}
                       </span>
                     </div>
-                    <p className="text-[10px] text-gray-300 leading-relaxed pl-5">
+                    <p className="text-[10px] text-line-strong leading-relaxed pl-5">
                       {item.detail}
                     </p>
                   </div>
@@ -819,8 +819,8 @@ export function ScratchDemoModal({
               </div>
 
               {/* Pro Tip Box */}
-              <div className="p-2.5 rounded-xl bg-[#062D24]/90 border border-[#10B981]/30">
-                <span className="text-[9.5px] font-extrabold uppercase tracking-wider text-[#34D399] block mb-0.5">
+              <div className="p-2.5 rounded-xl bg-brand-strong/90 border border-success/30">
+                <span className="text-[9.5px] font-semibold uppercase tracking-wider text-[#34D399] block mb-0.5">
                   ★ Atelier Pro Tip
                 </span>
                 <p className="text-[10px] text-emerald-100/90 leading-relaxed">
@@ -838,7 +838,7 @@ export function ScratchDemoModal({
                     onClose();
                     onTryModule(activeChapter.tryAction);
                   }}
-                  className="w-full py-2 px-3 rounded-xl bg-[#10B981] hover:bg-[#34D399] text-[#062D24] font-extrabold text-xs flex items-center justify-center gap-1.5 transition shadow-md cursor-pointer"
+                  className="w-full py-2 px-3 rounded-xl bg-success hover:bg-[#34D399] text-brand-strong font-semibold text-xs flex items-center justify-center gap-1.5 transition shadow-md cursor-pointer"
                 >
                   <span>{activeChapter.tryAction.label}</span>
                   <ChevronRight className="w-4 h-4 stroke-[2.5]" />
@@ -855,7 +855,7 @@ export function ScratchDemoModal({
               type="button"
               onClick={() => jumpToChapter(activeChapter.id - 1)}
               title="Previous Module"
-              className="p-1.5 rounded-lg border border-white/15 text-gray-300 hover:text-white hover:bg-white/10 transition cursor-pointer"
+              className="p-1.5 rounded-lg border border-white/15 text-line-strong hover:text-white hover:bg-white/10 transition cursor-pointer"
             >
               <SkipBack className="w-3.5 h-3.5" />
             </button>
@@ -863,7 +863,7 @@ export function ScratchDemoModal({
             <button
               type="button"
               onClick={() => setIsPlaying((p) => !p)}
-              className="w-8 h-8 rounded-lg bg-[#10B981] hover:bg-[#34D399] text-[#062D24] flex items-center justify-center transition cursor-pointer"
+              className="w-8 h-8 rounded-lg bg-success hover:bg-[#34D399] text-brand-strong flex items-center justify-center transition cursor-pointer"
             >
               {isPlaying ? (
                 <Pause className="w-4 h-4 fill-current" />
@@ -876,7 +876,7 @@ export function ScratchDemoModal({
               type="button"
               onClick={() => jumpToChapter(activeChapter.id + 1)}
               title="Next Module"
-              className="p-1.5 rounded-lg border border-white/15 text-gray-300 hover:text-white hover:bg-white/10 transition cursor-pointer"
+              className="p-1.5 rounded-lg border border-white/15 text-line-strong hover:text-white hover:bg-white/10 transition cursor-pointer"
             >
               <SkipForward className="w-3.5 h-3.5" />
             </button>
@@ -888,7 +888,7 @@ export function ScratchDemoModal({
                 setIsPlaying(true);
               }}
               title="Restart Masterclass"
-              className="p-1.5 rounded-lg border border-white/15 text-gray-300 hover:text-white hover:bg-white/10 transition cursor-pointer"
+              className="p-1.5 rounded-lg border border-white/15 text-line-strong hover:text-white hover:bg-white/10 transition cursor-pointer"
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
@@ -897,7 +897,7 @@ export function ScratchDemoModal({
             <button
               type="button"
               onClick={() => setSpeed((s) => (s === 1 ? 1.5 : 1))}
-              className="px-2 py-1 rounded-lg border border-white/15 text-[10px] font-extrabold text-emerald-300 hover:bg-white/10 transition cursor-pointer"
+              className="px-2 py-1 rounded-lg border border-white/15 text-[10px] font-semibold text-emerald-300 hover:bg-white/10 transition cursor-pointer"
             >
               {speed}x
             </button>
@@ -910,9 +910,9 @@ export function ScratchDemoModal({
               step={0.1}
               value={time}
               onChange={(e) => setTime(Number(e.target.value))}
-              className="flex-1 h-1.5 accent-[#10B981] cursor-pointer"
+              className="flex-1 h-1.5 accent-success cursor-pointer"
             />
-            <span className="text-[11px] font-bold text-gray-400 tabular-nums">
+            <span className="text-[11px] font-bold text-muted tabular-nums">
               {formatSec(time)} / 0:48
             </span>
           </div>
@@ -925,7 +925,7 @@ export function ScratchDemoModal({
                   onClose();
                   onRunLiveOnCanvas();
                 }}
-                className="flex items-center gap-1.5 bg-white/10 hover:bg-white/15 text-[#34D399] border border-[#10B981]/40 text-xs font-bold px-3.5 py-2 rounded-xl transition cursor-pointer"
+                className="flex items-center gap-1.5 bg-white/10 hover:bg-white/15 text-[#34D399] border border-success/40 text-xs font-bold px-3.5 py-2 rounded-xl transition cursor-pointer"
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 <span>Auto-Build Demo on My Canvas</span>
@@ -934,7 +934,7 @@ export function ScratchDemoModal({
             <button
               type="button"
               onClick={onClose}
-              className="bg-white hover:bg-gray-100 text-gray-900 text-xs font-extrabold px-4 py-2 rounded-xl transition cursor-pointer"
+              className="bg-white hover:bg-surface-2 text-ink text-xs font-semibold px-4 py-2 rounded-xl transition cursor-pointer"
             >
               Close Masterclass
             </button>

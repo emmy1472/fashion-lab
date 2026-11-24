@@ -1,6 +1,8 @@
 import { AppSidebar } from "@/components/layout/AppSidebar";
 import { PlatformContent } from "@/components/layout/PlatformContent";
 import { MobileNav } from "@/components/layout/MobileNav";
+import { SidebarProvider } from "@/components/layout/SidebarContext";
+import { SidebarSpacer } from "@/components/layout/SidebarSpacer";
 
 export default function PlatformLayout({
   children,
@@ -8,17 +10,22 @@ export default function PlatformLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-h-screen bg-[#F8F9FA] flex">
-      {/* Desktop App Sidebar */}
-      <div className="hidden md:block w-56 shrink-0">
-        <AppSidebar />
+    <SidebarProvider>
+      <div className="min-h-screen bg-surface flex">
+        {/* Desktop Fixed App Sidebar */}
+        <div className="hidden md:block">
+          <AppSidebar />
+        </div>
+
+        {/* Dynamic spacer that adjusts when sidebar collapses */}
+        <SidebarSpacer />
+
+        {/* Main Content Area */}
+        <PlatformContent>{children}</PlatformContent>
+
+        {/* Mobile Bottom Navigation */}
+        <MobileNav />
       </div>
-
-      {/* Main Content Area (Full height for Studio, padded for standard views) */}
-      <PlatformContent>{children}</PlatformContent>
-
-      {/* Mobile Bottom Navigation */}
-      <MobileNav />
-    </div>
+    </SidebarProvider>
   );
 }

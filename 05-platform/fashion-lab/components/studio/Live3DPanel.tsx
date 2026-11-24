@@ -44,6 +44,32 @@ interface Props {
   onExitExpanded?: () => void;
 }
 
+function disposeMaterial(mat: THREE.Material) {
+  const m = mat as any;
+  if (m.map) m.map.dispose();
+  if (m.normalMap) m.normalMap.dispose();
+  if (m.roughnessMap) m.roughnessMap.dispose();
+  if (m.metalnessMap) m.metalnessMap.dispose();
+  if (m.bumpMap) m.bumpMap.dispose();
+  mat.dispose();
+}
+
+function disposeHierarchy(node: THREE.Object3D) {
+  node.traverse((child) => {
+    if ((child as THREE.Mesh).isMesh) {
+      const mesh = child as THREE.Mesh;
+      if (mesh.geometry) mesh.geometry.dispose();
+      if (mesh.material) {
+        if (Array.isArray(mesh.material)) {
+          mesh.material.forEach(disposeMaterial);
+        } else {
+          disposeMaterial(mesh.material);
+        }
+      }
+    }
+  });
+}
+
 /**
  * Returns the vertical center coordinate of the active garment so the camera
  * focuses directly on the clothes and ensures the garment dominates the viewport.
@@ -284,8 +310,18 @@ export function Live3DPanel({
       cancelAnimationFrame(animId);
       window.removeEventListener("resize", handleResize);
       ro.disconnect();
+      if (controlsRef.current) controlsRef.current.dispose();
+      if (turntableGroupRef.current) disposeHierarchy(turntableGroupRef.current);
+      if (sceneRef.current) disposeHierarchy(sceneRef.current);
+      if (frontTextureRef.current) {
+        frontTextureRef.current.dispose();
+        frontTextureRef.current = null;
+      }
+      if (backTextureRef.current) {
+        backTextureRef.current.dispose();
+        backTextureRef.current = null;
+      }
       renderer.dispose();
-      controls.dispose();
     };
   }, []);
 
@@ -295,11 +331,7 @@ export function Live3DPanel({
 
     if (pedestalRef.current) {
       turntableGroupRef.current.remove(pedestalRef.current);
-      pedestalRef.current.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          (child as THREE.Mesh).geometry.dispose();
-        }
-      });
+      disposeHierarchy(pedestalRef.current);
       pedestalRef.current = null;
     }
 
@@ -314,11 +346,7 @@ export function Live3DPanel({
 
     if (complementaryMeshGroupRef.current) {
       turntableGroupRef.current.remove(complementaryMeshGroupRef.current);
-      complementaryMeshGroupRef.current.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          (child as THREE.Mesh).geometry.dispose();
-        }
-      });
+      disposeHierarchy(complementaryMeshGroupRef.current);
       complementaryMeshGroupRef.current = null;
     }
 
@@ -338,12 +366,7 @@ export function Live3DPanel({
     // Remove existing garment model
     if (garmentMeshGroupRef.current && turntableGroupRef.current) {
       turntableGroupRef.current.remove(garmentMeshGroupRef.current);
-      garmentMeshGroupRef.current.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          const mesh = child as THREE.Mesh;
-          mesh.geometry.dispose();
-        }
-      });
+      disposeHierarchy(garmentMeshGroupRef.current);
       garmentMeshGroupRef.current = null;
     }
 
@@ -635,13 +658,13 @@ export function Live3DPanel({
       } bg-white flex flex-col h-full select-none shrink-0 relative transition-all`}
     >
       {/* Aligned Column Header with 3D View / Render tabs matching mockup */}
-      <div className="h-11 border-b border-gray-100 px-4 flex items-center justify-between bg-white z-10 shrink-0">
+      <div className="h-11 border-b border-line px-4 flex items-center justify-between bg-white z-10 shrink-0">
         <div className="flex items-center gap-6 h-full">
           {expanded && onExitExpanded && (
             <button
               type="button"
               onClick={onExitExpanded}
-              className="h-full flex items-center text-xs font-semibold text-gray-400 hover:text-gray-800 border-b-2 border-transparent transition"
+              className="h-full flex items-center text-xs font-semibold text-muted hover:text-ink border-b-2 border-transparent transition"
             >
               2D Design
             </button>
@@ -651,8 +674,8 @@ export function Live3DPanel({
             onClick={() => setActiveTab("view")}
             className={`h-full flex items-center text-xs font-bold border-b-2 transition ${
               activeTab === "view"
-                ? "text-[#0E6E55] border-[#0E6E55]"
-                : "text-gray-400 hover:text-gray-700 border-transparent"
+                ? "text-brand border-brand"
+                : "text-muted hover:text-ink-2 border-transparent"
             }`}
           >
             {expanded ? "3D Preview" : "3D View"}
@@ -662,8 +685,8 @@ export function Live3DPanel({
             onClick={() => setActiveTab("edit3d")}
             className={`h-full flex items-center gap-1.5 text-xs font-semibold border-b-2 transition ${
               activeTab === "edit3d"
-                ? "text-[#0E6E55] border-[#0E6E55] font-bold"
-                : "text-gray-400 hover:text-gray-700 border-transparent"
+                ? "text-brand border-brand font-bold"
+                : "text-muted hover:text-ink-2 border-transparent"
             }`}
           >
             <Sliders className="w-3 h-3" />
@@ -674,8 +697,8 @@ export function Live3DPanel({
             onClick={() => setActiveTab("render")}
             className={`h-full flex items-center text-xs font-semibold border-b-2 transition ${
               activeTab === "render"
-                ? "text-[#0E6E55] border-[#0E6E55] font-bold"
-                : "text-gray-400 hover:text-gray-700 border-transparent"
+                ? "text-brand border-brand font-bold"
+                : "text-muted hover:text-ink-2 border-transparent"
             }`}
           >
             Render
@@ -683,14 +706,14 @@ export function Live3DPanel({
         </div>
 
         {/* 3D Display Mode: No Mannequin / Female / Male */}
-        <div className="flex items-center gap-0.5 bg-gray-100/90 p-0.5 rounded-lg border border-gray-200">
+        <div className="flex items-center gap-0.5 bg-surface-2/90 p-0.5 rounded-lg border border-line">
           <button
             type="button"
             onClick={() => setMannequinGender("none")}
             className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
               mannequinGender === "none"
-                ? "bg-[#0E6E55] text-white shadow-2xs"
-                : "text-gray-500 hover:text-gray-900"
+                ? "bg-brand text-white shadow-2xs"
+                : "text-muted hover:text-ink"
             }`}
             title="Clean 3D Garment Mesh (No Mannequin)"
           >
@@ -701,8 +724,8 @@ export function Live3DPanel({
             onClick={() => setMannequinGender("female")}
             className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-0.5 ${
               mannequinGender === "female"
-                ? "bg-[#0E6E55] text-white shadow-2xs"
-                : "text-gray-500 hover:text-gray-900"
+                ? "bg-brand text-white shadow-2xs"
+                : "text-muted hover:text-ink"
             }`}
             title="Female Form"
           >
@@ -714,8 +737,8 @@ export function Live3DPanel({
             onClick={() => setMannequinGender("male")}
             className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-0.5 ${
               mannequinGender === "male"
-                ? "bg-[#0E6E55] text-white shadow-2xs"
-                : "text-gray-500 hover:text-gray-900"
+                ? "bg-brand text-white shadow-2xs"
+                : "text-muted hover:text-ink"
             }`}
             title="Male Form"
           >
@@ -726,20 +749,20 @@ export function Live3DPanel({
       </div>
 
       {/* Main 3D Viewport */}
-      <div className="flex-1 relative bg-[#F4F6F8] overflow-hidden">
+      <div className="flex-1 relative bg-surface-2 overflow-hidden">
         {/* Three.js Canvas Container */}
         <div ref={containerRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
 
         {/* Top-Left Vertical Pill Strip matching mockup */}
-        <div className="absolute left-3 top-3 bg-white/95 backdrop-blur-xs border border-gray-200/80 rounded-xl p-1 flex flex-col gap-1 shadow-2xs z-10">
+        <div className="absolute left-3 top-3 bg-white/95 backdrop-blur-xs border border-line/80 rounded-xl p-1 flex flex-col gap-1 shadow-2xs z-10">
           <button
             type="button"
             onClick={() => setActiveTab(activeTab === "edit3d" ? "view" : "edit3d")}
             title={activeTab === "edit3d" ? "Close 3D Fit Editor" : "Open 3D Fit & Style Editor"}
             className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${
               activeTab === "edit3d"
-                ? "bg-[#ECFDF5] text-[#0E6E55]"
-                : "text-gray-500 hover:text-gray-900 hover:bg-gray-100"
+                ? "bg-brand-soft text-brand"
+                : "text-muted hover:text-ink hover:bg-surface-2"
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
@@ -748,7 +771,7 @@ export function Live3DPanel({
             type="button"
             onClick={handleResetView}
             title="Fit View on Garment"
-            className="w-7 h-7 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 flex items-center justify-center transition"
+            className="w-7 h-7 rounded-lg text-muted hover:text-ink hover:bg-surface-2 flex items-center justify-center transition"
           >
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
@@ -758,8 +781,8 @@ export function Live3DPanel({
             title={showComplementaryOutfit ? "Isolate Single Garment (Hide Complementary Pants/Top)" : "Show Full Boutique Outfit"}
             className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${
               !showComplementaryOutfit
-                ? "bg-[#ECFDF5] text-[#0E6E55]"
-                : "text-gray-500 hover:text-gray-900 hover:bg-gray-100"
+                ? "bg-brand-soft text-brand"
+                : "text-muted hover:text-ink hover:bg-surface-2"
             }`}
           >
             <Eye className="w-3.5 h-3.5" />
@@ -770,8 +793,8 @@ export function Live3DPanel({
             title={isRotating ? "Pause Turntable" : "Auto-Rotate Turntable"}
             className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${
               isRotating
-                ? "bg-[#ECFDF5] text-[#0E6E55]"
-                : "text-gray-500 hover:text-gray-900 hover:bg-gray-100"
+                ? "bg-brand-soft text-brand"
+                : "text-muted hover:text-ink hover:bg-surface-2"
             }`}
           >
             <RotateCcw className="w-3.5 h-3.5" />
@@ -780,7 +803,7 @@ export function Live3DPanel({
             type="button"
             onClick={toggleLighting}
             title={`Studio Lighting (${lightingMode})`}
-            className="w-7 h-7 rounded-lg text-gray-500 hover:text-amber-600 hover:bg-gray-100 flex items-center justify-center transition"
+            className="w-7 h-7 rounded-lg text-muted hover:text-warning hover:bg-surface-2 flex items-center justify-center transition"
           >
             <Sun className="w-3.5 h-3.5" />
           </button>
@@ -801,8 +824,8 @@ export function Live3DPanel({
             title="Toggle Wireframe Mesh"
             className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${
               isWireframe
-                ? "bg-[#ECFDF5] text-[#0E6E55]"
-                : "text-gray-500 hover:text-gray-900 hover:bg-gray-100"
+                ? "bg-brand-soft text-brand"
+                : "text-muted hover:text-ink hover:bg-surface-2"
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
@@ -814,18 +837,18 @@ export function Live3DPanel({
           type="button"
           onClick={() => setCameraAngle("perspective")}
           title="3D Perspective View"
-          className="absolute right-3 top-3 w-8 h-8 rounded-xl bg-white/95 border border-gray-200/80 shadow-2xs flex items-center justify-center text-gray-700 hover:text-[#0E6E55] transition z-10"
+          className="absolute right-3 top-3 w-8 h-8 rounded-xl bg-white/95 border border-line/80 shadow-2xs flex items-center justify-center text-ink-2 hover:text-brand transition z-10"
         >
           <Box className="w-4 h-4" />
         </button>
 
         {/* Centered Bottom Multi-Angle & Garment Focus Dock */}
-        <div className="absolute inset-x-3 bottom-3 bg-white/95 backdrop-blur-xs border border-gray-200/80 rounded-xl px-2 py-1.5 flex items-center justify-between shadow-2xs z-10">
+        <div className="absolute inset-x-3 bottom-3 bg-white/95 backdrop-blur-xs border border-line/80 rounded-xl px-2 py-1.5 flex items-center justify-between shadow-2xs z-10">
           <button
             type="button"
             onClick={() => setCameraAngle("front")}
             title="Front Garment Focus"
-            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+            className="px-2 py-1 rounded-lg text-ink-2 hover:text-ink hover:bg-surface-2 transition text-[10px] font-bold"
           >
             1P
           </button>
@@ -833,7 +856,7 @@ export function Live3DPanel({
             type="button"
             onClick={() => setCameraAngle("perspective")}
             title="¾ Garment Angle"
-            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+            className="px-2 py-1 rounded-lg text-ink-2 hover:text-ink hover:bg-surface-2 transition text-[10px] font-bold"
           >
             ¾
           </button>
@@ -841,7 +864,7 @@ export function Live3DPanel({
             type="button"
             onClick={() => setCameraAngle("back")}
             title="Back Garment Focus"
-            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+            className="px-2 py-1 rounded-lg text-ink-2 hover:text-ink hover:bg-surface-2 transition text-[10px] font-bold"
           >
             BK
           </button>
@@ -849,7 +872,7 @@ export function Live3DPanel({
             type="button"
             onClick={() => setCameraAngle("detail")}
             title="Macro Detail Focus (Fabrics & Stitching)"
-            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+            className="px-2 py-1 rounded-lg text-ink-2 hover:text-ink hover:bg-surface-2 transition text-[10px] font-bold"
           >
             DT
           </button>
@@ -857,7 +880,7 @@ export function Live3DPanel({
             type="button"
             onClick={() => setCameraAngle("full")}
             title="Full Body Mannequin"
-            className="px-2 py-1 rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition text-[10px] font-bold"
+            className="px-2 py-1 rounded-lg text-ink-2 hover:text-ink hover:bg-surface-2 transition text-[10px] font-bold"
           >
             ALL
           </button>
@@ -865,7 +888,7 @@ export function Live3DPanel({
             type="button"
             onClick={handleResetView}
             title="Re-Center On Garment"
-            className="p-1.5 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition"
+            className="p-1.5 rounded-lg text-muted hover:text-ink hover:bg-surface-2 transition"
           >
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
@@ -874,7 +897,7 @@ export function Live3DPanel({
             onClick={handleCaptureSnapshot}
             disabled={isCapturing}
             title="Capture 3D Render Snapshot"
-            className="w-7 h-7 rounded-lg bg-[#0E6E55] hover:bg-[#09503E] text-white flex items-center justify-center shadow-2xs transition"
+            className="w-7 h-7 rounded-lg bg-brand hover:bg-brand-hover text-white flex items-center justify-center shadow-2xs transition"
           >
             <Sparkles className="w-3.5 h-3.5" />
           </button>
@@ -899,18 +922,18 @@ export function Live3DPanel({
         <div className="absolute inset-0 top-11 bg-white/95 backdrop-blur-md p-5 flex flex-col justify-between z-20 animate-in fade-in">
           <div className="space-y-4">
             <div>
-              <h4 className="text-xs font-bold text-gray-900 uppercase tracking-wider flex items-center gap-1.5 mb-1">
-                <Sparkles className="w-4 h-4 text-[#0E6E55]" />
+              <h4 className="text-xs font-bold text-ink uppercase tracking-wider flex items-center gap-1.5 mb-1">
+                <Sparkles className="w-4 h-4 text-brand" />
                 Showroom Studio
               </h4>
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-muted">
                 Generate high-resolution product photography with raytraced lighting presets.
               </p>
             </div>
 
             {/* Presets */}
             <div className="space-y-2">
-              <span className="text-[11px] font-bold text-gray-700">Lighting Setup</span>
+              <span className="text-[11px] font-bold text-ink-2">Lighting Setup</span>
               <div className="grid grid-cols-3 gap-2">
                 {[
                   { id: "softbox", name: "Softbox Studio", icon: "💡" },
@@ -926,8 +949,8 @@ export function Live3DPanel({
                     }}
                     className={`p-2 rounded-xl border text-center transition ${
                       renderPreset === p.id
-                        ? "border-[#0E6E55] bg-[#ECFDF5] text-[#0E6E55] font-bold ring-2 ring-[#0E6E55]/20"
-                        : "border-gray-200 text-gray-600 hover:border-gray-300"
+                        ? "border-brand bg-brand-soft text-brand font-bold ring-2 ring-brand/20"
+                        : "border-line text-ink-2 hover:border-line-strong"
                     }`}
                   >
                     <div className="text-base mb-0.5">{p.icon}</div>
@@ -939,7 +962,7 @@ export function Live3DPanel({
 
             {/* Mannequin Form & Finish */}
             <div className="space-y-2">
-              <span className="text-[11px] font-bold text-gray-700">Mannequin Form</span>
+              <span className="text-[11px] font-bold text-ink-2">Mannequin Form</span>
               <div className="grid grid-cols-3 gap-2">
                 {[
                   { id: "slate", name: "Matte Slate", sub: "Boutique Grey" },
@@ -953,30 +976,30 @@ export function Live3DPanel({
                     onClick={() => setMannequinFinish(f.id as any)}
                     className={`p-2 rounded-xl border text-center transition ${
                       mannequinFinish === f.id
-                        ? "border-[#0E6E55] bg-[#ECFDF5] text-[#0E6E55] font-bold ring-2 ring-[#0E6E55]/20"
-                        : "border-gray-200 text-gray-600 hover:border-gray-300"
+                        ? "border-brand bg-brand-soft text-brand font-bold ring-2 ring-brand/20"
+                        : "border-line text-ink-2 hover:border-line-strong"
                     }`}
                   >
                     <div className="text-[10.5px] font-bold">{f.name}</div>
-                    <div className="text-[8.5px] text-gray-400">{f.sub}</div>
+                    <div className="text-[8.5px] text-muted">{f.sub}</div>
                   </button>
                 ))}
               </div>
             </div>
 
             {/* Render details */}
-            <div className="p-3 bg-gray-50 rounded-xl border border-gray-200 space-y-1.5 text-xs">
-              <div className="flex justify-between text-gray-500">
+            <div className="p-3 bg-surface rounded-xl border border-line space-y-1.5 text-xs">
+              <div className="flex justify-between text-muted">
                 <span>Output Resolution</span>
-                <span className="font-bold text-gray-800">4096 x 4096 (4K)</span>
+                <span className="font-bold text-ink">4096 x 4096 (4K)</span>
               </div>
-              <div className="flex justify-between text-gray-500">
+              <div className="flex justify-between text-muted">
                 <span>Color Space</span>
-                <span className="font-bold text-gray-800">ACES Filmic</span>
+                <span className="font-bold text-ink">ACES Filmic</span>
               </div>
-              <div className="flex justify-between text-gray-500">
+              <div className="flex justify-between text-muted">
                 <span>Format</span>
-                <span className="font-bold text-gray-800">PNG with Alpha</span>
+                <span className="font-bold text-ink">PNG with Alpha</span>
               </div>
             </div>
           </div>
@@ -985,7 +1008,7 @@ export function Live3DPanel({
             <button
               type="button"
               onClick={handleCaptureSnapshot}
-              className="w-full bg-[#0E6E55] hover:bg-[#09503E] text-white py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-xs"
+              className="w-full bg-brand hover:bg-brand-hover text-white py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-xs"
             >
               <Download className="w-4 h-4" />
               <span>Export Showroom Render</span>
@@ -993,7 +1016,7 @@ export function Live3DPanel({
             <button
               type="button"
               onClick={() => setActiveTab("view")}
-              className="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 py-2 rounded-xl text-xs font-semibold transition"
+              className="w-full bg-surface-2 hover:bg-line text-ink-2 py-2 rounded-xl text-xs font-semibold transition"
             >
               Return to 3D Viewport
             </button>

@@ -1,15 +1,15 @@
-import { ModulePlaceholder } from "@/components/layout/ModulePlaceholder";
+import { ProjectsDirectory } from "@/components/projects/ProjectsDirectory";
 
 export const metadata = {
-  title: "Project Lifecycle Management — Fashion-Lab",
+  title: "Project Portfolio & Lifecycle — Fashion-Lab",
+  description: "Bespoke digital apparel portfolio, CAD pattern revisions, and production tech pack repository",
 };
 
-export default function Page() {
-  return (
-    <ModulePlaceholder
-      moduleName="Project Lifecycle Management"
-      milestone="Coming in Module 3"
-      description="6-stage lifecycle progress tracker (Brief -> Delivery), collaborative project files, revision history, and client shareable approval links."
-    />
-  );
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<{ new?: string }>;
+}) {
+  const { new: openCreate } = await searchParams;
+  return <ProjectsDirectory openCreate={openCreate === "1"} />;
 }

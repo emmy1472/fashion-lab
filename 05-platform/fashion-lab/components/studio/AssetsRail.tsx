@@ -271,7 +271,7 @@ export function AssetsRail({
       );
     } catch {
       return (
-        <svg viewBox="0 0 100 100" className="w-8 h-8 text-gray-500" fill="currentColor">
+        <svg viewBox="0 0 100 100" className="w-8 h-8 text-muted" fill="currentColor">
           <path d="M30 20 L40 10 L60 10 L70 20 L90 35 L80 50 L70 42 L70 90 L30 90 L30 42 L20 50 L10 35 Z" />
         </svg>
       );
@@ -304,15 +304,15 @@ export function AssetsRail({
     (scratchConfig?.explodeAmount || 0) > 10;
 
   return (
-    <div className="w-[235px] bg-white border-r border-gray-200/80 flex flex-col h-full select-none shrink-0">
+    <div className="w-[235px] bg-white border-r border-line/80 flex flex-col h-full select-none shrink-0">
       {/* Aligned Column Header */}
-      <div className="h-11 px-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-        <h3 className="text-xs font-bold text-gray-900 tracking-tight">Assets</h3>
+      <div className="h-11 px-4 border-b border-line flex items-center justify-between shrink-0">
+        <h3 className="text-xs font-bold text-ink tracking-tight">Assets</h3>
         {activeCategoryFilter && (
           <button
             type="button"
             onClick={() => setActiveCategoryFilter(null)}
-            className="flex items-center gap-1 text-[10px] font-semibold text-[#0E6E55] bg-[#ECFDF5] px-2 py-0.5 rounded-md"
+            className="flex items-center gap-1 text-[10px] font-semibold text-brand bg-brand-soft px-2 py-0.5 rounded-md"
           >
             <span>{activeCategoryFilter}</span>
             <X className="w-2.5 h-2.5" />
@@ -321,7 +321,7 @@ export function AssetsRail({
       </div>
 
       {/* Horizontal Sub-Tabs (Garments | Graphics | Logos | Patterns) */}
-      <div className="px-3 border-b border-gray-100 flex items-center justify-between shrink-0">
+      <div className="px-3 border-b border-line flex items-center justify-between shrink-0">
         {[
           { id: "garments", label: "Garments" },
           { id: "graphics", label: "Graphics" },
@@ -336,8 +336,8 @@ export function AssetsRail({
               onClick={() => setActiveTab(tab.id as any)}
               className={`py-2 px-1 text-[11px] font-semibold transition border-b-2 ${
                 isActive
-                  ? "text-[#0E6E55] border-[#0E6E55] font-bold"
-                  : "text-gray-400 hover:text-gray-700 border-transparent"
+                  ? "text-brand border-brand font-bold"
+                  : "text-muted hover:text-ink-2 border-transparent"
               }`}
             >
               {tab.label}
@@ -349,13 +349,13 @@ export function AssetsRail({
       {/* Compact Search Bar */}
       <div className="px-3 py-2 shrink-0">
         <div className="relative">
-          <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+          <Search className="w-3.5 h-3.5 text-muted absolute left-2.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={`Search ${activeTab}...`}
-            className="w-full bg-[#F8F9FA] border border-gray-200/80 rounded-lg pl-8 pr-2.5 py-1.5 text-[11px] text-gray-900 placeholder-gray-400 focus:outline-none focus:border-[#0E6E55]"
+            className="w-full bg-surface border border-line/80 rounded-lg pl-8 pr-2.5 py-1.5 text-[11px] text-ink placeholder-muted focus:outline-none focus:border-brand"
           />
         </div>
       </div>
@@ -370,16 +370,16 @@ export function AssetsRail({
               onClick={() => onSelectGarment("custom-scratch")}
               className={`w-full p-2.5 rounded-xl border text-left transition-all flex items-center justify-between group cursor-pointer ${
                 isScratchSelected
-                  ? "border-[#0E6E55] bg-[#062D24] text-white shadow-sm"
-                  : "border-dashed border-[#10B981]/70 bg-[#ECFDF5]/60 hover:bg-[#ECFDF5] text-gray-900"
+                  ? "border-brand bg-brand-strong text-white shadow-sm"
+                  : "border-dashed border-success/70 bg-brand-soft/60 hover:bg-brand-soft text-ink"
               }`}
             >
               <div className="flex items-center gap-2.5 min-w-0">
                 <div
                   className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition ${
                     isScratchSelected
-                      ? "bg-[#10B981] text-[#062D24]"
-                      : "bg-[#0E6E55] text-white"
+                      ? "bg-success text-brand-strong"
+                      : "bg-brand text-white"
                   }`}
                 >
                   <Scissors className="w-4 h-4" />
@@ -390,7 +390,7 @@ export function AssetsRail({
                   </span>
                   <p
                     className={`text-[9.5px] truncate ${
-                      isScratchSelected ? "text-emerald-200/90" : "text-gray-500"
+                      isScratchSelected ? "text-emerald-200/90" : "text-muted"
                     }`}
                   >
                     3-Step Shape, Cut & Join
@@ -401,7 +401,7 @@ export function AssetsRail({
                 className={`w-3.5 h-3.5 shrink-0 ${
                   isScratchSelected
                     ? "text-emerald-300 rotate-90"
-                    : "text-[#0E6E55]"
+                    : "text-brand"
                 } transition-transform`}
               />
             </button>
@@ -413,16 +413,16 @@ export function AssetsRail({
                 onClick={onOpenDemo}
                 className="w-full py-1.5 px-2.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-white flex items-center justify-center gap-1.5 text-[10.5px] font-bold transition shadow-2xs cursor-pointer"
               >
-                <Play className="w-3 h-3 fill-[#10B981] text-[#10B981]" />
+                <Play className="w-3 h-3 fill-success text-success" />
                 <span>Watch 24s Video Tutorial</span>
               </button>
             )}
 
             {/* Simple 3-Step Guided Builder (1. Shape -> 2. Cut -> 3. Join) */}
             {isScratchSelected && scratchConfig && (
-              <div className="p-2.5 rounded-xl border border-emerald-200/90 bg-[#F8FAFC] space-y-2.5">
+              <div className="p-2.5 rounded-xl border border-brand/20/90 bg-surface space-y-2.5">
                 {/* 3-Step Segmented Tabs */}
-                <div className="grid grid-cols-3 gap-1 bg-white p-0.5 rounded-lg border border-gray-200">
+                <div className="grid grid-cols-3 gap-1 bg-white p-0.5 rounded-lg border border-line">
                   {[
                     { id: "shape", label: "1. Shape" },
                     { id: "cut", label: "2. Cut" },
@@ -441,8 +441,8 @@ export function AssetsRail({
                       }}
                       className={`py-1.5 rounded-md text-[10px] font-bold transition ${
                         scratchStep === st.id
-                          ? "bg-[#0E6E55] text-white shadow-2xs"
-                          : "text-gray-500 hover:text-gray-900"
+                          ? "bg-brand text-white shadow-2xs"
+                          : "text-muted hover:text-ink"
                       }`}
                     >
                       {st.label}
@@ -455,7 +455,7 @@ export function AssetsRail({
                   <div className="space-y-2.5">
                     {/* Neckline */}
                     <div>
-                      <span className="text-[9.5px] font-bold text-gray-600 block mb-1">
+                      <span className="text-[9.5px] font-bold text-ink-2 block mb-1">
                         Neckline
                       </span>
                       <div className="grid grid-cols-3 gap-1">
@@ -481,8 +481,8 @@ export function AssetsRail({
                             }
                             className={`py-1 px-1 rounded-md text-[10px] font-semibold border transition ${
                               scratchConfig.neckType === n.id
-                                ? "bg-[#0E6E55] text-white border-[#0E6E55] font-bold"
-                                : "bg-white text-gray-600 border-gray-200 hover:border-gray-300"
+                                ? "bg-brand text-white border-brand font-bold"
+                                : "bg-white text-ink-2 border-line hover:border-line-strong"
                             }`}
                           >
                             {n.label}
@@ -493,7 +493,7 @@ export function AssetsRail({
 
                     {/* Sleeves */}
                     <div>
-                      <span className="text-[9.5px] font-bold text-gray-600 block mb-1">
+                      <span className="text-[9.5px] font-bold text-ink-2 block mb-1">
                         Sleeves
                       </span>
                       <div className="grid grid-cols-3 gap-1">
@@ -512,8 +512,8 @@ export function AssetsRail({
                             }
                             className={`py-1 px-1 rounded-md text-[10px] font-semibold border transition ${
                               scratchConfig.sleeveType === s.id
-                                ? "bg-[#0E6E55] text-white border-[#0E6E55] font-bold"
-                                : "bg-white text-gray-600 border-gray-200 hover:border-gray-300"
+                                ? "bg-brand text-white border-brand font-bold"
+                                : "bg-white text-ink-2 border-line hover:border-line-strong"
                             }`}
                           >
                             {s.label}
@@ -524,7 +524,7 @@ export function AssetsRail({
 
                     {/* Friendly Fit & Length */}
                     <div>
-                      <span className="text-[9.5px] font-bold text-gray-600 block mb-1">
+                      <span className="text-[9.5px] font-bold text-ink-2 block mb-1">
                         Fit & Length
                       </span>
                       <div className="grid grid-cols-2 gap-1">
@@ -541,8 +541,8 @@ export function AssetsRail({
                             onClick={() => applyFriendlyFit(f.id as any)}
                             className={`py-1 px-1.5 rounded-md text-[10px] font-semibold border transition ${
                               currentFitId === f.id
-                                ? "bg-[#0E6E55] text-white border-[#0E6E55] font-bold"
-                                : "bg-white text-gray-600 border-gray-200 hover:border-gray-300"
+                                ? "bg-brand text-white border-brand font-bold"
+                                : "bg-white text-ink-2 border-line hover:border-line-strong"
                             }`}
                           >
                             {f.label}
@@ -556,7 +556,7 @@ export function AssetsRail({
                 {/* STEP 2: CUT & DRAW PANELS */}
                 {scratchStep === "cut" && (
                   <div className="space-y-2.5">
-                    <p className="text-[10px] text-gray-500 leading-snug">
+                    <p className="text-[10px] text-muted leading-snug">
                       Pick a cut style below or drag across the clothes to slice into colorable panels:
                     </p>
 
@@ -582,8 +582,8 @@ export function AssetsRail({
                             }
                             className={`py-1.5 px-1.5 rounded-md text-[10px] font-semibold border transition truncate ${
                               active
-                                ? "bg-[#0E6E55] text-white border-[#0E6E55] font-bold"
-                                : "bg-white text-gray-600 border-gray-200 hover:border-gray-300"
+                                ? "bg-brand text-white border-brand font-bold"
+                                : "bg-white text-ink-2 border-line hover:border-line-strong"
                             }`}
                           >
                             {c.label}
@@ -598,7 +598,7 @@ export function AssetsRail({
                         onClick={() =>
                           onActivateCanvasTool && onActivateCanvasTool("cut")
                         }
-                        className="flex-1 py-1.5 px-2 rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 flex items-center justify-center gap-1 text-[10px] font-bold transition"
+                        className="flex-1 py-1.5 px-2 rounded-lg bg-danger-soft hover:bg-red-100 border border-danger/30 text-danger flex items-center justify-center gap-1 text-[10px] font-bold transition"
                       >
                         <Scissors className="w-3 h-3" />
                         <span>Knife Cut</span>
@@ -608,7 +608,7 @@ export function AssetsRail({
                         onClick={() =>
                           onActivateCanvasTool && onActivateCanvasTool("draw")
                         }
-                        className="flex-1 py-1.5 px-2 rounded-lg bg-[#ECFDF5] hover:bg-emerald-100 border border-emerald-200 text-[#0E6E55] flex items-center justify-center gap-1 text-[10px] font-bold transition"
+                        className="flex-1 py-1.5 px-2 rounded-lg bg-brand-soft hover:bg-brand-soft-hover border border-brand/20 text-brand flex items-center justify-center gap-1 text-[10px] font-bold transition"
                       >
                         <PenTool className="w-3 h-3" />
                         <span>Draw Panel</span>
@@ -619,7 +619,7 @@ export function AssetsRail({
                       <button
                         type="button"
                         onClick={() => updateScratch({ customCuts: [] })}
-                        className="w-full py-1 text-[9.5px] font-semibold text-red-600 hover:underline flex items-center justify-center gap-1"
+                        className="w-full py-1 text-[9.5px] font-semibold text-danger hover:underline flex items-center justify-center gap-1"
                       >
                         <RotateCcw className="w-2.5 h-2.5" />
                         <span>Reset Custom Knife Cuts</span>
@@ -631,7 +631,7 @@ export function AssetsRail({
                 {/* STEP 3: JOIN & DETAILS */}
                 {scratchStep === "join" && (
                   <div className="space-y-2.5">
-                    <p className="text-[10px] text-gray-500 leading-snug">
+                    <p className="text-[10px] text-muted leading-snug">
                       Inspect separated pattern pieces with sewing threads or join them into a finished garment:
                     </p>
 
@@ -646,8 +646,8 @@ export function AssetsRail({
                         }
                         className={`py-2 px-2 rounded-lg border text-[10px] font-bold flex flex-col items-center gap-1 transition ${
                           isSeparated
-                            ? "bg-[#0284c7] text-white border-[#0284c7]"
-                            : "bg-white text-gray-700 border-gray-200 hover:border-gray-300"
+                            ? "bg-info text-white border-info"
+                            : "bg-white text-ink-2 border-line hover:border-line-strong"
                         }`}
                       >
                         <Scissors className="w-3.5 h-3.5" />
@@ -659,8 +659,8 @@ export function AssetsRail({
                         onClick={handleJoinAllPieces}
                         className={`py-2 px-2 rounded-lg border text-[10px] font-bold flex flex-col items-center gap-1 transition ${
                           !isSeparated
-                            ? "bg-[#0E6E55] text-white border-[#0E6E55]"
-                            : "bg-white text-gray-700 border-gray-200 hover:border-[#0E6E55]"
+                            ? "bg-brand text-white border-brand"
+                            : "bg-white text-ink-2 border-line hover:border-brand"
                         }`}
                       >
                         <Check className="w-3.5 h-3.5" />
@@ -670,7 +670,7 @@ export function AssetsRail({
 
                     {/* Add-on Garment Details */}
                     <div>
-                      <span className="text-[9.5px] font-bold text-gray-600 block mb-1">
+                      <span className="text-[9.5px] font-bold text-ink-2 block mb-1">
                         Garment Details
                       </span>
                       <div className="grid grid-cols-2 gap-1">
@@ -695,8 +695,8 @@ export function AssetsRail({
                               }
                               className={`py-1 px-2 rounded-md text-[10px] font-semibold border transition flex items-center justify-between ${
                                 active
-                                  ? "bg-[#ECFDF5] border-[#0E6E55] text-[#0E6E55] font-bold"
-                                  : "bg-white border-gray-200 text-gray-600"
+                                  ? "bg-brand-soft border-brand text-brand font-bold"
+                                  : "bg-white border-line text-ink-2"
                               }`}
                             >
                               <span>{part.label}</span>
@@ -713,7 +713,7 @@ export function AssetsRail({
 
             {/* Pre-Built Templates Header */}
             <div className="flex items-center justify-between px-0.5">
-              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+              <span className="text-[10px] font-bold text-muted uppercase tracking-wider">
                 Ready-Made Templates
               </span>
             </div>
@@ -729,8 +729,8 @@ export function AssetsRail({
                     onClick={() => onSelectGarment(item.id)}
                     className={`p-1.5 rounded-xl border text-center cursor-pointer transition-all flex flex-col items-center ${
                       isSelected
-                        ? "border-[#0E6E55] bg-[#ECFDF5]/60 ring-1 ring-[#0E6E55]"
-                        : "border-gray-200/70 bg-[#F8F9FA]/60 hover:border-gray-300 hover:bg-white"
+                        ? "border-brand bg-brand-soft/60 ring-1 ring-brand"
+                        : "border-line/70 bg-surface/60 hover:border-line-strong hover:bg-white"
                     }`}
                   >
                     <div className="w-full h-12 flex items-center justify-center p-0.5 mb-1 overflow-hidden pointer-events-none">
@@ -738,7 +738,7 @@ export function AssetsRail({
                     </div>
                     <span
                       className={`text-[10px] font-semibold truncate w-full leading-tight ${
-                        isSelected ? "text-[#0E6E55] font-bold" : "text-gray-700"
+                        isSelected ? "text-brand font-bold" : "text-ink-2"
                       }`}
                     >
                       {item.displayName || item.name}
@@ -749,8 +749,8 @@ export function AssetsRail({
             </div>
 
             {/* Clean Categories List matching mockup */}
-            <div className="pt-2 border-t border-gray-100">
-              <p className="text-[11px] font-bold text-gray-800 mb-1.5 px-1">
+            <div className="pt-2 border-t border-line">
+              <p className="text-[11px] font-bold text-ink mb-1.5 px-1">
                 Categories
               </p>
               <div className="space-y-0.5">
@@ -766,19 +766,19 @@ export function AssetsRail({
                       }
                       className={`w-full flex items-center justify-between py-1.5 px-2 rounded-lg text-[11px] font-medium transition ${
                         isActive
-                          ? "bg-[#ECFDF5] text-[#0E6E55] font-bold"
-                          : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                          ? "bg-brand-soft text-brand font-bold"
+                          : "text-ink-2 hover:bg-surface hover:text-ink"
                       }`}
                     >
                       <div className="flex items-center gap-2">
                         <Icon
                           className={`w-3.5 h-3.5 ${
-                            isActive ? "text-[#0E6E55]" : "text-gray-400"
+                            isActive ? "text-brand" : "text-muted"
                           }`}
                         />
                         <span>{cat.label}</span>
                       </div>
-                      <ChevronRight className="w-3.5 h-3.5 text-gray-400" />
+                      <ChevronRight className="w-3.5 h-3.5 text-muted" />
                     </button>
                   );
                 })}
@@ -796,10 +796,10 @@ export function AssetsRail({
                 type="button"
                 onClick={() => onAddEmblem(art.id)}
                 title={`Add ${art.name}`}
-                className="p-2 rounded-xl border border-gray-200/80 bg-[#F8F9FA] hover:border-[#0E6E55] hover:bg-[#ECFDF5] transition flex flex-col items-center justify-center text-center group"
+                className="p-2 rounded-xl border border-line/80 bg-surface hover:border-brand hover:bg-brand-soft transition flex flex-col items-center justify-center text-center group"
               >
-                <Sparkles className="w-5 h-5 text-[#0E6E55] group-hover:scale-110 transition-transform" />
-                <span className="text-[9px] font-medium text-gray-700 truncate w-full mt-1">
+                <Sparkles className="w-5 h-5 text-brand group-hover:scale-110 transition-transform" />
+                <span className="text-[9px] font-medium text-ink-2 truncate w-full mt-1">
                   {art.name || art.id}
                 </span>
               </button>
@@ -809,11 +809,11 @@ export function AssetsRail({
 
         {/* Logos Upload Tab */}
         {activeTab === "logos" && (
-          <div className="p-4 border border-dashed border-gray-300 rounded-xl text-center hover:border-[#0E6E55] transition bg-[#F8F9FA]">
-            <Upload className="w-5 h-5 text-gray-400 mx-auto mb-1.5" />
-            <p className="text-[11px] font-bold text-gray-800">Upload Artwork</p>
-            <p className="text-[10px] text-gray-400 mb-2.5">SVG, PNG, JPG</p>
-            <label className="inline-block bg-[#0E6E55] hover:bg-[#09503E] text-white text-[11px] font-semibold px-3 py-1.5 rounded-lg cursor-pointer transition">
+          <div className="p-4 border border-dashed border-line-strong rounded-xl text-center hover:border-brand transition bg-surface">
+            <Upload className="w-5 h-5 text-muted mx-auto mb-1.5" />
+            <p className="text-[11px] font-bold text-ink">Upload Artwork</p>
+            <p className="text-[10px] text-muted mb-2.5">SVG, PNG, JPG</p>
+            <label className="inline-block bg-brand hover:bg-brand-hover text-white text-[11px] font-semibold px-3 py-1.5 rounded-lg cursor-pointer transition">
               Browse Files
               <input
                 type="file"
@@ -841,14 +841,14 @@ export function AssetsRail({
                   onClick={() => onSelectPattern(pat.id)}
                   className={`p-2 rounded-lg border text-left transition ${
                     isSelected
-                      ? "border-[#0E6E55] bg-[#ECFDF5] text-[#0E6E55] font-bold"
-                      : "border-gray-200/80 bg-[#F8F9FA] hover:bg-white text-gray-700"
+                      ? "border-brand bg-brand-soft text-brand font-bold"
+                      : "border-line/80 bg-surface hover:bg-white text-ink-2"
                   }`}
                 >
                   <p className="text-[11px] font-semibold capitalize truncate">
                     {pat.name || pat.id}
                   </p>
-                  <p className="text-[9px] text-gray-400 capitalize">
+                  <p className="text-[9px] text-muted capitalize">
                     {pat.group || "Pattern"}
                   </p>
                 </button>

@@ -1,5 +1,7 @@
-import Link from "next/link";
-import { ArrowLeft, Clock, Sparkles } from "lucide-react";
+import { ArrowLeft, Construction } from "lucide-react";
+import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { ButtonLink } from "@/components/ui/button";
 
 interface Props {
   moduleName: string;
@@ -7,34 +9,19 @@ interface Props {
   description: string;
 }
 
-export function ModulePlaceholder({
-  moduleName,
-  milestone,
-  description,
-}: Props) {
+/** Shown for areas that are planned but not built yet. Says so plainly. */
+export function ModulePlaceholder({ moduleName, milestone, description }: Props) {
   return (
-    <div className="bg-white rounded-2xl p-10 border border-gray-200/80 shadow-xs max-w-3xl mx-auto my-8 text-center">
-      <div className="w-14 h-14 rounded-2xl bg-[#ECFDF5] border border-emerald-200 text-[#0E6E55] flex items-center justify-center mx-auto mb-4">
-        <Sparkles className="w-7 h-7" />
+    <Card className="max-w-xl mx-auto my-8 p-10 text-center">
+      <div className="size-12 rounded-xl bg-surface-2 text-ink-2 flex items-center justify-center mx-auto mb-4">
+        <Construction className="size-6" aria-hidden />
       </div>
-
-      <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-[#ECFDF5] text-[#0E6E55] mb-3">
-        <Clock className="w-3.5 h-3.5" />
-        {milestone}
-      </div>
-
-      <h2 className="text-2xl font-bold text-gray-900 mb-2">{moduleName}</h2>
-      <p className="text-sm text-gray-500 max-w-md mx-auto leading-relaxed mb-6">
-        {description}
-      </p>
-
-      <Link
-        href="/dashboard"
-        className="inline-flex items-center gap-2 bg-[#0E6E55] hover:bg-[#09503E] text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition shadow-sm"
-      >
-        <ArrowLeft className="w-4 h-4" />
-        <span>Return to Dashboard</span>
-      </Link>
-    </div>
+      <Badge className="mb-3">Not built yet · {milestone}</Badge>
+      <h1 className="text-xl font-semibold text-ink mb-2">{moduleName}</h1>
+      <p className="text-sm text-ink-2 max-w-md mx-auto mb-6">{description}</p>
+      <ButtonLink href="/dashboard" variant="secondary">
+        <ArrowLeft aria-hidden /> Back to home
+      </ButtonLink>
+    </Card>
   );
 }

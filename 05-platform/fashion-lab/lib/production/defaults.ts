@@ -1,0 +1,160 @@
+/**
+ * Default project data. Kept free of "use client" so API route handlers (server) and the
+ * client store can both import real values.
+ */
+
+import type {
+  BodyMeasurementProfile,
+  GarmentComponent,
+  AssemblyStep,
+  FinishingSpecification,
+} from "./types";
+
+export const DEFAULT_MEASUREMENT_PROFILE: BodyMeasurementProfile = {
+  id: 'profile_default_m',
+  name: 'Standard Fit Medium (Male / Unisex)',
+  gender: 'unisex',
+  unit: 'cm',
+  height: 178,
+  neckGirth: 39,
+  shoulderWidth: 44,
+  chestGirth: 98,
+  waistGirth: 84,
+  hipGirth: 98,
+  armholeCircumference: 43,
+  sleeveLength: 22,
+  bicepCircumference: 33,
+  wristCircumference: 18,
+  frontLength: 68,
+  backLength: 70,
+  inseam: 81,
+  outseam: 104,
+  thighCircumference: 56,
+  kneeCircumference: 38,
+  ankleCircumference: 24,
+  updatedAt: new Date().toISOString(),
+};
+
+export const STANDARD_COMPONENTS: GarmentComponent[] = [
+  {
+    id: 'comp_collar_rib',
+    name: '1x1 Cotton Rib Neckband',
+    type: 'collar-rib',
+    materialName: '1x1 Spandex Rib Knit (95% Cotton / 5% Elastane)',
+    quantity: 1,
+    unit: 'strip',
+    targetPieceId: 'piece_collar_band',
+    prepInstructions: 'Cut cross-grain, fold lengthwise right sides facing out, press flat with steam.',
+    status: 'ready',
+  },
+  {
+    id: 'comp_shoulder_tape',
+    name: 'Clear Elastic Shoulder Stabilizer Tape',
+    type: 'trim',
+    materialName: 'Mobilon 6mm clear polyurethane tape',
+    quantity: 2,
+    unit: 'strips (16cm each)',
+    targetPieceId: 'piece_front_bodice',
+    prepInstructions: 'Insert inside front shoulder seam to prevent hanger sag and shoulder seam blowout.',
+    status: 'prepared',
+  },
+  {
+    id: 'comp_thread_serger',
+    name: 'Spun Polyester Overlock Thread (40 wt)',
+    type: 'thread',
+    materialName: 'Tex 27 100% Core-Spun Polyester',
+    quantity: 4,
+    unit: 'cones (matching color)',
+    prepInstructions: 'Thread 4-thread serger with balanced upper/lower looper tensions.',
+    status: 'ready',
+  },
+  {
+    id: 'comp_care_label',
+    name: 'Satin Woven Brand & Care Label',
+    type: 'label',
+    materialName: 'Woven damask micro-satin',
+    quantity: 1,
+    unit: 'piece',
+    targetPieceId: 'piece_back_bodice',
+    prepInstructions: 'Center horizontally 25mm below back neck seam line.',
+    status: 'pending',
+  },
+];
+
+export const STANDARD_ASSEMBLY_SEQUENCE: AssemblyStep[] = [
+  {
+    stepNumber: 1,
+    title: 'Reinforce & Join Shoulder Seams',
+    sewingRelationshipIds: ['seam_shoulder_l', 'seam_shoulder_r'],
+    instruction: 'Place Front Bodice and Back Bodice right sides facing. Lay clear elastic stabilizer tape on front shoulder seam allowance. Serge shoulder seams using 4-thread overlock with 10mm seam allowance.',
+    machineType: 'overlock-4thread',
+    stitchDensitySpi: 14,
+    threadType: 'Tex 27 Core Spun Polyester',
+    completed: true,
+  },
+  {
+    stepNumber: 2,
+    title: 'Prepare & Attach Ribbed Collar Band',
+    sewingRelationshipIds: ['seam_collar_ring', 'seam_collar_front', 'seam_collar_back'],
+    instruction: 'Join short ends of neckband to form closed loop. Fold band in half lengthwise with wrong sides touching. Match 4 quarter notches to center front, center back, and shoulder seams. Stretch neckband evenly to fit neckline while serging.',
+    machineType: 'overlock-4thread',
+    stitchDensitySpi: 14,
+    threadType: 'Tex 27 Core Spun Polyester',
+    completed: false,
+  },
+  {
+    stepNumber: 3,
+    title: 'Insert Sleeves Flat into Armholes',
+    sewingRelationshipIds: [
+      'seam_sleeve_cap_l_front',
+      'seam_sleeve_cap_l_back',
+      'seam_sleeve_cap_r_front',
+      'seam_sleeve_cap_r_back',
+    ],
+    instruction: 'Open bodice flat at shoulder seams. Align sleeve crown notch with shoulder seam. Match front and back double notches. Serge sleeve cap into armhole scye without stretching the bodice.',
+    machineType: 'overlock-4thread',
+    stitchDensitySpi: 14,
+    threadType: 'Tex 27 Core Spun Polyester',
+    completed: false,
+  },
+  {
+    stepNumber: 4,
+    title: 'Continuous Side & Underarm Seams',
+    sewingRelationshipIds: ['seam_side_l', 'seam_side_r', 'seam_sleeve_underarm_l', 'seam_sleeve_underarm_r'],
+    instruction: 'Fold garment right sides facing. Align underarm seam cross-junctions and hem edges. Serge in one continuous pass from sleeve cuff through underarm down to bottom hem.',
+    machineType: 'overlock-4thread',
+    stitchDensitySpi: 14,
+    threadType: 'Tex 27 Core Spun Polyester',
+    completed: false,
+  },
+  {
+    stepNumber: 5,
+    title: 'Coverstitch Sleeve & Bottom Hems',
+    sewingRelationshipIds: [],
+    instruction: 'Turn up sleeve cuffs (20mm) and bottom hem (25mm) towards inside. Press with iron. Finish using 2-needle bottom coverstitch with stretch differential feed set to 1.1 to prevent wavy hems.',
+    machineType: 'coverstitch',
+    stitchDensitySpi: 12,
+    threadType: 'Tex 27 Looper Textured Poly',
+    completed: false,
+  },
+];
+
+export const STANDARD_FINISHING: FinishingSpecification = {
+  ironingTemperatureC: 160,
+  steamLevel: 'medium',
+  pressDirections: [
+    { seamName: 'Shoulder Seams', direction: 'towards-back', notes: 'Press flat towards back bodice so front line stays clean.' },
+    { seamName: 'Armhole Insertion Seams', direction: 'towards-front', notes: 'Press seam allowances outwards toward sleeve cap.' },
+    { seamName: 'Side & Underarm Seams', direction: 'towards-back', notes: 'Press seam allowance toward back bodice.' },
+    { seamName: 'Neckband Seam', direction: 'downward', notes: 'Press neckline seam allowance downward onto body; optional topstitch.' },
+    { seamName: 'Bottom Hem', direction: 'upward', notes: 'Press 25mm fold crisp and flat before packaging.' },
+  ],
+  hemFinishMethod: '2-needle 6mm bottom coverstitch with differential feed',
+  inspectionChecklist: [
+    { id: 'qa_neck_pucker', label: 'Neckband lies completely flat with zero wavy rippling or puckering', critical: true, verified: true },
+    { id: 'qa_shoulder_balance', label: 'Shoulder seams are symmetrical and align exactly with body landmarks', critical: true, verified: true },
+    { id: 'qa_seam_stretch', label: 'Overlock seams stretch under tension without thread snaps or popping', critical: true, verified: false },
+    { id: 'qa_measurement_spec', label: 'Finished garment chest, length, and sleeve measurements match tech pack within ±5mm tolerance', critical: true, verified: false },
+    { id: 'qa_loose_threads', label: 'All chain-off overlock thread tails are securely tucked or trimmed', critical: false, verified: false },
+  ],
+};

@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useMemo, useCallback, useEffect } from "react";
-import { StudioHeader } from "./StudioHeader";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import { StudioHeader, StudioMode, LayoutMode } from "./StudioHeader";
 import { AssetsRail, ScratchConfig } from "./AssetsRail";
 import {
   CanvasStage,
@@ -14,6 +14,10 @@ import { PropertiesInspector } from "./PropertiesInspector";
 import { Live3DPanel } from "./Live3DPanel";
 import { ScratchDemoModal } from "./ScratchDemoModal";
 import { OutfitBuilderModal } from "./OutfitBuilderModal";
+import { PatternEditor2D } from "@/components/production/PatternEditor2D";
+import { PatternDriven3DViewer } from "@/components/production/PatternDriven3DViewer";
+import { StudioPropertiesDrawer } from "@/components/production/StudioPropertiesDrawer";
+import { useGarmentProject, garmentStore } from "@/lib/production/store";
 
 // Core studio engines from cloPRO
 import {
@@ -42,6 +46,49 @@ interface StudioSnapshot {
 }
 
 export function StudioWorkspace({ initialGarmentId = "track-jacket" }: Props) {
+  const project = useGarmentProject();
+  const [studioMode, setStudioMode] = useState<StudioMode>("cad");
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("split50");
+  const [splitRatio, setSplitRatio] = useState<number>(0.50);
+  const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
+  const splitWorkspaceRef = useRef<HTMLDivElement>(null);
+
+  const handleLayoutChange = useCallback((mode: LayoutMode) => {
+    setLayoutMode(mode);
+    if (mode === 'split' || mode === 'split50') setSplitRatio(0.50);
+    else if (mode === 'split60') setSplitRatio(0.60);
+    else if (mode === 'split40') setSplitRatio(0.40);
+    else if (mode === 'max3d') setSplitRatio(1.0);
+    else if (mode === 'max2d') setSplitRatio(0.0);
+  }, []);
+
+  const handleSplitterMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDraggingSplitter(true);
+  }, []);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDraggingSplitter || !splitWorkspaceRef.current) return;
+      const rect = splitWorkspaceRef.current.getBoundingClientRect();
+      const newRatio = Math.max(0.20, Math.min(0.80, (e.clientX - rect.left) / rect.width));
+      setSplitRatio(Number(newRatio.toFixed(3)));
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingSplitter(false);
+    };
+
+    if (isDraggingSplitter) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingSplitter]);
+
   const [selectedGarmentId, setSelectedGarmentId] = useState(initialGarmentId);
   const [scratchConfig, setScratchConfig] = useState<ScratchConfig>(
     () => JSON.parse(JSON.stringify(DEFAULT_SCRATCH_CONFIG)) as ScratchConfig
@@ -1050,154 +1097,202 @@ export function StudioWorkspace({ initialGarmentId = "track-jacket" }: Props) {
   };
 
   return (
-    <div className="flex flex-col h-screen w-full bg-[#F8F9FA] overflow-hidden">
-      {/* Studio Header matching mockup */}
+    <div className="flex flex-col h-full w-full bg-surface overflow-hidden">
+      {/* Studio toolbar (project identity and stage navigation live in the project shell) */}
       <StudioHeader
-        projectName={
-          selectedGarmentId === "custom-scratch"
-            ? "Custom Scratch Design"
-            : "Urban Jacket Collection"
-        }
+        activeMode={studioMode}
+        layoutMode={layoutMode}
+        onModeChange={setStudioMode}
+        onLayoutChange={handleLayoutChange}
+        onSave={() => garmentStore.saveProject()}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        canUndo={historyIndex > 0}
+        canRedo={historyIndex < history.length - 1}
         onExport={handleExport}
         onOpenDemo={() => setIsDemoModalOpen(true)}
         onOpenOutfitBuilder={() => setIsOutfitBuilderOpen(true)}
       />
 
-      {/* Structured 4-Column Workspace Card Container matching mockup */}
-      <div className="flex-1 flex overflow-hidden min-h-0 mx-4 mb-4 mt-3 rounded-2xl border border-gray-200/80 bg-white shadow-2xs">
-        {/* Column 1: Assets & Catalog Rail */}
-        <AssetsRail
-          garments={garmentList()}
-          categories={CATEGORIES}
-          selectedGarmentId={selectedGarmentId}
-          onSelectGarment={handleSelectGarment}
-          scratchConfig={scratchConfig}
-          onUpdateScratchConfig={handleUpdateScratchConfig}
-          onActivateCanvasTool={(tool) =>
-            setRequestedTool((prev) => ({
-              tool,
-              seq: (prev?.seq || 0) + 1,
-            }))
-          }
-          onOpenDemo={() => setIsDemoModalOpen(true)}
-          patterns={STYLES}
-          selectedPatternId={selectedPatternId}
-          onSelectPattern={handleSelectPattern}
-          emblems={allArt()}
-          onAddEmblem={handleAddEmblem}
-          onUploadImage={handleUploadImage}
-        />
+      {/* Production Stage View Routing */}
+      {studioMode === "cad" && (
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+          <div ref={splitWorkspaceRef} className="flex-1 flex overflow-hidden min-h-0 relative">
+            {/* Left: Interactive 3D garment viewport */}
+            {splitRatio > 0 && (
+              <div
+                style={{ width: `${splitRatio * 100}%` }}
+                className="h-full min-w-0"
+              >
+                <PatternDriven3DViewer />
+              </div>
+            )}
 
-        {/* Column 2: 2D Interactive Canvas Stage (hidden only when Full 3D Preview is active) */}
-        {!is3DPreviewActive && (
-          <CanvasStage
-            garmentId={selectedGarmentId}
-            garmentCategory={garment.category}
-            svgMarkup={currentSvgMarkup}
-            frontSvgMarkup={frontSvgMarkup}
-            backSvgMarkup={backSvgMarkup}
-            activeView={activeView}
-            onToggleView={setActiveView}
-            onUndo={handleUndo}
-            onRedo={handleRedo}
-            canUndo={historyIndex > 0}
-            canRedo={historyIndex < history.length - 1}
+            {/* Draggable Splitter Handle */}
+            {splitRatio > 0 && splitRatio < 1 && (
+              <div
+                onMouseDown={handleSplitterMouseDown}
+                className={`w-2.5 bg-line hover:bg-brand transition-colors cursor-col-resize flex items-center justify-center shrink-0 z-10 group select-none ${
+                  isDraggingSplitter ? 'bg-brand' : ''
+                }`}
+                title="Drag to adjust 3D Viewport / 2D Pattern Editor ratio"
+              >
+                <div className="w-1 h-8 rounded-full bg-accent group-hover:bg-white transition-colors" />
+              </div>
+            )}
+
+            {/* Right: Functional 2D pattern editor */}
+            {splitRatio < 1 && (
+              <div
+                style={{ width: `${(1 - splitRatio) * 100}%` }}
+                className="h-full min-w-0"
+              >
+                <PatternEditor2D />
+              </div>
+            )}
+          </div>
+
+          {/* Bottom: Collapsible Properties Inspector Drawer */}
+          <StudioPropertiesDrawer />
+        </div>
+      )}
+
+      {studioMode === "artwork" && (
+        <div className="flex-1 flex overflow-hidden min-h-0 mx-4 mb-4 mt-3 rounded-2xl border border-line/80 bg-white shadow-2xs">
+          {/* Column 1: Assets & Catalog Rail */}
+          <AssetsRail
+            garments={garmentList()}
+            categories={CATEGORIES}
+            selectedGarmentId={selectedGarmentId}
+            onSelectGarment={handleSelectGarment}
+            scratchConfig={scratchConfig}
+            onUpdateScratchConfig={handleUpdateScratchConfig}
+            onActivateCanvasTool={(tool) =>
+              setRequestedTool((prev) => ({
+                tool,
+                seq: (prev?.seq || 0) + 1,
+              }))
+            }
+            onOpenDemo={() => setIsDemoModalOpen(true)}
+            patterns={STYLES}
+            selectedPatternId={selectedPatternId}
+            onSelectPattern={handleSelectPattern}
+            emblems={allArt()}
+            onAddEmblem={handleAddEmblem}
+            onUploadImage={handleUploadImage}
+          />
+
+          {/* Column 2: 2D Interactive Canvas Stage */}
+          {!is3DPreviewActive && (
+            <CanvasStage
+              garmentId={selectedGarmentId}
+              garmentCategory={garment.category}
+              svgMarkup={currentSvgMarkup}
+              frontSvgMarkup={frontSvgMarkup}
+              backSvgMarkup={backSvgMarkup}
+              activeView={activeView}
+              onToggleView={setActiveView}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
+              canUndo={historyIndex > 0}
+              canRedo={historyIndex < history.length - 1}
+              layers={layersByView[activeView]}
+              selectedLayerId={selectedLayerId}
+              onSelectLayer={setSelectedLayerId}
+              onTransformLayer={handleTransformLayer}
+              pieceTransforms={pieceTransforms}
+              onTransformPiece={handleTransformPiece}
+              zoneColors={zoneColors}
+              onColorChange={handleColorChange}
+              isWireframe={isWireframe}
+              onToggleWireframe={() => setIsWireframe((w) => !w)}
+              showPatternGuide={showPatternGuide}
+              onTogglePatternGuide={() => setShowPatternGuide((p) => !p)}
+              fitMeasurements={{
+                shoulderWidth: scratchConfig.shoulderWidth || 0,
+                chestWidth: scratchConfig.chestWidth || 0,
+                waistTaper: scratchConfig.waistWidth || 0,
+                hipWidth: scratchConfig.hipWidth || 0,
+                hemLength: scratchConfig.garmentLength || 0,
+              }}
+              onUpdateFitFromNodes={handleUpdateFitFromNodes}
+              onAddSketchLayer={handleAddSketchLayer}
+              onAddCutLine={handleAddCutLine}
+              onSelectCutPreset={(mode) =>
+                handleUpdateScratchConfig({
+                  ...scratchConfig,
+                  cutSplitMode: mode,
+                })
+              }
+              activeCutPreset={scratchConfig.cutSplitMode || "none"}
+              explodeAmount={scratchConfig.explodeAmount || 0}
+              onChangeExplodeAmount={(val) =>
+                handleUpdateScratchConfig({
+                  ...scratchConfig,
+                  explodeAmount: val,
+                  baseMode: val > 10 ? "exploded" : "block",
+                })
+              }
+              onJoinAllSeams={handleJoinAllSeams}
+              requestedTool={requestedTool}
+              onDuplicateLayer={handleDuplicateLayer}
+              onRemoveLayer={handleRemoveLayer}
+              onReorderLayer={handleReorderLayer}
+              onToggleLayerVisibility={handleToggleLayerVisibility}
+              onToggleLayerLock={handleToggleLayerLock}
+              onAddQuickText={() =>
+                handleUpdateTypography({
+                  text: "NEW TEXT",
+                  fontFamily: "Montserrat",
+                  fontSize: 28,
+                })
+              }
+              onAddQuickEmblem={() => handleAddEmblem("gen-shield")}
+              selectedZoneId={selectedZoneId}
+              zones={zones}
+              onSelectZone={(zoneId) => setSelectedZoneId(zoneId)}
+              showPrintGuides={showPrintGuides}
+              onTogglePrintGuides={() => setShowPrintGuides((g) => !g)}
+              is3DPreviewActive={is3DPreviewActive}
+              onToggle3DPreview={setIs3DPreviewActive}
+            />
+          )}
+
+          {/* Column 3: Properties & Layer Inspector */}
+          <PropertiesInspector
+            zones={zones}
+            selectedZoneId={selectedZoneId}
+            onSelectZone={setSelectedZoneId}
+            zoneColors={zoneColors}
+            onColorChange={handleColorChange}
+            pieceTransforms={pieceTransforms}
+            onTransformPiece={handleTransformPiece}
+            patternScale={patternScale}
+            onPatternScaleChange={handlePatternScaleChange}
             layers={layersByView[activeView]}
             selectedLayerId={selectedLayerId}
             onSelectLayer={setSelectedLayerId}
-            onTransformLayer={handleTransformLayer}
-            pieceTransforms={pieceTransforms}
-            onTransformPiece={handleTransformPiece}
-            zoneColors={zoneColors}
-            onColorChange={handleColorChange}
-            isWireframe={isWireframe}
-            onToggleWireframe={() => setIsWireframe((w) => !w)}
-            showPatternGuide={showPatternGuide}
-            onTogglePatternGuide={() => setShowPatternGuide((p) => !p)}
-            fitMeasurements={{
-              shoulderWidth: scratchConfig.shoulderWidth || 0,
-              chestWidth: scratchConfig.chestWidth || 0,
-              waistTaper: scratchConfig.waistWidth || 0,
-              hipWidth: scratchConfig.hipWidth || 0,
-              hemLength: scratchConfig.garmentLength || 0,
-            }}
-            onUpdateFitFromNodes={handleUpdateFitFromNodes}
-            onAddSketchLayer={handleAddSketchLayer}
-            onAddCutLine={handleAddCutLine}
-            onSelectCutPreset={(mode) =>
-              handleUpdateScratchConfig({
-                ...scratchConfig,
-                cutSplitMode: mode,
-              })
-            }
-            activeCutPreset={scratchConfig.cutSplitMode || "none"}
-            explodeAmount={scratchConfig.explodeAmount || 0}
-            onChangeExplodeAmount={(val) =>
-              handleUpdateScratchConfig({
-                ...scratchConfig,
-                explodeAmount: val,
-                baseMode: val > 10 ? "exploded" : "block",
-              })
-            }
-            onJoinAllSeams={handleJoinAllSeams}
-            requestedTool={requestedTool}
-            onDuplicateLayer={handleDuplicateLayer}
             onRemoveLayer={handleRemoveLayer}
-            onReorderLayer={handleReorderLayer}
             onToggleLayerVisibility={handleToggleLayerVisibility}
             onToggleLayerLock={handleToggleLayerLock}
-            onAddQuickText={() =>
-              handleUpdateTypography({
-                text: "NEW TEXT",
-                fontFamily: "Montserrat",
-                fontSize: 28,
-              })
-            }
-            onAddQuickEmblem={() => handleAddEmblem("gen-shield")}
-            selectedZoneId={selectedZoneId}
-            zones={zones}
-            onSelectZone={(zoneId) => setSelectedZoneId(zoneId)}
-            showPrintGuides={showPrintGuides}
-            onTogglePrintGuides={() => setShowPrintGuides((g) => !g)}
-            is3DPreviewActive={is3DPreviewActive}
-            onToggle3DPreview={setIs3DPreviewActive}
+            textTypography={textTypography}
+            onUpdateTypography={handleUpdateTypography}
           />
-        )}
 
-        {/* Column 3: Properties & Layer Inspector */}
-        <PropertiesInspector
-          zones={zones}
-          selectedZoneId={selectedZoneId}
-          onSelectZone={setSelectedZoneId}
-          zoneColors={zoneColors}
-          onColorChange={handleColorChange}
-          pieceTransforms={pieceTransforms}
-          onTransformPiece={handleTransformPiece}
-          patternScale={patternScale}
-          onPatternScaleChange={handlePatternScaleChange}
-          layers={layersByView[activeView]}
-          selectedLayerId={selectedLayerId}
-          onSelectLayer={setSelectedLayerId}
-          onRemoveLayer={handleRemoveLayer}
-          onToggleLayerVisibility={handleToggleLayerVisibility}
-          onToggleLayerLock={handleToggleLayerLock}
-          textTypography={textTypography}
-          onUpdateTypography={handleUpdateTypography}
-        />
-
-        {/* Column 4: Synchronous Live 3D Viewport with Real-time UV Projection & Parametric Morphing */}
-        <Live3DPanel
-          garmentId={selectedGarmentId}
-          garmentCategory={garment.category}
-          garmentName={garment.name}
-          frontSvgMarkup={front3DTextureSvg}
-          backSvgMarkup={back3DTextureSvg}
-          zoneColors={zoneColors}
-          scratchConfig={scratchConfig}
-          expanded={is3DPreviewActive}
-          onExitExpanded={() => setIs3DPreviewActive(false)}
-        />
-      </div>
+          {/* Column 4: 3D Viewport */}
+          <Live3DPanel
+            garmentId={selectedGarmentId}
+            garmentCategory={garment.category}
+            garmentName={garment.name}
+            frontSvgMarkup={front3DTextureSvg}
+            backSvgMarkup={back3DTextureSvg}
+            zoneColors={zoneColors}
+            scratchConfig={scratchConfig}
+            expanded={is3DPreviewActive}
+            onExitExpanded={() => setIs3DPreviewActive(false)}
+          />
+        </div>
+      )}
 
       {/* Video Walkthrough Modal for "Design from Scratch" */}
       <ScratchDemoModal

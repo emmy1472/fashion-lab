@@ -522,7 +522,7 @@ export function OutfitBuilderModal({
       <div className="relative w-full max-w-5xl h-[90vh] max-h-[820px] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden">
 
         {/* ── Header ── */}
-        <div className="h-14 bg-gradient-to-r from-[#062D24] to-[#0E6E55] flex items-center justify-between px-5 shrink-0">
+        <div className="h-14 bg-gradient-to-r from-brand-strong to-brand flex items-center justify-between px-5 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 bg-white/20 rounded-xl flex items-center justify-center">
               <User className="w-4 h-4 text-white" />
@@ -538,7 +538,7 @@ export function OutfitBuilderModal({
               <button
                 type="button"
                 onClick={() => setMannequinGender("female")}
-                className={`px-2.5 py-1 rounded-md transition ${mannequinGender === "female" ? "bg-emerald-500 text-white shadow-xs" : "text-emerald-100 hover:text-white"}`}
+                className={`px-2.5 py-1 rounded-md transition ${mannequinGender === "female" ? "bg-brand text-white shadow-xs" : "text-emerald-100 hover:text-white"}`}
                 title="Female Human Mannequin"
               >
                 ♀ Female
@@ -546,7 +546,7 @@ export function OutfitBuilderModal({
               <button
                 type="button"
                 onClick={() => setMannequinGender("male")}
-                className={`px-2.5 py-1 rounded-md transition ${mannequinGender === "male" ? "bg-emerald-500 text-white shadow-xs" : "text-emerald-100 hover:text-white"}`}
+                className={`px-2.5 py-1 rounded-md transition ${mannequinGender === "male" ? "bg-brand text-white shadow-xs" : "text-emerald-100 hover:text-white"}`}
                 title="Male Human Mannequin"
               >
                 ♂ Male
@@ -554,7 +554,7 @@ export function OutfitBuilderModal({
               <button
                 type="button"
                 onClick={() => setMannequinGender("none")}
-                className={`px-2 py-1 rounded-md transition ${mannequinGender === "none" ? "bg-emerald-500 text-white shadow-xs" : "text-emerald-100 hover:text-white"}`}
+                className={`px-2 py-1 rounded-md transition ${mannequinGender === "none" ? "bg-brand text-white shadow-xs" : "text-emerald-100 hover:text-white"}`}
                 title="Ghost / Floating"
               >
                 Ghost
@@ -575,17 +575,17 @@ export function OutfitBuilderModal({
         <div className="flex flex-1 min-h-0">
 
           {/* Left panel — slot selectors + color editor */}
-          <div className="w-64 shrink-0 border-r border-gray-100 flex flex-col overflow-y-auto bg-[#F9FAFB]">
+          <div className="w-64 shrink-0 border-r border-line flex flex-col overflow-y-auto bg-surface">
 
             {/* Slot tabs */}
-            <div className="flex border-b border-gray-200">
+            <div className="flex border-b border-line">
               <button
                 type="button"
                 onClick={() => setEditingSlot("top")}
                 className={`flex-1 py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 transition ${
                   editingSlot === "top"
-                    ? "text-[#0E6E55] border-b-2 border-[#0E6E55] bg-white"
-                    : "text-gray-400 hover:text-gray-700"
+                    ? "text-brand border-b-2 border-brand bg-white"
+                    : "text-muted hover:text-ink-2"
                 }`}
               >
                 <Shirt className="w-3.5 h-3.5" /> Top
@@ -595,8 +595,8 @@ export function OutfitBuilderModal({
                 onClick={() => setEditingSlot("bottom")}
                 className={`flex-1 py-2.5 text-xs font-bold flex items-center justify-center gap-1.5 transition ${
                   editingSlot === "bottom"
-                    ? "text-[#0E6E55] border-b-2 border-[#0E6E55] bg-white"
-                    : "text-gray-400 hover:text-gray-700"
+                    ? "text-brand border-b-2 border-brand bg-white"
+                    : "text-muted hover:text-ink-2"
                 }`}
               >
                 <Scissors className="w-3.5 h-3.5" /> Bottom
@@ -608,18 +608,18 @@ export function OutfitBuilderModal({
               {/* Garment picker */}
               {editingSlot === "top" ? (
                 <div>
-                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">Top Garment</p>
+                  <p className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">Top Garment</p>
                   <div className="relative">
                     <button
                       type="button"
                       onClick={() => { setShowTopPicker(!showTopPicker); setShowBottomPicker(false); }}
-                      className="w-full flex items-center justify-between bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold text-gray-800 hover:border-emerald-400 transition"
+                      className="w-full flex items-center justify-between bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold text-ink hover:border-brand transition"
                     >
                       <span>{TOPS_CATALOG.find(g => g.id === topId)?.emoji} {TOPS_CATALOG.find(g => g.id === topId)?.name || topId}</span>
-                      <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+                      <ChevronDown className="w-3.5 h-3.5 text-muted" />
                     </button>
                     {showTopPicker && (
-                      <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-20 py-1 max-h-52 overflow-y-auto">
+                      <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-line rounded-xl shadow-xl z-20 py-1 max-h-52 overflow-y-auto">
                         {TOPS_CATALOG.map(g => (
                           <button
                             key={g.id}
@@ -629,11 +629,11 @@ export function OutfitBuilderModal({
                               if (g.id !== currentGarmentId) setTopColors(defaultZones(g.id));
                               setShowTopPicker(false);
                             }}
-                            className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 hover:bg-emerald-50 transition ${topId === g.id ? "font-bold text-[#0E6E55]" : "text-gray-700"}`}
+                            className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 hover:bg-brand-soft transition ${topId === g.id ? "font-bold text-brand" : "text-ink-2"}`}
                           >
                             <span>{g.emoji}</span>
                             <span>{g.name}</span>
-                            {topId === g.id && <CheckCircle2 className="w-3 h-3 ml-auto text-[#0E6E55]" />}
+                            {topId === g.id && <CheckCircle2 className="w-3 h-3 ml-auto text-brand" />}
                           </button>
                         ))}
                       </div>
@@ -642,18 +642,18 @@ export function OutfitBuilderModal({
                 </div>
               ) : (
                 <div>
-                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">Bottom Garment</p>
+                  <p className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">Bottom Garment</p>
                   <div className="relative">
                     <button
                       type="button"
                       onClick={() => { setShowBottomPicker(!showBottomPicker); setShowTopPicker(false); }}
-                      className="w-full flex items-center justify-between bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold text-gray-800 hover:border-emerald-400 transition"
+                      className="w-full flex items-center justify-between bg-white border border-line rounded-xl px-3 py-2 text-xs font-semibold text-ink hover:border-brand transition"
                     >
                       <span>{BOTTOMS_CATALOG.find(g => g.id === bottomId)?.emoji} {BOTTOMS_CATALOG.find(g => g.id === bottomId)?.name || bottomId}</span>
-                      <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+                      <ChevronDown className="w-3.5 h-3.5 text-muted" />
                     </button>
                     {showBottomPicker && (
-                      <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-20 py-1">
+                      <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-line rounded-xl shadow-xl z-20 py-1">
                         {BOTTOMS_CATALOG.map(g => (
                           <button
                             key={g.id}
@@ -663,11 +663,11 @@ export function OutfitBuilderModal({
                               if (g.id !== currentGarmentId) setBottomColors(defaultZones(g.id));
                               setShowBottomPicker(false);
                             }}
-                            className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 hover:bg-emerald-50 transition ${bottomId === g.id ? "font-bold text-[#0E6E55]" : "text-gray-700"}`}
+                            className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 hover:bg-brand-soft transition ${bottomId === g.id ? "font-bold text-brand" : "text-ink-2"}`}
                           >
                             <span>{g.emoji}</span>
                             <span>{g.name}</span>
-                            {bottomId === g.id && <CheckCircle2 className="w-3 h-3 ml-auto text-[#0E6E55]" />}
+                            {bottomId === g.id && <CheckCircle2 className="w-3 h-3 ml-auto text-brand" />}
                           </button>
                         ))}
                       </div>
@@ -678,32 +678,32 @@ export function OutfitBuilderModal({
 
               {/* Color editor */}
               <div>
-                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">
+                <p className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">
                   {editingSlot === "top" ? "Top Colors" : "Bottom Colors"}
                 </p>
 
                 {/* Primary color */}
                 <div className="mb-3">
-                  <label className="text-[10px] text-gray-500 font-medium block mb-1">Body / Main</label>
+                  <label className="text-[10px] text-muted font-medium block mb-1">Body / Main</label>
                   <div className="flex items-center gap-2">
                     <input
                       type="color"
                       value={activeColors.body || "#062D24"}
                       onChange={e => setActiveColors(prev => ({ ...prev, body: e.target.value }))}
-                      className="w-8 h-8 rounded-lg border border-gray-200 cursor-pointer"
+                      className="w-8 h-8 rounded-lg border border-line cursor-pointer"
                     />
                     <input
                       type="text"
                       value={activeColors.body || "#062D24"}
                       onChange={e => setActiveColors(prev => ({ ...prev, body: e.target.value }))}
-                      className="flex-1 text-[11px] border border-gray-200 rounded-lg px-2 py-1 font-mono"
+                      className="flex-1 text-[11px] border border-line rounded-lg px-2 py-1 font-mono"
                     />
                   </div>
                 </div>
 
                 {/* Accent color */}
                 <div className="mb-3">
-                  <label className="text-[10px] text-gray-500 font-medium block mb-1">
+                  <label className="text-[10px] text-muted font-medium block mb-1">
                     {editingSlot === "top" ? "Collar / Trim" : "Waistband / Yoke"}
                   </label>
                   <div className="flex items-center gap-2">
@@ -715,7 +715,7 @@ export function OutfitBuilderModal({
                         [editingSlot === "top" ? "collar" : "waistband"]: e.target.value,
                         [editingSlot === "top" ? "collar" : "yoke"]: e.target.value,
                       }))}
-                      className="w-8 h-8 rounded-lg border border-gray-200 cursor-pointer"
+                      className="w-8 h-8 rounded-lg border border-line cursor-pointer"
                     />
                     <input
                       type="text"
@@ -725,20 +725,20 @@ export function OutfitBuilderModal({
                         [editingSlot === "top" ? "collar" : "waistband"]: e.target.value,
                         [editingSlot === "top" ? "collar" : "yoke"]: e.target.value,
                       }))}
-                      className="flex-1 text-[11px] border border-gray-200 rounded-lg px-2 py-1 font-mono"
+                      className="flex-1 text-[11px] border border-line rounded-lg px-2 py-1 font-mono"
                     />
                   </div>
                 </div>
 
                 {/* Swatch palette */}
-                <p className="text-[10px] text-gray-400 mb-2">Quick palette</p>
+                <p className="text-[10px] text-muted mb-2">Quick palette</p>
                 <div className="grid grid-cols-6 gap-1.5">
                   {COLOR_SWATCHES.map(col => (
                     <button
                       key={col}
                       type="button"
                       onClick={() => setActiveColors(prev => ({ ...prev, body: col }))}
-                      className="w-7 h-7 rounded-lg border border-gray-200 hover:scale-110 transition-transform"
+                      className="w-7 h-7 rounded-lg border border-line hover:scale-110 transition-transform"
                       style={{ background: col }}
                       title={col}
                     />
@@ -747,32 +747,32 @@ export function OutfitBuilderModal({
               </div>
 
               {/* Outfit summary cards */}
-              <div className="pt-2 border-t border-gray-200 space-y-2">
-                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Outfit</p>
-                <div className="flex items-center gap-2 bg-white border border-gray-100 rounded-xl p-2 shadow-xs">
+              <div className="pt-2 border-t border-line space-y-2">
+                <p className="text-[10px] font-bold text-muted uppercase tracking-wider">Outfit</p>
+                <div className="flex items-center gap-2 bg-white border border-line rounded-xl p-2 shadow-xs">
                   <div className="w-6 h-6 rounded-lg flex items-center justify-center text-xs" style={{ background: topColors.body || "#062D24" }}>
                     <Shirt className="w-3 h-3 text-white" />
                   </div>
-                  <span className="text-[11px] font-semibold text-gray-700 truncate flex-1">
+                  <span className="text-[11px] font-semibold text-ink-2 truncate flex-1">
                     {TOPS_CATALOG.find(g => g.id === topId)?.name || topId}
                   </span>
-                  <button type="button" onClick={() => setEditingSlot("top")} className="text-[10px] text-emerald-600 font-bold hover:underline">Edit</button>
+                  <button type="button" onClick={() => setEditingSlot("top")} className="text-[10px] text-brand font-bold hover:underline">Edit</button>
                 </div>
-                <div className="flex items-center gap-2 bg-white border border-gray-100 rounded-xl p-2 shadow-xs">
+                <div className="flex items-center gap-2 bg-white border border-line rounded-xl p-2 shadow-xs">
                   <div className="w-6 h-6 rounded-lg flex items-center justify-center text-xs" style={{ background: bottomColors.body || "#6B9AC4" }}>
                     <Scissors className="w-3 h-3 text-white" />
                   </div>
-                  <span className="text-[11px] font-semibold text-gray-700 truncate flex-1">
+                  <span className="text-[11px] font-semibold text-ink-2 truncate flex-1">
                     {BOTTOMS_CATALOG.find(g => g.id === bottomId)?.name || bottomId}
                   </span>
-                  <button type="button" onClick={() => setEditingSlot("bottom")} className="text-[10px] text-emerald-600 font-bold hover:underline">Edit</button>
+                  <button type="button" onClick={() => setEditingSlot("bottom")} className="text-[10px] text-brand font-bold hover:underline">Edit</button>
                 </div>
               </div>
 
               {/* Fit note */}
               {fitNote && (
-                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[11px] text-emerald-800 font-medium">
-                  <CheckCircle2 className="w-3.5 h-3.5 inline mr-1 text-emerald-500" />
+                <div className="bg-brand-soft border border-brand/20 rounded-xl p-3 text-[11px] text-brand font-medium">
+                  <CheckCircle2 className="w-3.5 h-3.5 inline mr-1 text-success" />
                   {fitNote}
                 </div>
               )}
@@ -780,17 +780,17 @@ export function OutfitBuilderModal({
           </div>
 
           {/* Right panel — 3D viewport */}
-          <div className="flex-1 relative bg-[#ECEEF2] overflow-hidden flex flex-col">
+          <div className="flex-1 relative bg-line overflow-hidden flex flex-col">
             {/* 3D canvas */}
             <div ref={containerRef} className="flex-1 cursor-grab active:cursor-grabbing" />
 
             {/* Viewport toolbar overlay */}
-            <div className="absolute left-3 top-3 bg-white/90 backdrop-blur-sm border border-gray-200 rounded-xl p-1 flex flex-col gap-1 shadow z-10">
+            <div className="absolute left-3 top-3 bg-white/90 backdrop-blur-sm border border-line rounded-xl p-1 flex flex-col gap-1 shadow z-10">
               <button
                 type="button"
                 title="Reset Camera"
                 onClick={resetCamera}
-                className="w-7 h-7 rounded-lg text-gray-500 hover:text-gray-900 hover:bg-gray-100 flex items-center justify-center transition"
+                className="w-7 h-7 rounded-lg text-muted hover:text-ink hover:bg-surface-2 flex items-center justify-center transition"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
               </button>
@@ -798,27 +798,27 @@ export function OutfitBuilderModal({
                 type="button"
                 title={isRotating ? "Pause Turntable" : "Start Turntable"}
                 onClick={() => setIsRotating(!isRotating)}
-                className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${isRotating ? "bg-emerald-100 text-[#0E6E55]" : "text-gray-500 hover:bg-gray-100"}`}
+                className={`w-7 h-7 rounded-lg flex items-center justify-center transition ${isRotating ? "bg-brand-soft-hover text-brand" : "text-muted hover:bg-surface-2"}`}
               >
                 <Layers className="w-3.5 h-3.5" />
               </button>
               <button
                 type="button"
                 title="Lighting"
-                className="w-7 h-7 rounded-lg text-gray-500 hover:text-amber-600 hover:bg-gray-100 flex items-center justify-center transition"
+                className="w-7 h-7 rounded-lg text-muted hover:text-warning hover:bg-surface-2 flex items-center justify-center transition"
               >
                 <Sun className="w-3.5 h-3.5" />
               </button>
             </div>
 
             {/* Label overlay */}
-            <div className="absolute right-3 top-3 bg-white/90 border border-gray-200 rounded-xl px-3 py-2 shadow z-10">
-              <p className="text-[11px] font-bold text-gray-800">
+            <div className="absolute right-3 top-3 bg-white/90 border border-line rounded-xl px-3 py-2 shadow z-10">
+              <p className="text-[11px] font-bold text-ink">
                 {TOPS_CATALOG.find(g => g.id === topId)?.name}
-                <span className="text-gray-400 font-normal"> + </span>
+                <span className="text-muted font-normal"> + </span>
                 {BOTTOMS_CATALOG.find(g => g.id === bottomId)?.name}
               </p>
-              <p className="text-[10px] text-gray-400">Outfit Fit Check</p>
+              <p className="text-[10px] text-muted">Outfit Fit Check</p>
             </div>
 
             {/* Bottom hint */}

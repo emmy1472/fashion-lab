@@ -2,48 +2,30 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  Home,
-  Palette,
-  FolderKanban,
-  MessageSquare,
-  User,
-} from "lucide-react";
+import { GLOBAL_NAV, isNavItemActive } from "./navigation";
 
 export function MobileNav() {
-  const pathname = usePathname();
-
-  const navItems = [
-    { name: "Home", href: "/dashboard", icon: Home },
-    { name: "Studio", href: "/studio", icon: Palette },
-    { name: "Projects", href: "/projects", icon: FolderKanban },
-    { name: "Messages", href: "/messages", icon: MessageSquare, badge: 3 },
-    { name: "Profile", href: "/settings", icon: User },
-  ];
+  const pathname = usePathname() ?? "";
 
   return (
-    <nav className="md:hidden fixed bottom-0 left-0 right-0 h-16 bg-[#062D24] border-t border-[#0A3D30] flex items-center justify-around z-40 px-2">
-      {navItems.map((item) => {
-        const isActive = pathname === item.href;
+    <nav
+      aria-label="Main"
+      className="md:hidden fixed bottom-0 left-0 right-0 h-16 bg-sidebar/95 backdrop-blur-md border-t border-sidebar-line flex items-center justify-around z-40 px-3"
+    >
+      {GLOBAL_NAV.map((item) => {
+        const isActive = isNavItemActive(item, pathname);
         const Icon = item.icon;
-
         return (
           <Link
-            key={item.name}
+            key={item.href}
             href={item.href}
-            className={`flex flex-col items-center justify-center py-1 px-3 rounded-lg text-[10px] font-medium transition-colors ${
-              isActive ? "text-[#10B981]" : "text-emerald-100/60 hover:text-white"
+            aria-current={isActive ? "page" : undefined}
+            className={`flex flex-col items-center justify-center gap-0.5 py-1 px-3 rounded-lg text-xs transition-colors ${
+              isActive ? "text-line font-semibold" : "text-muted hover:text-white"
             }`}
           >
-            <div className="relative">
-              <Icon className="w-5 h-5 mb-0.5" />
-              {item.badge !== undefined && (
-                <span className="absolute -top-1 -right-2 bg-[#10B981] text-white text-[9px] font-bold px-1 rounded-full">
-                  {item.badge}
-                </span>
-              )}
-            </div>
-            <span>{item.name}</span>
+            <Icon className={`w-5 h-5 ${isActive ? "text-accent" : ""}`} aria-hidden />
+            <span>{item.name === "Materials library" ? "Materials" : item.name}</span>
           </Link>
         );
       })}

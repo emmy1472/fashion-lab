@@ -1,15 +1,6 @@
-import { ModulePlaceholder } from "@/components/layout/ModulePlaceholder";
+import { RedirectToActiveProject } from "@/components/project/ProjectRedirects";
 
-export const metadata = {
-  title: "Anthropometric Profiles & FreeSewing CAD — Fashion-Lab",
-};
-
+// Measurements now live inside each project: /projects/[id]/measurements
 export default function Page() {
-  return (
-    <ModulePlaceholder
-      moduleName="Anthropometric Profiles & FreeSewing CAD"
-      milestone="Coming in Module 4"
-      description="Interactive 30+ point body measurement editor, parametric pattern drafting via FreeSewing v4, and home-printer tiled A4/Letter PDF exports."
-    />
-  );
+  return <RedirectToActiveProject stage="measurements" />;
 }

@@ -155,10 +155,10 @@ export function PropertiesInspector({
   };
 
   return (
-    <div className="w-[225px] bg-white border-r border-gray-200/80 flex flex-col h-full select-none shrink-0">
+    <div className="w-[225px] bg-white border-r border-line/80 flex flex-col h-full select-none shrink-0">
       {/* Aligned Column Header */}
-      <div className="h-11 px-4 border-b border-gray-100 flex items-center justify-between shrink-0">
-        <h3 className="text-xs font-bold text-gray-900 tracking-tight">Properties</h3>
+      <div className="h-11 px-4 border-b border-line flex items-center justify-between shrink-0">
+        <h3 className="text-xs font-bold text-ink tracking-tight">Properties</h3>
       </div>
 
       {/* Structured Inspector Content */}
@@ -167,11 +167,11 @@ export function PropertiesInspector({
           {/* 1. Colorway Section matching mockup */}
           <div className="space-y-2.5">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold text-gray-800">Colorway</span>
+              <span className="text-[11px] font-bold text-ink">Colorway</span>
               <button
                 type="button"
                 onClick={() => setShowAllSwatches(!showAllSwatches)}
-                className="text-gray-400 hover:text-gray-700"
+                className="text-muted hover:text-ink-2"
                 title="Show more swatches"
               >
                 <ChevronDown className="w-3.5 h-3.5" />
@@ -182,7 +182,7 @@ export function PropertiesInspector({
             <select
               value={activeZoneId}
               onChange={(e) => handleSelectZone(e.target.value)}
-              className="w-full bg-[#F8F9FA] border border-gray-200/80 rounded-lg px-2.5 py-1 text-[11px] font-medium text-gray-700 focus:outline-none focus:border-[#0E6E55]"
+              className="w-full bg-surface border border-line/80 rounded-lg px-2.5 py-1 text-[11px] font-medium text-ink-2 focus:outline-none focus:border-brand"
             >
               {zones.map((z) => (
                 <option key={z.id} value={z.id}>
@@ -205,8 +205,8 @@ export function PropertiesInspector({
                       idx === 0 ? "rounded-lg" : "rounded-full"
                     } ${
                       isActive
-                        ? "ring-2 ring-[#0E6E55] ring-offset-1 border border-white"
-                        : "border border-gray-200"
+                        ? "ring-2 ring-brand ring-offset-1 border border-white"
+                        : "border border-line"
                     }`}
                     title={`Apply ${color}`}
                   />
@@ -216,7 +216,7 @@ export function PropertiesInspector({
               {/* Custom Color Input Trigger */}
               <label
                 title="Custom Color"
-                className="w-7 h-7 rounded-full border border-dashed border-gray-300 flex items-center justify-center cursor-pointer hover:border-[#0E6E55] text-[10px] text-gray-400 shrink-0"
+                className="w-7 h-7 rounded-full border border-dashed border-line-strong flex items-center justify-center cursor-pointer hover:border-brand text-[10px] text-muted shrink-0"
               >
                 +
                 <input
@@ -236,7 +236,7 @@ export function PropertiesInspector({
                     type="button"
                     onClick={() => onColorChange(activeZoneId, color)}
                     style={{ backgroundColor: color }}
-                    className="w-5 h-5 rounded-full border border-gray-200 hover:scale-110 transition-transform"
+                    className="w-5 h-5 rounded-full border border-line hover:scale-110 transition-transform"
                   />
                 ))}
               </div>
@@ -244,8 +244,8 @@ export function PropertiesInspector({
 
             {/* Modern Denim Wash Presets if garment is Jeans */}
             {zones.some((z) => (z as any).wash || z.id === "yoke") && (
-              <div className="pt-2 space-y-1.5 border-t border-gray-100">
-                <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider block">
+              <div className="pt-2 space-y-1.5 border-t border-line">
+                <span className="text-[10px] font-bold text-muted uppercase tracking-wider block">
                   Denim Wash Presets
                 </span>
                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -266,7 +266,7 @@ export function PropertiesInspector({
                         className={`text-[9.5px] font-semibold px-2 py-0.5 rounded-md border transition-all flex items-center gap-1 ${
                           isSelected
                             ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                            : "bg-[#F8F9FA] text-gray-700 border-gray-200 hover:border-gray-400"
+                            : "bg-surface text-ink-2 border-line hover:border-gray-400"
                         }`}
                       >
                         <span
@@ -283,9 +283,9 @@ export function PropertiesInspector({
 
             {/* CorelDRAW Piece Resize (Width & Height %) */}
             {onTransformPiece && (
-              <div className="pt-2.5 mt-2 border-t border-gray-100 space-y-2">
+              <div className="pt-2.5 mt-2 border-t border-line space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-gray-700">
+                  <span className="text-[10px] font-bold text-ink-2">
                     Piece Size (CorelDRAW)
                   </span>
                   <button
@@ -296,16 +296,16 @@ export function PropertiesInspector({
                         commitHistory: true,
                       })
                     }
-                    className="text-[9.5px] font-bold text-[#0E6E55] hover:underline"
+                    className="text-[9.5px] font-bold text-brand hover:underline"
                   >
                     Reset 100%
                   </button>
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between text-[10px] text-gray-500 mb-0.5">
+                  <div className="flex items-center justify-between text-[10px] text-muted mb-0.5">
                     <span>Width (W)</span>
-                    <span className="font-bold text-gray-700">{pieceWidthPct}%</span>
+                    <span className="font-bold text-ink-2">{pieceWidthPct}%</span>
                   </div>
                   <input
                     type="range"
@@ -320,14 +320,14 @@ export function PropertiesInspector({
                     onMouseUp={() =>
                       onTransformPiece(activeZoneId, { commitHistory: true })
                     }
-                    className="w-full accent-[#0E6E55] h-1 bg-gray-200 rounded-lg cursor-pointer"
+                    className="w-full accent-brand h-1 bg-line rounded-lg cursor-pointer"
                   />
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between text-[10px] text-gray-500 mb-0.5">
+                  <div className="flex items-center justify-between text-[10px] text-muted mb-0.5">
                     <span>Height (H)</span>
-                    <span className="font-bold text-gray-700">{pieceHeightPct}%</span>
+                    <span className="font-bold text-ink-2">{pieceHeightPct}%</span>
                   </div>
                   <input
                     type="range"
@@ -342,7 +342,7 @@ export function PropertiesInspector({
                     onMouseUp={() =>
                       onTransformPiece(activeZoneId, { commitHistory: true })
                     }
-                    className="w-full accent-[#0E6E55] h-1 bg-gray-200 rounded-lg cursor-pointer"
+                    className="w-full accent-brand h-1 bg-line rounded-lg cursor-pointer"
                   />
                 </div>
               </div>
@@ -350,14 +350,14 @@ export function PropertiesInspector({
           </div>
 
           {/* 2. Pattern Settings matching mockup */}
-          <div className="pt-3 border-t border-gray-100 space-y-2">
-            <span className="text-[11px] font-bold text-gray-800 block">
+          <div className="pt-3 border-t border-line space-y-2">
+            <span className="text-[11px] font-bold text-ink block">
               Pattern Settings
             </span>
             <div>
-              <div className="flex items-center justify-between text-[11px] text-gray-500 mb-1.5">
+              <div className="flex items-center justify-between text-[11px] text-muted mb-1.5">
                 <span>Pattern Scale</span>
-                <span className="font-semibold text-gray-700">{patternScale}%</span>
+                <span className="font-semibold text-ink-2">{patternScale}%</span>
               </div>
               <input
                 type="range"
@@ -365,14 +365,14 @@ export function PropertiesInspector({
                 max="200"
                 value={patternScale}
                 onChange={(e) => onPatternScaleChange(Number(e.target.value))}
-                className="w-full accent-[#0E6E55] h-1 bg-gray-200 rounded-lg cursor-pointer"
+                className="w-full accent-brand h-1 bg-line rounded-lg cursor-pointer"
               />
             </div>
           </div>
 
           {/* 3. Artwork Layers matching mockup */}
-          <div className="pt-3 border-t border-gray-100 space-y-2">
-            <span className="text-[11px] font-bold text-gray-800 block">
+          <div className="pt-3 border-t border-line space-y-2">
+            <span className="text-[11px] font-bold text-ink block">
               Artwork Layers
             </span>
             <div className="space-y-1">
@@ -384,12 +384,12 @@ export function PropertiesInspector({
                     onClick={() => onSelectLayer && onSelectLayer(layer.id)}
                     className={`flex items-center justify-between py-1.5 px-2 rounded-lg transition text-[11px] cursor-pointer ${
                       isSelected
-                        ? "bg-[#ECFDF5] text-[#0E6E55] font-bold ring-1 ring-[#10B981]/30"
-                        : "hover:bg-gray-50 text-gray-700"
+                        ? "bg-brand-soft text-brand font-bold ring-1 ring-success/30"
+                        : "hover:bg-surface text-ink-2"
                     }`}
                   >
                     <div className="flex items-center gap-1.5 min-w-0">
-                      <GripVertical className="w-3 h-3 text-gray-300 shrink-0" />
+                      <GripVertical className="w-3 h-3 text-line-strong shrink-0" />
                       <span className="truncate">
                         {layer.name || layer.text || "Artwork"}
                       </span>
@@ -401,26 +401,26 @@ export function PropertiesInspector({
                       <button
                         type="button"
                         onClick={() => onToggleLayerVisibility(layer.id)}
-                        className="text-gray-400 hover:text-gray-700 transition"
+                        className="text-muted hover:text-ink-2 transition"
                         title={layer.visible ? "Hide layer" : "Show layer"}
                       >
                         {layer.visible ? (
                           <Eye className="w-3.5 h-3.5" />
                         ) : (
-                          <EyeOff className="w-3.5 h-3.5 text-gray-300" />
+                          <EyeOff className="w-3.5 h-3.5 text-line-strong" />
                         )}
                       </button>
                       {onToggleLayerLock && (
                         <button
                           type="button"
                           onClick={() => onToggleLayerLock(layer.id)}
-                          className="text-gray-400 hover:text-amber-600 transition"
+                          className="text-muted hover:text-warning transition"
                           title={layer.locked ? "Unlock layer" : "Lock layer"}
                         >
                           {layer.locked ? (
-                            <Lock className="w-3 h-3 text-amber-600" />
+                            <Lock className="w-3 h-3 text-warning" />
                           ) : (
-                            <Unlock className="w-3 h-3 text-gray-300" />
+                            <Unlock className="w-3 h-3 text-line-strong" />
                           )}
                         </button>
                       )}
@@ -428,7 +428,7 @@ export function PropertiesInspector({
                         <button
                           type="button"
                           onClick={() => onRemoveLayer(layer.id)}
-                          className="text-gray-300 hover:text-red-500 transition"
+                          className="text-line-strong hover:text-red-500 transition"
                           title="Remove layer"
                         >
                           <Trash2 className="w-3 h-3" />
@@ -442,13 +442,13 @@ export function PropertiesInspector({
           </div>
 
           {/* 4. Text & Typography matching mockup */}
-          <div className="pt-3 border-t border-gray-100 space-y-2.5">
-            <span className="text-[11px] font-bold text-gray-800 block">
+          <div className="pt-3 border-t border-line space-y-2.5">
+            <span className="text-[11px] font-bold text-ink block">
               Text & Typography
             </span>
 
             <div>
-              <label className="text-[10px] text-gray-400 font-medium block mb-1">
+              <label className="text-[10px] text-muted font-medium block mb-1">
                 Text
               </label>
               <input
@@ -459,7 +459,7 @@ export function PropertiesInspector({
                   if (e.key === "Enter") handleApplyTypography();
                 }}
                 placeholder="FASHION-LAB"
-                className="w-full bg-[#F8F9FA] border border-gray-200/80 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold text-gray-800 focus:outline-none focus:border-[#0E6E55]"
+                className="w-full bg-surface border border-line/80 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold text-ink focus:outline-none focus:border-brand"
               />
             </div>
 
@@ -468,7 +468,7 @@ export function PropertiesInspector({
                 <select
                   value={currentFont}
                   onChange={(e) => setCurrentFont(e.target.value)}
-                  className="w-full bg-[#F8F9FA] border border-gray-200/80 rounded-lg px-2 py-1.5 text-[11px] text-gray-700 focus:outline-none focus:border-[#0E6E55]"
+                  className="w-full bg-surface border border-line/80 rounded-lg px-2 py-1.5 text-[11px] text-ink-2 focus:outline-none focus:border-brand"
                 >
                   {athleticFonts.map((f) => (
                     <option key={f} value={f}>
@@ -481,7 +481,7 @@ export function PropertiesInspector({
                 <select
                   value={currentSize}
                   onChange={(e) => setCurrentSize(Number(e.target.value))}
-                  className="w-full bg-[#F8F9FA] border border-gray-200/80 rounded-lg px-1.5 py-1.5 text-[11px] text-gray-700 focus:outline-none focus:border-[#0E6E55]"
+                  className="w-full bg-surface border border-line/80 rounded-lg px-1.5 py-1.5 text-[11px] text-ink-2 focus:outline-none focus:border-brand"
                 >
                   {fontSizes.map((s) => (
                     <option key={s} value={s}>
@@ -498,7 +498,7 @@ export function PropertiesInspector({
         <button
           type="button"
           onClick={handleApplyTypography}
-          className="w-full bg-[#0E6E55] hover:bg-[#09503E] text-white text-xs font-bold py-2.5 rounded-xl transition shadow-xs"
+          className="w-full bg-brand hover:bg-brand-hover text-white text-xs font-bold py-2.5 rounded-xl transition shadow-xs"
         >
           Update
         </button>

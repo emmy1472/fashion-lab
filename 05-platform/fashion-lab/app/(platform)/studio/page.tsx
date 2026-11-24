@@ -1,10 +1,6 @@
-import { StudioWorkspace } from "@/components/studio/StudioWorkspace";
+import { RedirectToActiveProject } from "@/components/project/ProjectRedirects";
 
-export const metadata = {
-  title: "Design Studio — Fashion-Lab",
-  description: "Interactive 2D & 3D digital apparel studio with real-time vector CAD and WebGL rendering",
-};
-
+// The studio now lives inside each project: /projects/[id]/design
 export default function StudioPage() {
-  return <StudioWorkspace initialGarmentId="track-jacket" />;
+  return <RedirectToActiveProject stage="design" />;
 }

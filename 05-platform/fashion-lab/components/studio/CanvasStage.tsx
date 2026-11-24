@@ -1351,17 +1351,17 @@ export function CanvasStage({
   })();
 
   return (
-    <div className="flex-1 min-w-[360px] bg-white flex flex-col h-full relative overflow-hidden select-none border-r border-gray-200/80">
+    <div className="flex-1 min-w-[360px] bg-white flex flex-col h-full relative overflow-hidden select-none border-r border-line/80">
       {/* Row 1: Aligned Column Header with 2D Design / 3D Preview Tabs */}
-      <div className="h-11 px-5 border-b border-gray-100 flex items-center justify-between shrink-0">
+      <div className="h-11 px-5 border-b border-line flex items-center justify-between shrink-0">
         <div className="flex items-center gap-6 h-full">
           <button
             type="button"
             onClick={() => onToggle3DPreview && onToggle3DPreview(false)}
             className={`h-full flex items-center text-xs font-bold border-b-2 transition ${
               !is3DPreviewActive
-                ? "text-[#0E6E55] border-[#0E6E55]"
-                : "text-gray-400 hover:text-gray-700 border-transparent"
+                ? "text-brand border-brand"
+                : "text-muted hover:text-ink-2 border-transparent"
             }`}
           >
             2D Design
@@ -1371,8 +1371,8 @@ export function CanvasStage({
             onClick={() => onToggle3DPreview && onToggle3DPreview(true)}
             className={`h-full flex items-center text-xs font-semibold border-b-2 transition ${
               is3DPreviewActive
-                ? "text-[#0E6E55] border-[#0E6E55] font-bold"
-                : "text-gray-400 hover:text-gray-700 border-transparent"
+                ? "text-brand border-brand font-bold"
+                : "text-muted hover:text-ink-2 border-transparent"
             }`}
           >
             3D Preview
@@ -1380,8 +1380,8 @@ export function CanvasStage({
         </div>
 
         {/* Live Active Part Indicator Pill */}
-        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-gray-500 bg-[#F8F9FA] px-2.5 py-1 rounded-lg border border-gray-200/70">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]" />
+        <div className="flex items-center gap-1.5 text-[10px] font-semibold text-muted bg-surface px-2.5 py-1 rounded-lg border border-line/70">
+          <span className="w-1.5 h-1.5 rounded-full bg-success" />
           <span className="truncate max-w-[200px]">
             {statusFeedback || `Selected: ${activeZoneLabel}`}
           </span>
@@ -1389,9 +1389,9 @@ export function CanvasStage({
       </div>
 
       {/* Row 2: Simple, Labeled 6-Mode CorelDRAW Toolbar (Select | Hand | Nodes | Draw | Cut | Join) */}
-      <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between bg-[#FAFBFD] shrink-0 relative z-20">
+      <div className="px-4 py-2 border-b border-line flex items-center justify-between bg-surface shrink-0 relative z-20">
         {/* Left: 6 Clear Labeled Tools */}
-        <div className="flex items-center gap-1 bg-white border border-gray-200/80 rounded-xl p-1 shadow-2xs">
+        <div className="flex items-center gap-1 bg-white border border-line/80 rounded-xl p-1 shadow-2xs">
           <button
             type="button"
             onClick={() => {
@@ -1400,8 +1400,8 @@ export function CanvasStage({
             }}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
               isSelectMode
-                ? "bg-[#0E6E55] text-white font-bold shadow-2xs"
-                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                ? "bg-brand text-white font-bold shadow-2xs"
+                : "text-ink-2 hover:bg-surface hover:text-ink"
             }`}
           >
             <MousePointer className="w-3.5 h-3.5" />
@@ -1418,8 +1418,8 @@ export function CanvasStage({
             }}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
               activeTool === "pan" || isSpacePanning
-                ? "bg-[#0E6E55] text-white font-bold shadow-2xs"
-                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                ? "bg-brand text-white font-bold shadow-2xs"
+                : "text-ink-2 hover:bg-surface hover:text-ink"
             }`}
             title="Hand Pan Tool (Or hold Spacebar) — Drag to move up & down through the zoomed workspace"
           >
@@ -1444,8 +1444,8 @@ export function CanvasStage({
             }}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
               activeTool === "nodes"
-                ? "bg-[#0E6E55] text-white font-bold shadow-2xs"
-                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                ? "bg-brand text-white font-bold shadow-2xs"
+                : "text-ink-2 hover:bg-surface hover:text-ink"
             }`}
             title="CorelDRAW Shape Tool (Node & Curve Editor + Human Pattern Fit Nodes)"
           >
@@ -1463,8 +1463,8 @@ export function CanvasStage({
             }}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
               activeTool === "draw"
-                ? "bg-[#0E6E55] text-white font-bold shadow-2xs"
-                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                ? "bg-brand text-white font-bold shadow-2xs"
+                : "text-ink-2 hover:bg-surface hover:text-ink"
             }`}
           >
             <PenTool className="w-3.5 h-3.5" />
@@ -1479,8 +1479,8 @@ export function CanvasStage({
             }}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
               activeTool === "cut"
-                ? "bg-[#0E6E55] text-white font-bold shadow-2xs"
-                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                ? "bg-brand text-white font-bold shadow-2xs"
+                : "text-ink-2 hover:bg-surface hover:text-ink"
             }`}
           >
             <Scissors className="w-3.5 h-3.5" />
@@ -1495,8 +1495,8 @@ export function CanvasStage({
             }}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
               activeTool === "join"
-                ? "bg-[#0E6E55] text-white font-bold shadow-2xs"
-                : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                ? "bg-brand text-white font-bold shadow-2xs"
+                : "text-ink-2 hover:bg-surface hover:text-ink"
             }`}
           >
             <Link2 className="w-3.5 h-3.5" />
@@ -1510,7 +1510,7 @@ export function CanvasStage({
             type="button"
             onClick={handleFlipActiveLayer}
             title="Flip Selected Layer"
-            className="p-1.5 rounded-lg border border-gray-200/80 bg-white text-gray-600 hover:text-gray-900 transition"
+            className="p-1.5 rounded-lg border border-line/80 bg-white text-ink-2 hover:text-ink transition"
           >
             <FlipHorizontal className="w-3.5 h-3.5" />
           </button>
@@ -1523,8 +1523,8 @@ export function CanvasStage({
             title="Toggle Grid"
             className={`p-1.5 rounded-lg border transition ${
               showGrid
-                ? "border-[#0E6E55]/30 bg-[#ECFDF5] text-[#0E6E55]"
-                : "border-gray-200/80 bg-white text-gray-600"
+                ? "border-brand/30 bg-brand-soft text-brand"
+                : "border-line/80 bg-white text-ink-2"
             }`}
           >
             <Grid className="w-3.5 h-3.5" />
@@ -1535,8 +1535,8 @@ export function CanvasStage({
             title="Layers"
             className={`p-1.5 rounded-lg border transition ${
               showLayersPopover
-                ? "border-[#0E6E55] bg-[#0E6E55] text-white"
-                : "border-gray-200/80 bg-white text-gray-600"
+                ? "border-brand bg-brand text-white"
+                : "border-line/80 bg-white text-ink-2"
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
@@ -1546,7 +1546,7 @@ export function CanvasStage({
             onClick={onUndo}
             disabled={!canUndo}
             title="Undo (Ctrl+Z)"
-            className="p-1.5 rounded-lg border border-gray-200/80 bg-white text-gray-600 hover:text-gray-900 disabled:opacity-30 transition"
+            className="p-1.5 rounded-lg border border-line/80 bg-white text-ink-2 hover:text-ink disabled:opacity-30 transition"
           >
             <Undo2 className="w-3.5 h-3.5" />
           </button>
@@ -1555,7 +1555,7 @@ export function CanvasStage({
             onClick={onRedo}
             disabled={!canRedo}
             title="Redo (Ctrl+Y)"
-            className="p-1.5 rounded-lg border border-gray-200/80 bg-white text-gray-600 hover:text-gray-900 disabled:opacity-30 transition"
+            className="p-1.5 rounded-lg border border-line/80 bg-white text-ink-2 hover:text-ink disabled:opacity-30 transition"
           >
             <Redo2 className="w-3.5 h-3.5" />
           </button>
@@ -1563,9 +1563,9 @@ export function CanvasStage({
 
         {/* Floating Canvas Layers Manager Popover */}
         {showLayersPopover && (
-          <div className="absolute right-4 top-12 w-64 bg-white rounded-xl border border-gray-200 shadow-xl p-3 z-40 space-y-2.5">
-            <div className="flex items-center justify-between border-b border-gray-100 pb-2">
-              <span className="text-xs font-bold text-gray-900">
+          <div className="absolute right-4 top-12 w-64 bg-white rounded-xl border border-line shadow-xl p-3 z-40 space-y-2.5">
+            <div className="flex items-center justify-between border-b border-line pb-2">
+              <span className="text-xs font-bold text-ink">
                 Layers ({activeView})
               </span>
               <div className="flex items-center gap-1">
@@ -1573,7 +1573,7 @@ export function CanvasStage({
                   <button
                     type="button"
                     onClick={onAddQuickText}
-                    className="text-[10px] font-bold bg-[#ECFDF5] text-[#0E6E55] px-2 py-0.5 rounded-md hover:bg-emerald-100 transition"
+                    className="text-[10px] font-bold bg-brand-soft text-brand px-2 py-0.5 rounded-md hover:bg-brand-soft-hover transition"
                   >
                     + Text
                   </button>
@@ -1582,7 +1582,7 @@ export function CanvasStage({
                   <button
                     type="button"
                     onClick={onAddQuickEmblem}
-                    className="text-[10px] font-bold bg-[#ECFDF5] text-[#0E6E55] px-2 py-0.5 rounded-md hover:bg-emerald-100 transition"
+                    className="text-[10px] font-bold bg-brand-soft text-brand px-2 py-0.5 rounded-md hover:bg-brand-soft-hover transition"
                   >
                     + Logo
                   </button>
@@ -1602,8 +1602,8 @@ export function CanvasStage({
                     }}
                     className={`flex items-center justify-between p-1.5 rounded-lg text-[11px] cursor-pointer transition ${
                       isSel
-                        ? "bg-[#ECFDF5] text-[#0E6E55] font-bold border border-emerald-200"
-                        : "hover:bg-gray-50 text-gray-700"
+                        ? "bg-brand-soft text-brand font-bold border border-brand/20"
+                        : "hover:bg-surface text-ink-2"
                     }`}
                   >
                     <span className="truncate max-w-[110px]">
@@ -1618,14 +1618,14 @@ export function CanvasStage({
                           <button
                             type="button"
                             onClick={() => onReorderLayer(layer.id, "up")}
-                            className="p-0.5 text-gray-400 hover:text-gray-700"
+                            className="p-0.5 text-muted hover:text-ink-2"
                           >
                             <ArrowUp className="w-3 h-3" />
                           </button>
                           <button
                             type="button"
                             onClick={() => onReorderLayer(layer.id, "down")}
-                            className="p-0.5 text-gray-400 hover:text-gray-700"
+                            className="p-0.5 text-muted hover:text-ink-2"
                           >
                             <ArrowDown className="w-3 h-3" />
                           </button>
@@ -1635,7 +1635,7 @@ export function CanvasStage({
                         <button
                           type="button"
                           onClick={() => onDuplicateLayer(layer.id)}
-                          className="p-0.5 text-gray-400 hover:text-[#0E6E55]"
+                          className="p-0.5 text-muted hover:text-brand"
                         >
                           <Copy className="w-3 h-3" />
                         </button>
@@ -1644,10 +1644,10 @@ export function CanvasStage({
                         <button
                           type="button"
                           onClick={() => onToggleLayerLock(layer.id)}
-                          className="p-0.5 text-gray-400 hover:text-amber-600"
+                          className="p-0.5 text-muted hover:text-warning"
                         >
                           {layer.locked ? (
-                            <Lock className="w-3 h-3 text-amber-600" />
+                            <Lock className="w-3 h-3 text-warning" />
                           ) : (
                             <Unlock className="w-3 h-3" />
                           )}
@@ -1657,12 +1657,12 @@ export function CanvasStage({
                         <button
                           type="button"
                           onClick={() => onToggleLayerVisibility(layer.id)}
-                          className="p-0.5 text-gray-400 hover:text-gray-700"
+                          className="p-0.5 text-muted hover:text-ink-2"
                         >
                           {layer.visible ? (
                             <Eye className="w-3 h-3" />
                           ) : (
-                            <EyeOff className="w-3 h-3 text-gray-300" />
+                            <EyeOff className="w-3 h-3 text-line-strong" />
                           )}
                         </button>
                       )}
@@ -1670,7 +1670,7 @@ export function CanvasStage({
                         <button
                           type="button"
                           onClick={() => onRemoveLayer(layer.id)}
-                          className="p-0.5 text-gray-400 hover:text-red-500"
+                          className="p-0.5 text-muted hover:text-red-500"
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>
@@ -1700,21 +1700,21 @@ export function CanvasStage({
             : ""
         } ${
           showGrid
-            ? "bg-[#FAFBFD] bg-[linear-gradient(to_right,#eef2f6_1px,transparent_1px),linear-gradient(to_bottom,#eef2f6_1px,transparent_1px)] bg-[size:28px_28px]"
-            : "bg-[#FAFBFD]"
+            ? "bg-surface bg-[linear-gradient(to_right,#eef2f6_1px,transparent_1px),linear-gradient(to_bottom,#eef2f6_1px,transparent_1px)] bg-[size:28px_28px]"
+            : "bg-surface"
         }`}
       >
         {/* Top Stage Bar: Front/Back + Human Pattern Guide + Wireframe + Context Property Bar */}
         <div className="z-20 flex flex-col items-center gap-1.5 w-full">
           <div className="flex items-center flex-wrap justify-center gap-1.5">
-            <div className="flex items-center bg-white p-0.5 rounded-lg border border-gray-200 shadow-2xs">
+            <div className="flex items-center bg-white p-0.5 rounded-lg border border-line shadow-2xs">
               <button
                 type="button"
                 onClick={() => onToggleView("front")}
                 className={`px-3.5 py-1 rounded-md text-[11px] font-bold transition ${
                   activeView === "front"
-                    ? "bg-[#ECFDF5] text-[#0E6E55] border border-[#10B981]/30"
-                    : "text-gray-500 hover:text-gray-900"
+                    ? "bg-brand-soft text-brand border border-success/30"
+                    : "text-muted hover:text-ink"
                 }`}
               >
                 Front
@@ -1724,8 +1724,8 @@ export function CanvasStage({
                 onClick={() => onToggleView("back")}
                 className={`px-3.5 py-1 rounded-md text-[11px] font-semibold transition ${
                   activeView === "back"
-                    ? "bg-[#ECFDF5] text-[#0E6E55] border border-[#10B981]/30 font-bold"
-                    : "text-gray-500 hover:text-gray-900"
+                    ? "bg-brand-soft text-brand border border-success/30 font-bold"
+                    : "text-muted hover:text-ink"
                 }`}
               >
                 Back
@@ -1745,8 +1745,8 @@ export function CanvasStage({
                 }}
                 className={`px-2.5 py-1 rounded-lg border text-[10px] font-bold transition shadow-2xs ${
                   showPatternGuide
-                    ? "bg-[#ECFDF5] text-[#0E6E55] border-[#10B981]/40"
-                    : "bg-white text-gray-600 border-gray-200 hover:text-gray-900"
+                    ? "bg-brand-soft text-brand border-success/40"
+                    : "bg-white text-ink-2 border-line hover:text-ink"
                 }`}
                 title={
                   isBottom
@@ -1777,8 +1777,8 @@ export function CanvasStage({
                 }}
                 className={`px-2.5 py-1 rounded-lg border text-[10px] font-bold transition shadow-2xs ${
                   isWireframe
-                    ? "bg-[#0284c7] text-white border-[#0284c7]"
-                    : "bg-white text-gray-600 border-gray-200 hover:text-gray-900"
+                    ? "bg-info text-white border-info"
+                    : "bg-white text-ink-2 border-line hover:text-ink"
                 }`}
                 title="Toggle CorelDRAW Wireframe Vector Skeleton View"
               >
@@ -1789,7 +1789,7 @@ export function CanvasStage({
 
           {/* CorelDRAW Context Property Bar when Pick/Select Mode is Active */}
           {isSelectMode && selectedZoneId && (
-            <div className="flex items-center flex-wrap justify-center gap-1.5 bg-white/95 backdrop-blur-xs border border-gray-200/90 rounded-xl px-2.5 py-1 shadow-xs text-[10px]">
+            <div className="flex items-center flex-wrap justify-center gap-1.5 bg-white/95 backdrop-blur-xs border border-line/90 rounded-xl px-2.5 py-1 shadow-xs text-[10px]">
               {/* Piece Selector Dropdown */}
               <select
                 value={selectedZoneId}
@@ -1797,7 +1797,7 @@ export function CanvasStage({
                   setSelectionTarget("piece");
                   if (onSelectZone) onSelectZone(e.target.value);
                 }}
-                className="bg-[#ECFDF5] text-[#0E6E55] font-bold rounded-md px-2 py-0.5 border border-emerald-200 focus:outline-none cursor-pointer"
+                className="bg-brand-soft text-brand font-bold rounded-md px-2 py-0.5 border border-brand/20 focus:outline-none cursor-pointer"
                 title="Select separated piece to color or resize"
               >
                 {zones.map((z) => (
@@ -1808,8 +1808,8 @@ export function CanvasStage({
               </select>
 
               {/* Width Stretch (scaleX) */}
-              <div className="flex items-center gap-0.5 bg-gray-50 border border-gray-200 rounded-md px-1.5 py-0.5">
-                <span className="text-gray-400 font-bold">W:</span>
+              <div className="flex items-center gap-0.5 bg-surface border border-line rounded-md px-1.5 py-0.5">
+                <span className="text-muted font-bold">W:</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -1819,12 +1819,12 @@ export function CanvasStage({
                       commitHistory: true,
                     });
                   }}
-                  className="px-1 font-bold text-gray-600 hover:text-[#0E6E55]"
+                  className="px-1 font-bold text-ink-2 hover:text-brand"
                   title="Narrow Piece Width (-8%)"
                 >
                   -
                 </button>
-                <span className="font-bold text-gray-800 min-w-[30px] text-center">
+                <span className="font-bold text-ink min-w-[30px] text-center">
                   {pieceScaleW}%
                 </span>
                 <button
@@ -1836,7 +1836,7 @@ export function CanvasStage({
                       commitHistory: true,
                     });
                   }}
-                  className="px-1 font-bold text-gray-600 hover:text-[#0E6E55]"
+                  className="px-1 font-bold text-ink-2 hover:text-brand"
                   title="Widen Piece Width (+8%)"
                 >
                   +
@@ -1844,8 +1844,8 @@ export function CanvasStage({
               </div>
 
               {/* Height Stretch (scaleY) */}
-              <div className="flex items-center gap-0.5 bg-gray-50 border border-gray-200 rounded-md px-1.5 py-0.5">
-                <span className="text-gray-400 font-bold">H:</span>
+              <div className="flex items-center gap-0.5 bg-surface border border-line rounded-md px-1.5 py-0.5">
+                <span className="text-muted font-bold">H:</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -1855,12 +1855,12 @@ export function CanvasStage({
                       commitHistory: true,
                     });
                   }}
-                  className="px-1 font-bold text-gray-600 hover:text-[#0E6E55]"
+                  className="px-1 font-bold text-ink-2 hover:text-brand"
                   title="Shorten Piece Height (-8%)"
                 >
                   -
                 </button>
-                <span className="font-bold text-gray-800 min-w-[30px] text-center">
+                <span className="font-bold text-ink min-w-[30px] text-center">
                   {pieceScaleH}%
                 </span>
                 <button
@@ -1872,7 +1872,7 @@ export function CanvasStage({
                       commitHistory: true,
                     });
                   }}
-                  className="px-1 font-bold text-gray-600 hover:text-[#0E6E55]"
+                  className="px-1 font-bold text-ink-2 hover:text-brand"
                   title="Lengthen Piece Height (+8%)"
                 >
                   +
@@ -1880,7 +1880,7 @@ export function CanvasStage({
               </div>
 
               {/* Rotation Stepper */}
-              <div className="flex items-center gap-0.5 bg-gray-50 border border-gray-200 rounded-md px-1.5 py-0.5">
+              <div className="flex items-center gap-0.5 bg-surface border border-line rounded-md px-1.5 py-0.5">
                 <button
                   type="button"
                   onClick={() => {
@@ -1890,12 +1890,12 @@ export function CanvasStage({
                       commitHistory: true,
                     });
                   }}
-                  className="px-1 font-bold text-gray-600 hover:text-[#0E6E55]"
+                  className="px-1 font-bold text-ink-2 hover:text-brand"
                   title="Rotate Piece -10°"
                 >
                   ↺
                 </button>
-                <span className="font-bold text-gray-800 min-w-[24px] text-center">
+                <span className="font-bold text-ink min-w-[24px] text-center">
                   {pieceAngle}°
                 </span>
                 <button
@@ -1907,7 +1907,7 @@ export function CanvasStage({
                       commitHistory: true,
                     });
                   }}
-                  className="px-1 font-bold text-gray-600 hover:text-[#0E6E55]"
+                  className="px-1 font-bold text-ink-2 hover:text-brand"
                   title="Rotate Piece +10°"
                 >
                   ↻
@@ -1926,8 +1926,8 @@ export function CanvasStage({
                 }}
                 className={`px-2 py-0.5 rounded-md font-bold transition ${
                   activePieceTransform.contourOffset
-                    ? "bg-[#0284c7] text-white"
-                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                    ? "bg-info text-white"
+                    : "bg-surface-2 text-ink-2 hover:bg-line"
                 }`}
                 title="Toggle CorelDRAW Parallel Seam Allowance Contour"
               >
@@ -1942,7 +1942,7 @@ export function CanvasStage({
                     setSelectionTarget("layer");
                     setActiveTool("nodes");
                   }}
-                  className="px-2 py-0.5 rounded-md bg-[#0E6E55] text-white font-bold transition"
+                  className="px-2 py-0.5 rounded-md bg-brand text-white font-bold transition"
                 >
                   Edit Shape Nodes
                 </button>
@@ -1958,7 +1958,7 @@ export function CanvasStage({
                   });
                   flashFeedback(`Reset "${activeZoneLabel}" to 100%`);
                 }}
-                className="px-2 py-0.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold transition"
+                className="px-2 py-0.5 rounded-md bg-surface-2 hover:bg-line text-ink-2 font-bold transition"
                 title="Reset piece size, position & rotation"
               >
                 Reset
@@ -1968,8 +1968,8 @@ export function CanvasStage({
 
           {/* Hand-Drag Pan Tool Helper Bar (Move Up/Down through zoomed workspace) */}
           {(activeTool === "pan" || isSpacePanning) && (
-            <div className="flex items-center flex-wrap justify-center gap-1.5 bg-white/95 backdrop-blur-xs border border-emerald-200 rounded-xl px-3 py-1.5 shadow-sm text-[10px]">
-              <span className="font-bold text-[#0E6E55] flex items-center gap-1">
+            <div className="flex items-center flex-wrap justify-center gap-1.5 bg-white/95 backdrop-blur-xs border border-brand/20 rounded-xl px-3 py-1.5 shadow-sm text-[10px]">
+              <span className="font-bold text-brand flex items-center gap-1">
                 <Hand className="w-3 h-3" />
                 <span>Drag anywhere to pan workspace:</span>
               </span>
@@ -1980,7 +1980,7 @@ export function CanvasStage({
                   setPan({ x: 0, y: 170 });
                   flashFeedback("Moved up to Collar & Shoulder view");
                 }}
-                className="px-2 py-0.5 rounded-md bg-gray-100 hover:bg-[#ECFDF5] text-gray-700 hover:text-[#0E6E55] font-bold transition"
+                className="px-2 py-0.5 rounded-md bg-surface-2 hover:bg-brand-soft text-ink-2 hover:text-brand font-bold transition"
               >
                 ↑ Top (Collar)
               </button>
@@ -1990,7 +1990,7 @@ export function CanvasStage({
                   setPan({ x: 0, y: 0 });
                   flashFeedback("Centered on Torso");
                 }}
-                className="px-2 py-0.5 rounded-md bg-gray-100 hover:bg-[#ECFDF5] text-gray-700 hover:text-[#0E6E55] font-bold transition"
+                className="px-2 py-0.5 rounded-md bg-surface-2 hover:bg-brand-soft text-ink-2 hover:text-brand font-bold transition"
               >
                 ◎ Center (Torso)
               </button>
@@ -2001,7 +2001,7 @@ export function CanvasStage({
                   setPan({ x: 0, y: -170 });
                   flashFeedback("Moved down to Waist & Hem view");
                 }}
-                className="px-2 py-0.5 rounded-md bg-gray-100 hover:bg-[#ECFDF5] text-gray-700 hover:text-[#0E6E55] font-bold transition"
+                className="px-2 py-0.5 rounded-md bg-surface-2 hover:bg-brand-soft text-ink-2 hover:text-brand font-bold transition"
               >
                 ↓ Bottom (Hem)
               </button>
@@ -2017,16 +2017,16 @@ export function CanvasStage({
 
           {/* CorelDRAW Shape Tool (Nodes & Curves Editor + Human Fit Nodes) Property Bar */}
           {activeTool === "nodes" && (
-            <div className="flex flex-col items-center gap-1 bg-white/95 backdrop-blur-xs border border-emerald-200 rounded-xl px-2.5 py-1.5 shadow-sm text-[10px]">
+            <div className="flex flex-col items-center gap-1 bg-white/95 backdrop-blur-xs border border-brand/20 rounded-xl px-2.5 py-1.5 shadow-sm text-[10px]">
               {activeLayer?.kind === "path" && Array.isArray(activeLayer.nodes) ? (
                 <div className="flex items-center flex-wrap justify-center gap-1.5">
-                  <span className="font-extrabold text-[#0E6E55] bg-[#ECFDF5] px-2 py-0.5 rounded border border-emerald-200">
+                  <span className="font-semibold text-brand bg-brand-soft px-2 py-0.5 rounded border border-brand/20">
                     Shape: {activeLayer.name} ({activeLayer.nodes.length} Nodes)
                   </span>
                   <button
                     type="button"
                     onClick={handleAddShapeNode}
-                    className="px-2 py-0.5 rounded-md bg-[#ECFDF5] text-[#0E6E55] hover:bg-emerald-100 font-bold border border-emerald-200 transition"
+                    className="px-2 py-0.5 rounded-md bg-brand-soft text-brand hover:bg-brand-soft-hover font-bold border border-brand/20 transition"
                     title="Insert a new node on the selected segment"
                   >
                     + Add Node
@@ -2034,7 +2034,7 @@ export function CanvasStage({
                   <button
                     type="button"
                     onClick={handleDeleteShapeNode}
-                    className="px-2 py-0.5 rounded-md bg-red-50 text-red-600 hover:bg-red-100 font-bold border border-red-200 transition"
+                    className="px-2 py-0.5 rounded-md bg-danger-soft text-danger hover:bg-red-100 font-bold border border-danger/30 transition"
                     title="Delete the selected square node"
                   >
                     - Delete Node
@@ -2042,7 +2042,7 @@ export function CanvasStage({
                   <button
                     type="button"
                     onClick={handleStraightenShapeCurves}
-                    className="px-2 py-0.5 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200 font-bold transition"
+                    className="px-2 py-0.5 rounded-md bg-surface-2 text-ink-2 hover:bg-line font-bold transition"
                     title="Convert curved segments back to straight lines"
                   >
                     Straighten
@@ -2057,8 +2057,8 @@ export function CanvasStage({
                     }
                     className={`px-2 py-0.5 rounded-md font-bold transition ${
                       activeLayer.clipToBody !== false
-                        ? "bg-[#0284c7] text-white"
-                        : "bg-gray-100 text-gray-600"
+                        ? "bg-info text-white"
+                        : "bg-surface-2 text-ink-2"
                     }`}
                     title="CorelDRAW PowerClip: Automatically clip shape to the human clothing silhouette"
                   >
@@ -2074,8 +2074,8 @@ export function CanvasStage({
                     }
                     className={`px-2 py-0.5 rounded-md font-bold transition ${
                       activeLayer.symmetry
-                        ? "bg-[#0E6E55] text-white"
-                        : "bg-gray-100 text-gray-600"
+                        ? "bg-brand text-white"
+                        : "bg-surface-2 text-ink-2"
                     }`}
                     title="Mirror shape across Human Center Grainline (X=300)"
                   >
@@ -2091,7 +2091,7 @@ export function CanvasStage({
                 </div>
               ) : (
                 <div className="flex items-center flex-wrap justify-center gap-1">
-                  <span className="font-bold text-gray-600 mr-1">
+                  <span className="font-bold text-ink-2 mr-1">
                     {isBottom
                       ? "Drag ◆ Green Fit Nodes on trousers OR insert a Leg Pattern Template:"
                       : "Drag ◆ Green Fit Nodes on garment OR insert a Clothing Shape:"}
@@ -2101,7 +2101,7 @@ export function CanvasStage({
                       key={preset.id}
                       type="button"
                       onClick={() => handleInsertClothingShape(preset)}
-                      className="px-2 py-0.5 rounded-md bg-[#ECFDF5] hover:bg-emerald-100 text-[#0E6E55] border border-emerald-200 font-bold transition"
+                      className="px-2 py-0.5 rounded-md bg-brand-soft hover:bg-brand-soft-hover text-brand border border-brand/20 font-bold transition"
                     >
                       + {preset.label}
                     </button>
@@ -2113,7 +2113,7 @@ export function CanvasStage({
 
           {/* CorelDRAW Vector Shape Drawing & 1-Click Clothing Pattern Blocks when Draw is active */}
           {activeTool === "draw" && (
-            <div className="flex flex-col items-center gap-1 bg-white/95 backdrop-blur-xs border border-emerald-200 rounded-xl px-3 py-1.5 shadow-sm text-[10px]">
+            <div className="flex flex-col items-center gap-1 bg-white/95 backdrop-blur-xs border border-brand/20 rounded-xl px-3 py-1.5 shadow-sm text-[10px]">
               <div className="flex items-center flex-wrap justify-center gap-2">
                 <div className="flex items-center gap-1">
                   {["#10B981", "#0E6E55", "#FFFFFF", "#111827", "#F59E0B", "#EF4444", "#0284C7"].map(
@@ -2124,8 +2124,8 @@ export function CanvasStage({
                         onClick={() => setSketchColor(c)}
                         className={`w-4 h-4 rounded-full border transition ${
                           sketchColor === c
-                            ? "ring-2 ring-[#0E6E55] scale-110"
-                            : "border-gray-300"
+                            ? "ring-2 ring-brand scale-110"
+                            : "border-line-strong"
                         }`}
                         style={{ backgroundColor: c }}
                       />
@@ -2137,8 +2137,8 @@ export function CanvasStage({
                   onClick={() => setSketchClosedPanel((p) => !p)}
                   className={`px-2 py-0.5 rounded-md font-bold transition ${
                     sketchClosedPanel
-                      ? "bg-[#0E6E55] text-white"
-                      : "bg-gray-100 text-gray-700"
+                      ? "bg-brand text-white"
+                      : "bg-surface-2 text-ink-2"
                   }`}
                 >
                   {sketchClosedPanel ? "Filled Shape" : "Stitch Line"}
@@ -2148,8 +2148,8 @@ export function CanvasStage({
                   onClick={() => setSketchClipToBody((c) => !c)}
                   className={`px-2 py-0.5 rounded-md font-bold transition ${
                     sketchClipToBody
-                      ? "bg-[#0284c7] text-white"
-                      : "bg-gray-100 text-gray-600"
+                      ? "bg-info text-white"
+                      : "bg-surface-2 text-ink-2"
                   }`}
                   title="CorelDRAW PowerClip: Fit drawn shapes cleanly inside the human garment silhouette"
                 >
@@ -2160,8 +2160,8 @@ export function CanvasStage({
                   onClick={() => setSketchSymmetry((s) => !s)}
                   className={`px-2 py-0.5 rounded-md font-bold transition ${
                     sketchSymmetry
-                      ? "bg-[#ECFDF5] text-[#0E6E55] border border-emerald-300"
-                      : "bg-gray-100 text-gray-500"
+                      ? "bg-brand-soft text-brand border border-brand/30"
+                      : "bg-surface-2 text-muted"
                   }`}
                 >
                   Mirror
@@ -2176,8 +2176,8 @@ export function CanvasStage({
               </div>
 
               {/* Row of 1-Click Editable Clothing Shapes fitted to the Human Pattern Guide / Leg Frame */}
-              <div className="flex items-center flex-wrap justify-center gap-1 pt-0.5 border-t border-gray-100 w-full">
-                <span className="font-bold text-gray-500 mr-0.5">
+              <div className="flex items-center flex-wrap justify-center gap-1 pt-0.5 border-t border-line w-full">
+                <span className="font-bold text-muted mr-0.5">
                   {isBottom ? "Leg Templates:" : "Pattern Shapes:"}
                 </span>
                 {activePatternShapes.map((preset) => (
@@ -2185,7 +2185,7 @@ export function CanvasStage({
                     key={preset.id}
                     type="button"
                     onClick={() => handleInsertClothingShape(preset)}
-                    className="px-1.5 py-0.5 rounded bg-[#F8FAFC] hover:bg-[#ECFDF5] text-gray-700 hover:text-[#0E6E55] border border-gray-200 hover:border-emerald-300 font-semibold transition"
+                    className="px-1.5 py-0.5 rounded bg-surface hover:bg-brand-soft text-ink-2 hover:text-brand border border-line hover:border-brand/30 font-semibold transition"
                     title={`Insert editable "${preset.label}" fitted to the pattern frame`}
                   >
                     + {preset.label}
@@ -2196,8 +2196,8 @@ export function CanvasStage({
           )}
 
           {activeTool === "cut" && (
-            <div className="flex items-center gap-1.5 bg-white border border-emerald-200 rounded-xl px-3 py-1.5 shadow-sm text-[11px]">
-              <span className="font-bold text-gray-700">Quick Cut:</span>
+            <div className="flex items-center gap-1.5 bg-white border border-brand/20 rounded-xl px-3 py-1.5 shadow-sm text-[11px]">
+              <span className="font-bold text-ink-2">Quick Cut:</span>
               {[
                 { id: "center-split", label: "Left / Right" },
                 { id: "colorblock-h", label: "Top / Bottom" },
@@ -2212,8 +2212,8 @@ export function CanvasStage({
                   }
                   className={`px-2 py-0.5 rounded-md font-semibold transition ${
                     activeCutPreset === item.id
-                      ? "bg-[#0E6E55] text-white font-bold"
-                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      ? "bg-brand text-white font-bold"
+                      : "bg-surface-2 text-ink-2 hover:bg-line"
                   }`}
                 >
                   {item.label}
@@ -2230,7 +2230,7 @@ export function CanvasStage({
           )}
 
           {activeTool === "join" && (
-            <div className="flex items-center gap-2 bg-white border border-emerald-200 rounded-xl px-3 py-1.5 shadow-sm text-[11px]">
+            <div className="flex items-center gap-2 bg-white border border-brand/20 rounded-xl px-3 py-1.5 shadow-sm text-[11px]">
               <button
                 type="button"
                 onClick={() =>
@@ -2238,8 +2238,8 @@ export function CanvasStage({
                 }
                 className={`px-2.5 py-0.5 rounded-md font-bold transition ${
                   explodeAmount > 10
-                    ? "bg-[#0284c7] text-white"
-                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    ? "bg-info text-white"
+                    : "bg-surface-2 text-ink-2 hover:bg-line"
                 }`}
               >
                 Separate Pieces
@@ -2252,8 +2252,8 @@ export function CanvasStage({
                 }}
                 className={`px-2.5 py-0.5 rounded-md font-bold transition flex items-center gap-1 ${
                   explodeAmount <= 10
-                    ? "bg-[#0E6E55] text-white"
-                    : "bg-emerald-50 text-[#0E6E55] border border-emerald-300"
+                    ? "bg-brand text-white"
+                    : "bg-brand-soft text-brand border border-brand/30"
                 }`}
               >
                 <Check className="w-3 h-3" />
@@ -2281,8 +2281,8 @@ export function CanvasStage({
             title="Front View"
             className={`w-12 h-13 rounded-xl border p-1 bg-white shadow-2xs transition flex items-center justify-center overflow-hidden ${
               activeView === "front" && zoom <= 115
-                ? "border-[#0E6E55] ring-2 ring-[#0E6E55]/25"
-                : "border-gray-200/90 opacity-75 hover:opacity-100"
+                ? "border-brand ring-2 ring-brand/25"
+                : "border-line/90 opacity-75 hover:opacity-100"
             }`}
           >
             <div
@@ -2300,8 +2300,8 @@ export function CanvasStage({
             title="Back View"
             className={`w-12 h-13 rounded-xl border p-1 bg-white shadow-2xs transition flex items-center justify-center overflow-hidden ${
               activeView === "back"
-                ? "border-[#0E6E55] ring-2 ring-[#0E6E55]/25"
-                : "border-gray-200/90 opacity-75 hover:opacity-100"
+                ? "border-brand ring-2 ring-brand/25"
+                : "border-line/90 opacity-75 hover:opacity-100"
             }`}
           >
             <div
@@ -2318,8 +2318,8 @@ export function CanvasStage({
             title="Toggle Detail Zoom"
             className={`w-12 h-13 rounded-xl border p-1 bg-white shadow-2xs transition flex items-center justify-center overflow-hidden ${
               zoom > 115
-                ? "border-[#0E6E55] ring-2 ring-[#0E6E55]/25"
-                : "border-gray-200/90 opacity-75 hover:opacity-100"
+                ? "border-brand ring-2 ring-brand/25"
+                : "border-line/90 opacity-75 hover:opacity-100"
             }`}
           >
             <div
@@ -2331,7 +2331,7 @@ export function CanvasStage({
 
         {/* CorelDRAW Docked Vertical Color Swatch Strip (Right Side of Stage) */}
         <div
-          className="absolute right-2.5 top-20 z-20 bg-white/95 backdrop-blur-xs border border-gray-200/90 rounded-xl p-1.5 shadow-sm flex flex-col items-center gap-1"
+          className="absolute right-2.5 top-20 z-20 bg-white/95 backdrop-blur-xs border border-line/90 rounded-xl p-1.5 shadow-sm flex flex-col items-center gap-1"
           title="CorelDRAW Color Palette: Left-click to color selected Piece or Shape Fill, Right-click (or toggle Line) to color Outline"
         >
           {/* Fill vs Line Stroke Toggle */}
@@ -2340,9 +2340,9 @@ export function CanvasStage({
             onClick={() =>
               setSwatchTargetMode((m) => (m === "fill" ? "outline" : "fill"))
             }
-            className={`text-[8px] font-extrabold uppercase px-1.5 py-0.5 rounded transition w-full text-center ${
+            className={`text-[8px] font-semibold uppercase px-1.5 py-0.5 rounded transition w-full text-center ${
               swatchTargetMode === "fill"
-                ? "bg-[#0E6E55] text-white"
+                ? "bg-brand text-white"
                 : "bg-gray-900 text-white"
             }`}
             title="Toggle between Fill Color and Seam/Outline Color"
@@ -2436,8 +2436,8 @@ export function CanvasStage({
                   style={{ backgroundColor: swatch }}
                   className={`w-4 h-4 rounded-xs transition-transform hover:scale-125 shrink-0 ${
                     isSelectedSwatch
-                      ? "ring-2 ring-[#0E6E55] ring-offset-1 border border-white scale-110"
-                      : "border border-gray-300"
+                      ? "ring-2 ring-brand ring-offset-1 border border-white scale-110"
+                      : "border border-line-strong"
                   }`}
                   title={`Click: Fill (${swatch}) | Right-Click: Outline Stroke`}
                 />
@@ -2448,7 +2448,7 @@ export function CanvasStage({
           {/* Custom Color Picker at bottom of CorelDRAW strip */}
           <label
             title={`Custom ${swatchTargetMode === "fill" ? "Fill" : "Outline"} Color`}
-            className="w-4 h-4 rounded-xs border border-dashed border-gray-400 flex items-center justify-center cursor-pointer hover:border-[#0E6E55] text-[9px] font-bold text-gray-500"
+            className="w-4 h-4 rounded-xs border border-dashed border-gray-400 flex items-center justify-center cursor-pointer hover:border-brand text-[9px] font-bold text-muted"
           >
             +
             <input
@@ -2615,8 +2615,8 @@ export function CanvasStage({
                           }}
                           className={`absolute -translate-x-1/2 -translate-y-1/2 w-3 h-3 border-2 pointer-events-auto cursor-move z-30 transition-transform hover:scale-125 ${
                             selectedNodeIdx === i
-                              ? "bg-[#0284c7] border-white ring-2 ring-[#0284c7] scale-115"
-                              : "bg-white border-[#0f172a]"
+                              ? "bg-info border-white ring-2 ring-info scale-115"
+                              : "bg-white border-ink"
                           }`}
                         />
 
@@ -2717,7 +2717,7 @@ export function CanvasStage({
                         left: `${(fp.x / 600) * 100}%`,
                         top: `${(fp.y / 700) * 100}%`,
                       }}
-                      className="absolute -translate-x-1/2 -translate-y-1/2 rotate-45 w-3 h-3 bg-[#10B981] border-2 border-white shadow-sm pointer-events-auto cursor-ew-resize hover:scale-130 transition-transform z-25"
+                      className="absolute -translate-x-1/2 -translate-y-1/2 rotate-45 w-3 h-3 bg-success border-2 border-white shadow-sm pointer-events-auto cursor-ew-resize hover:scale-130 transition-transform z-25"
                     />
                   ))}
               </>
@@ -2806,27 +2806,27 @@ export function CanvasStage({
 
             {/* Outer Subtle Cyan CAD Bounding Box Frame matching mockup */}
             <div className="absolute inset-3 border border-[#38bdf8]/65 pointer-events-none">
-              <div className="absolute -top-1 -left-1 w-2 h-2 bg-white border border-[#0284c7]" />
-              <div className="absolute -top-1 -right-1 w-2 h-2 bg-white border border-[#0284c7]" />
-              <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-white border border-[#0284c7]" />
-              <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-white border border-[#0284c7]" />
-              <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-white border border-[#0284c7]" />
+              <div className="absolute -top-1 -left-1 w-2 h-2 bg-white border border-info" />
+              <div className="absolute -top-1 -right-1 w-2 h-2 bg-white border border-info" />
+              <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-white border border-info" />
+              <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-white border border-info" />
+              <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-white border border-info" />
             </div>
 
             {/* CorelDRAW 8-Handle Bounding Box for Selected Separated Piece (`pieceGizmoStyle`) */}
             {pieceGizmoStyle && (
               <div
                 style={pieceGizmoStyle}
-                className="absolute border border-dashed border-[#0284c7] bg-[#38bdf8]/5 pointer-events-none rounded-xs transition-all duration-75"
+                className="absolute border border-dashed border-info bg-[#38bdf8]/5 pointer-events-none rounded-xs transition-all duration-75"
               >
                 {/* Floating Piece Badge */}
-                <div className="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap bg-[#0f172a]/90 text-white text-[8.5px] font-bold px-1.5 py-0.5 rounded shadow-xs">
+                <div className="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap bg-ink/90 text-white text-[8.5px] font-bold px-1.5 py-0.5 rounded shadow-xs">
                   {activeZoneLabel} • {pieceScaleW}%×{pieceScaleH}%
                 </div>
 
                 {/* CorelDRAW Center Pivot Crosshair (⊗) */}
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 rounded-full border border-[#0284c7] flex items-center justify-center bg-white/80">
-                  <div className="w-1 h-1 rounded-full bg-[#0284c7]" />
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 rounded-full border border-info flex items-center justify-center bg-white/80">
+                  <div className="w-1 h-1 rounded-full bg-info" />
                 </div>
 
                 {/* Top Rotation Handle */}
@@ -2836,8 +2836,8 @@ export function CanvasStage({
                   title="Drag to rotate separated piece"
                   className="absolute -top-5 left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-auto cursor-grab active:cursor-grabbing"
                 >
-                  <div className="w-3 h-3 rounded-full bg-white border-2 border-[#0284c7] shadow-xs hover:scale-125 transition-transform" />
-                  <div className="w-0.5 h-2 bg-[#0284c7]" />
+                  <div className="w-3 h-3 rounded-full bg-white border-2 border-info shadow-xs hover:scale-125 transition-transform" />
+                  <div className="w-0.5 h-2 bg-info" />
                 </div>
 
                 {/* 4 Proportional Corner Handles (nw, ne, sw, se) */}
@@ -2845,25 +2845,25 @@ export function CanvasStage({
                   data-handle="nw"
                   data-owner="piece"
                   title="Proportional Corner Resize (NW)"
-                  className="absolute -top-1.5 -left-1.5 w-2.5 h-2.5 bg-[#111827] border border-white rounded-none pointer-events-auto cursor-nwse-resize hover:scale-125 transition-transform"
+                  className="absolute -top-1.5 -left-1.5 w-2.5 h-2.5 bg-ink border border-white rounded-none pointer-events-auto cursor-nwse-resize hover:scale-125 transition-transform"
                 />
                 <div
                   data-handle="ne"
                   data-owner="piece"
                   title="Proportional Corner Resize (NE)"
-                  className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 bg-[#111827] border border-white rounded-none pointer-events-auto cursor-nesw-resize hover:scale-125 transition-transform"
+                  className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 bg-ink border border-white rounded-none pointer-events-auto cursor-nesw-resize hover:scale-125 transition-transform"
                 />
                 <div
                   data-handle="sw"
                   data-owner="piece"
                   title="Proportional Corner Resize (SW)"
-                  className="absolute -bottom-1.5 -left-1.5 w-2.5 h-2.5 bg-[#111827] border border-white rounded-none pointer-events-auto cursor-nesw-resize hover:scale-125 transition-transform"
+                  className="absolute -bottom-1.5 -left-1.5 w-2.5 h-2.5 bg-ink border border-white rounded-none pointer-events-auto cursor-nesw-resize hover:scale-125 transition-transform"
                 />
                 <div
                   data-handle="se"
                   data-owner="piece"
                   title="Proportional Corner Resize (SE)"
-                  className="absolute -bottom-1.5 -right-1.5 w-2.5 h-2.5 bg-[#111827] border border-white rounded-none pointer-events-auto cursor-nwse-resize hover:scale-125 transition-transform"
+                  className="absolute -bottom-1.5 -right-1.5 w-2.5 h-2.5 bg-ink border border-white rounded-none pointer-events-auto cursor-nwse-resize hover:scale-125 transition-transform"
                 />
 
                 {/* 4 CorelDRAW Non-Proportional Midpoint Stretch Handles (n, s, e, w) */}
@@ -2871,25 +2871,25 @@ export function CanvasStage({
                   data-handle="n"
                   data-owner="piece"
                   title="Stretch Piece Height (North)"
-                  className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-white border-2 border-[#111827] rounded-none pointer-events-auto cursor-ns-resize hover:scale-125 transition-transform"
+                  className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-white border-2 border-ink rounded-none pointer-events-auto cursor-ns-resize hover:scale-125 transition-transform"
                 />
                 <div
                   data-handle="s"
                   data-owner="piece"
                   title="Stretch Piece Height (South)"
-                  className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-white border-2 border-[#111827] rounded-none pointer-events-auto cursor-ns-resize hover:scale-125 transition-transform"
+                  className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-white border-2 border-ink rounded-none pointer-events-auto cursor-ns-resize hover:scale-125 transition-transform"
                 />
                 <div
                   data-handle="w"
                   data-owner="piece"
                   title="Stretch Piece Width (West)"
-                  className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-2.5 h-2.5 bg-white border-2 border-[#111827] rounded-none pointer-events-auto cursor-ew-resize hover:scale-125 transition-transform"
+                  className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-2.5 h-2.5 bg-white border-2 border-ink rounded-none pointer-events-auto cursor-ew-resize hover:scale-125 transition-transform"
                 />
                 <div
                   data-handle="e"
                   data-owner="piece"
                   title="Stretch Piece Width (East)"
-                  className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-2.5 h-2.5 bg-white border-2 border-[#111827] rounded-none pointer-events-auto cursor-ew-resize hover:scale-125 transition-transform"
+                  className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-2.5 h-2.5 bg-white border-2 border-ink rounded-none pointer-events-auto cursor-ew-resize hover:scale-125 transition-transform"
                 />
               </div>
             )}
@@ -2898,7 +2898,7 @@ export function CanvasStage({
             {layerGizmoStyle && (
               <div
                 style={layerGizmoStyle}
-                className="absolute border border-dashed border-[#0E6E55] bg-[#10B981]/5 pointer-events-none rounded-md"
+                className="absolute border border-dashed border-brand bg-success/5 pointer-events-none rounded-md"
               >
                 <div
                   data-handle="rotate"
@@ -2906,33 +2906,33 @@ export function CanvasStage({
                   title="Drag to rotate"
                   className="absolute -top-5 left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-auto cursor-grab active:cursor-grabbing"
                 >
-                  <div className="w-3 h-3 rounded-full bg-white border-2 border-[#0E6E55] shadow-xs hover:scale-125 transition-transform" />
-                  <div className="w-0.5 h-2 bg-[#0E6E55]" />
+                  <div className="w-3 h-3 rounded-full bg-white border-2 border-brand shadow-xs hover:scale-125 transition-transform" />
+                  <div className="w-0.5 h-2 bg-brand" />
                 </div>
 
                 <div
                   data-handle="nw"
                   data-owner="layer"
                   title="Drag corner to resize"
-                  className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0E6E55] rounded-xs pointer-events-auto cursor-nwse-resize hover:scale-125 transition-transform"
+                  className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-brand rounded-xs pointer-events-auto cursor-nwse-resize hover:scale-125 transition-transform"
                 />
                 <div
                   data-handle="ne"
                   data-owner="layer"
                   title="Drag corner to resize"
-                  className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0E6E55] rounded-xs pointer-events-auto cursor-nesw-resize hover:scale-125 transition-transform"
+                  className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-brand rounded-xs pointer-events-auto cursor-nesw-resize hover:scale-125 transition-transform"
                 />
                 <div
                   data-handle="sw"
                   data-owner="layer"
                   title="Drag corner to resize"
-                  className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0E6E55] rounded-xs pointer-events-auto cursor-nesw-resize hover:scale-125 transition-transform"
+                  className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-brand rounded-xs pointer-events-auto cursor-nesw-resize hover:scale-125 transition-transform"
                 />
                 <div
                   data-handle="se"
                   data-owner="layer"
                   title="Drag corner to resize"
-                  className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0E6E55] rounded-xs pointer-events-auto cursor-nwse-resize hover:scale-125 transition-transform"
+                  className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-brand rounded-xs pointer-events-auto cursor-nwse-resize hover:scale-125 transition-transform"
                 />
               </div>
             )}
@@ -2940,7 +2940,7 @@ export function CanvasStage({
         </div>
 
         {/* Bottom Compact Pill Control Bar with Hand Pan, Up/Down Workspace Scroll & Zoom */}
-        <div className="z-10 flex items-center gap-1.5 bg-white border border-gray-200/90 rounded-xl px-3 py-1.5 shadow-2xs text-gray-600">
+        <div className="z-10 flex items-center gap-1.5 bg-white border border-line/90 rounded-xl px-3 py-1.5 shadow-2xs text-ink-2">
           <button
             type="button"
             onClick={() => {
@@ -2954,8 +2954,8 @@ export function CanvasStage({
             title="Toggle Hand Drag Tool (Or hold Spacebar to drag workspace up & down)"
             className={`p-1 rounded-md transition ${
               activeTool === "pan" || isSpacePanning
-                ? "bg-[#0E6E55] text-white shadow-2xs"
-                : "hover:text-[#0E6E55] hover:bg-gray-50"
+                ? "bg-brand text-white shadow-2xs"
+                : "hover:text-brand hover:bg-surface"
             }`}
           >
             <Hand className="w-3.5 h-3.5" />
@@ -2964,7 +2964,7 @@ export function CanvasStage({
             type="button"
             onClick={() => handlePanVertical(65)}
             title="Move Workspace View Up (Towards Collar)"
-            className="p-1 hover:text-[#0E6E55] hover:bg-gray-50 rounded-md transition"
+            className="p-1 hover:text-brand hover:bg-surface rounded-md transition"
           >
             <ArrowUp className="w-3.5 h-3.5" />
           </button>
@@ -2972,16 +2972,16 @@ export function CanvasStage({
             type="button"
             onClick={() => handlePanVertical(-65)}
             title="Move Workspace View Down (Towards Hem)"
-            className="p-1 hover:text-[#0E6E55] hover:bg-gray-50 rounded-md transition"
+            className="p-1 hover:text-brand hover:bg-surface rounded-md transition"
           >
             <ArrowDown className="w-3.5 h-3.5" />
           </button>
-          <div className="w-px h-3.5 bg-gray-200 mx-0.5" />
+          <div className="w-px h-3.5 bg-line mx-0.5" />
           <button
             type="button"
             onClick={handleZoomIn}
             title="Zoom In (+20%)"
-            className="p-1 hover:text-[#0E6E55] hover:bg-gray-50 rounded-md transition"
+            className="p-1 hover:text-brand hover:bg-surface rounded-md transition"
           >
             <Plus className="w-3.5 h-3.5" />
           </button>
@@ -2989,7 +2989,7 @@ export function CanvasStage({
             type="button"
             onClick={handleZoomOut}
             title="Zoom Out (-20%)"
-            className="p-1 hover:text-[#0E6E55] hover:bg-gray-50 rounded-md transition"
+            className="p-1 hover:text-brand hover:bg-surface rounded-md transition"
           >
             <Minus className="w-3.5 h-3.5" />
           </button>
@@ -2998,7 +2998,7 @@ export function CanvasStage({
             onClick={onUndo}
             disabled={!canUndo}
             title="Undo (Ctrl+Z)"
-            className="p-1 hover:text-[#0E6E55] hover:bg-gray-50 rounded-md disabled:opacity-30 transition"
+            className="p-1 hover:text-brand hover:bg-surface rounded-md disabled:opacity-30 transition"
           >
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
@@ -3006,7 +3006,7 @@ export function CanvasStage({
             type="button"
             onClick={handleResetView}
             title="Click to reset zoom to 100% & center workspace"
-            className="text-[11px] font-bold text-gray-800 hover:text-[#0E6E55] px-1.5 py-0.5 rounded-md hover:bg-gray-50 transition"
+            className="text-[11px] font-bold text-ink hover:text-brand px-1.5 py-0.5 rounded-md hover:bg-surface transition"
           >
             {zoom}%
           </button>
@@ -3015,7 +3015,7 @@ export function CanvasStage({
             onClick={onRedo}
             disabled={!canRedo}
             title="Redo (Ctrl+Y)"
-            className="p-1 hover:text-[#0E6E55] hover:bg-gray-50 rounded-md disabled:opacity-30 transition"
+            className="p-1 hover:text-brand hover:bg-surface rounded-md disabled:opacity-30 transition"
           >
             <RotateCw className="w-3.5 h-3.5" />
           </button>
@@ -3023,7 +3023,7 @@ export function CanvasStage({
             type="button"
             onClick={handleResetView}
             title="Fit & Center Garment to Stage"
-            className="p-1 hover:text-[#0E6E55] hover:bg-gray-50 rounded-md transition"
+            className="p-1 hover:text-brand hover:bg-surface rounded-md transition"
           >
             <Maximize className="w-3.5 h-3.5" />
           </button>
