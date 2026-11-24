@@ -296,11 +296,7 @@ export function FashionShowroom() {
   }, []);
 
   const handleColorChange = (hex: string) => {
-    (project as any).fabric = {
-      ...project.fabric,
-      baseColor: hex,
-    };
-    garmentStore.setFabric(project.fabric.id);
+    garmentStore.setFabricColor(hex);
   };
 
   const handleAddToBag = () => {

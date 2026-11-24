@@ -256,6 +256,18 @@ export const garmentStore = {
     triggerAutosave();
   },
 
+  /** Recolours the current fabric. Material properties (and therefore the cutting plan) are unchanged. */
+  setFabricColor(hex: string) {
+    if (currentProject.fabric.baseColor.toLowerCase() === hex.toLowerCase()) return;
+    currentProject = {
+      ...currentProject,
+      fabric: { ...currentProject.fabric, baseColor: hex },
+      updatedAt: new Date().toISOString(),
+    };
+    notify();
+    triggerAutosave();
+  },
+
   updateDesignState(partialDesign: Partial<GarmentDesignState>) {
     currentProject = {
       ...currentProject,

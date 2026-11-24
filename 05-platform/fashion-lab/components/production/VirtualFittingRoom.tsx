@@ -460,13 +460,8 @@ export function VirtualFittingRoom() {
 
   // Colorway Handler
   const handleColorChange = (colorHex: string) => {
-    const updatedFabric = {
-      ...project.fabric,
-      baseColor: colorHex,
-    };
-    // Direct store update ensures sync across 2D, 3D, and Tech Pack
-    (project as any).fabric = updatedFabric;
-    garmentStore.setFabric(project.fabric.id);
+    // Goes through the store so 2D, 3D, tech pack and autosave all see the new colour.
+    garmentStore.setFabricColor(colorHex);
   };
 
   // Save Outfit Snapshot
